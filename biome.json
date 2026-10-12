@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": { "includes": ["**", "!**/.idea"] },
+  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 120 },
+  "javascript": { "formatter": { "quoteStyle": "single" } },
+  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "overrides": [
+    {
+      "includes": ["src/core/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "wxt",
+                      "wxt/**",
+                      "preact",
+                      "preact/**",
+                      "@preact/**",
+                      "../platform*",
+                      "../../platform*",
+                      "**/platform/**"
+                    ],
+                    "message": "src/core is pure TypeScript: no wxt, preact or src/platform imports (strategy §3.2)."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,493 @@
+/**
+ * E2E fixtures (strategy §7.9, §11 AM1/AM4/AM5). Every test gets a fresh, sealed, persistent
+ * Chromium profile with one unpacked artifact loaded, and the fake reset to its baseline knobs.
+ *
+ * - **Launch:** `launchPersistentContext(<fresh temp dir>)` with `sealedPlaywrightArgs(spki, dir,
+ *   {headless})` after `assertSealed()`. Headless by default (AM1, spike S8), with the emulated
+ *   owner screen; `viewport: null` always (a Playwright viewport turns popups landscape).
+ * - **Identity:** the extension service worker must appear within 10 s (a refused extension is
+ *   silent, S10); its ID must equal the key-derived ID and its manifest name the artifact's mode.
+ * - **Exposes:** `extension` (id, mode, service worker), `editor()`, `composer()`, `fake`,
+ *   `human`, `exportBytes(id)`, `handoffRecords()`, `downloadsSearch()`, `sessionRules()`,
+ *   `handoffState()`, `storedSettings()` and `clearRateLog()` (all in the service worker), and
+ *   `tripwire`.
+ * - **`clearRateLog()`** empties the rate guard's open log in storage.local. Only the specs that
+ *   need a second composer open within 60 s in one test call it (E9, E12 d/l/m, E15); E14 proves
+ *   the guard itself. It never touches the guard's code or caps.
+ * - **Auto invariants after every test:** no request to a host outside the sealed set, whether it
+ *   failed or not (§7.9 invariant 1; a test that goes outside on purpose declares it first with
+ *   `tripwire.expectOutside`, AM26); no request the extension itself made to a web host (SG11:
+ *   its service worker or its pages; E8/E9's canary writes are declared with
+ *   `tripwire.expectFromExtension`); no fake violation; no fake request with an
+ *   `Origin: chrome-extension://` header (SG11); in the mock project, no write reached the fake. A
+ *   test that provokes a violation on purpose (E11) opts out of that one check with
+ *   `invariants.allowViolations()`; `invariants.check()` runs the same checks on demand and throws
+ *   (E11's meta-test).
+ */
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { type BrowserContext, test as base, chromium, expect, type Page, type Worker } from '@playwright/test';
+import type { WxtBrowser } from 'wxt/browser';
+import type { HandoffRecord, HandoffState, Settings } from '../../src/core/handoff/state.ts';
+import type { DnrRule } from '../../src/core/ig-contract/rules.ts';
+import { extIdForMode } from '../../tools/chrome/ext-id.ts';
+import { assertSealed, readSpki, sealedPlaywrightArgs } from '../../tools/chrome/flags.ts';
+import { DEFAULT_KNOBS } from '../../tools/fake-ig/knobs.ts';
+import { type ArtifactMode, artifactMode, MANIFEST_NAMES } from './helpers/artifacts.ts';
+import { createFakeClient, type FakeClient } from './helpers/fake-client.ts';
+import { type Human, human } from './helpers/human.ts';
+
+export type { ArtifactMode };
+export { expect };
+
+/** Per-project options (playwright.config.ts). */
+export interface E2eOptions {
+  artifact: string;
+  executablePath: string | undefined;
+}
+
+/** Per-test options. */
+export interface E2eTestOptions {
+  /**
+   * Install the fake's `desktopShell` service worker before the test, as everyday browsing installs
+   * Instagram's own in the owner's profile (FID-1). On by default exactly when the baseline says the
+   * first composer load is SW-served (DEFAULT_KNOBS.sw), so a baseline update changes the E2E
+   * conditions, not only the knob.
+   */
+  preinstallFakeSw: boolean;
+}
+
+export const IG_ORIGIN = 'https://www.instagram.com';
+/** Hosts a sealed browser may reach (resolver allow-list plus the EXCLUDEs). */
+export const SEALED_HOSTS: readonly string[] = ['www.instagram.com', 'i.instagram.com', 'localhost', '127.0.0.1'];
+
+export interface Extension {
+  id: string;
+  mode: ArtifactMode;
+  /** The extension's background service worker. */
+  sw: Worker;
+  /** Lines the service worker logged, for failure attachments. */
+  logs: string[];
+}
+
+export interface DownloadItem {
+  id: number;
+  filename: string;
+  state: string;
+  bytesReceived: number;
+  totalBytes: number;
+  fileSize: number;
+  mime: string;
+}
+
+export interface Tripwire {
+  /**
+   * Undeclared requests: to a host outside SEALED_HOSTS (failed or not, ERR_NAME_NOT_RESOLVED
+   * included), or made by the extension itself (its service worker or pages) to any web URL.
+   */
+  leaks(): string[];
+  /** Every URL requested so far (any host), in order. */
+  urls(): string[];
+  /** This test requests matching URLs outside the sealed hosts on purpose (E1's probes, off-host knobs). */
+  expectOutside(pattern: string | RegExp): void;
+  /** This test makes the extension itself request matching URLs on purpose (E8/E9's canary writes). */
+  expectFromExtension(pattern: string | RegExp): void;
+}
+
+export interface Invariants {
+  /** This test provokes a fake violation on purpose (E11): skip that check from now on. */
+  allowViolations(): void;
+  /** Runs every invariant now; rejects with the list of problems (the teardown runs it too). */
+  check(): Promise<void>;
+}
+
+interface Fixtures {
+  spki: string;
+  extension: Extension;
+  /** Opens chrome-extension://<id>/editor.html#<hash> and waits until it is connected. */
+  editor: (hash?: string) => Promise<Page>;
+  /**
+   * The newest page that navigated to www.instagram.com during the test (the composer popup),
+   * waiting up to `timeout`. It may already be closed again (probe mode is quick).
+   */
+  composer: (opts?: { timeout?: number; not?: readonly Page[] }) => Promise<Page>;
+  fake: FakeClient;
+  human: Human;
+  /** An ExportRecord's bytes, read from IndexedDB in the service worker. */
+  exportBytes: (exportId: string) => Promise<Buffer>;
+  /** Every Handoff record in IndexedDB (`handoffs`), oldest first. */
+  handoffRecords: () => Promise<HandoffRecord[]>;
+  downloadsSearch: () => Promise<DownloadItem[]>;
+  sessionRules: () => Promise<DnrRule[]>;
+  /** The hand-off state the background persisted in storage.session (undefined before the first one). */
+  handoffState: () => Promise<HandoffState | undefined>;
+  /**
+   * The settings in storage.local with the kill-switch lock (`msiteLock`, AM25) merged in as
+   * `msiteLockedUntil`; undefined until the editor or the background wrote either.
+   */
+  storedSettings: () => Promise<Partial<Settings> | undefined>;
+  /** Empties the rate guard's open log (storage.local `rateLog`). See the header. */
+  clearRateLog: () => Promise<void>;
+  tripwire: Tripwire;
+  invariants: Invariants;
+}
+
+/**
+ * The extension APIs inside `sw.evaluate(fn)`. `fn` runs in the service worker, where `chrome`
+ * is a global; tests read it as `(globalThis as ExtGlobal).chrome` so no global `chrome` type
+ * leaks into the project's type check.
+ */
+export type ExtGlobal = typeof globalThis & { chrome: WxtBrowser };
+
+/** Resolves when `page` is closed (at once if it already is). */
+export function whenClosed(page: Page): Promise<void> {
+  return page.isClosed() ? Promise.resolve() : new Promise((resolve) => page.once('close', () => resolve()));
+}
+
+/**
+ * The auto invariants (§7.9): no request left the sealed hosts; no fake violation (unless
+ * allowed); no fake request or write carried `Origin: chrome-extension://…` (SG11); in mock, no
+ * write reached the fake. Throws one error listing every problem.
+ */
+export async function checkInvariants(o: {
+  fake: FakeClient;
+  tripwire: Tripwire;
+  mode: ArtifactMode;
+  violationsAllowed: boolean;
+}): Promise<void> {
+  const { fake, tripwire } = o;
+  const problems: string[] = [];
+  const leaks = tripwire.leaks();
+  if (leaks.length > 0)
+    problems.push(`undeclared requests outside the seal or from the extension: ${leaks.join(', ')}`);
+  if (!o.violationsAllowed) {
+    const violations = await fake.violations();
+    if (violations.length > 0) problems.push(`fake violations: ${JSON.stringify(violations)}`);
+  }
+  const fromExtension = (await fake.requests()).filter((r) => (r.origin ?? '').startsWith('chrome-extension://'));
+  const writes = await fake.writes();
+  const writesFromExtension = writes.filter((w) => (w.origin ?? '').startsWith('chrome-extension://'));
+  if (fromExtension.length + writesFromExtension.length > 0) {
+    const paths = [...fromExtension, ...writesFromExtension].map((r) => `${r.method} ${r.host}${r.path}`);
+    problems.push(`the extension made its own requests to Instagram hosts: ${paths.join(', ')}`);
+  }
+  if (o.mode === 'mock' && writes.length > 0) {
+    problems.push(`writes reached the fake in the mock build: ${writes.map((w) => w.path).join(', ')}`);
+  }
+  if (problems.length > 0) throw new Error(`e2e invariants failed:\n- ${problems.join('\n- ')}`);
+}
+
+/**
+ * Installs the fake's desktop-shell service worker in this profile (FID-1): sets `sw=desktopShell`,
+ * loads `/` in a normal tab until the worker is ready, closes the tab. The knob stays set.
+ */
+export async function installFakeSw(context: BrowserContext, fake: FakeClient): Promise<void> {
+  await fake.setKnobs({ sw: 'desktopShell' });
+  const visit = await context.newPage();
+  await visit.goto(`${IG_ORIGIN}/`);
+  await visit.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await visit.close();
+}
+
+export const test = base.extend<
+  Fixtures & E2eTestOptions & { _autoInvariants: undefined; _preinstalledSw: undefined },
+  E2eOptions
+>({
+  artifact: ['.output/chrome-mv3-mock', { option: true, scope: 'worker' }],
+  executablePath: [undefined, { option: true, scope: 'worker' }],
+  preinstallFakeSw: [DEFAULT_KNOBS.sw === 'desktopShell', { option: true }],
+
+  // biome-ignore lint/correctness/noEmptyPattern: Playwright fixtures take a destructured first argument
+  spki: async ({}, use) => {
+    const spki = readSpki();
+    if (!spki) throw new Error('e2e: no valid fake certificate (pnpm run fake:cert)');
+    await use(spki);
+  },
+
+  // biome-ignore lint/correctness/noEmptyPattern: Playwright fixtures take a destructured first argument
+  fake: async ({}, use) => {
+    const fake = createFakeClient();
+    await fake.reset();
+    await use(fake);
+  },
+
+  context: async ({ artifact, executablePath, headless, spki, fake }, use) => {
+    void fake; // reset before the browser starts
+    const extDir = resolve(artifact);
+    const args = sealedPlaywrightArgs(spki, extDir, { headless });
+    assertSealed(args);
+    const userDataDir = await mkdtemp(join(tmpdir(), 'instapost-e2e-'));
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      ...(executablePath ? { executablePath } : { channel: 'chromium' }),
+      headless,
+      viewport: null,
+      acceptDownloads: true,
+      args,
+    });
+    try {
+      await use(context);
+    } finally {
+      await context.close().catch(() => undefined);
+      await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  },
+
+  tripwire: async ({ context, artifact }, use) => {
+    // Who made each request: the extension's own service worker or pages, or anything else.
+    const seen: { url: string; initiator: string }[] = [];
+    context.on('request', (req) => {
+      let initiator = req.serviceWorker()?.url() ?? '';
+      if (!initiator) {
+        try {
+          initiator = req.frame().url();
+        } catch {
+          initiator = '';
+        }
+      }
+      seen.push({ url: req.url(), initiator });
+    });
+    // Our own pages only: the key-derived id (the extension fixture asserts the loaded one equals it).
+    const extId = extIdForMode(artifactMode(artifact));
+    const parse = (raw: string): URL | null => {
+      try {
+        return new URL(raw);
+      } catch {
+        return null;
+      }
+    };
+    const local = (u: URL | null): boolean =>
+      u !== null &&
+      (u.protocol === 'data:' ||
+        u.protocol === 'blob:' ||
+        u.protocol === 'about:' ||
+        (u.protocol === 'chrome-extension:' && u.host === extId));
+    const outside: (string | RegExp)[] = [];
+    const fromExtension: (string | RegExp)[] = [];
+    const matches = (list: (string | RegExp)[], url: string) =>
+      list.some((p) => (typeof p === 'string' ? url === p || url.startsWith(p) : p.test(url)));
+    await use({
+      leaks: () => {
+        const out: string[] = [];
+        for (const r of seen) {
+          const u = parse(r.url);
+          if (local(u)) continue;
+          if (!SEALED_HOSTS.includes(u?.hostname ?? '') && !matches(outside, r.url)) out.push(`outside: ${r.url}`);
+          if (r.initiator.startsWith(`chrome-extension://${extId}/`) && !matches(fromExtension, r.url)) {
+            out.push(`from the extension (${r.initiator}): ${r.url}`);
+          }
+        }
+        return out;
+      },
+      urls: () => seen.map((r) => r.url),
+      expectOutside: (p) => void outside.push(p),
+      expectFromExtension: (p) => void fromExtension.push(p),
+    });
+  },
+
+  extension: async ({ context, artifact }, use, testInfo) => {
+    const mode = artifactMode(artifact);
+    const isExt = (w: Worker) => w.url().startsWith('chrome-extension://');
+    const sw =
+      context.serviceWorkers().find(isExt) ??
+      (await context.waitForEvent('serviceworker', { predicate: isExt, timeout: 10_000 }));
+    const id = new URL(sw.url()).host;
+    const logs: string[] = [];
+    sw.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
+    expect(id, 'extension id must equal the key-derived id').toBe(extIdForMode(mode));
+    const name = await sw.evaluate(() => (globalThis as ExtGlobal).chrome.runtime.getManifest().name);
+    expect(name, 'manifest name must match the artifact mode').toBe(MANIFEST_NAMES[mode]);
+    await use({ id, mode, sw, logs });
+    if (testInfo.status !== testInfo.expectedStatus && logs.length > 0) {
+      await testInfo.attach('extension-sw.log', { body: logs.join('\n'), contentType: 'text/plain' });
+    }
+  },
+
+  editor: async ({ context, extension }, use, testInfo) => {
+    const opened: Page[] = [];
+    await use(async (hash = '') => {
+      const page = await context.newPage();
+      opened.push(page);
+      await page.goto(`chrome-extension://${extension.id}/editor.html${hash ? `#${hash.replace(/^#/, '')}` : ''}`);
+      await expect(page.locator('.conn')).toHaveText('connected');
+      return page;
+    });
+    if (testInfo.status === testInfo.expectedStatus) return;
+    for (const [i, page] of opened.entries()) {
+      if (page.isClosed()) continue;
+      const text = await page
+        .locator('.side')
+        .innerText({ timeout: 2000 })
+        .catch((err: Error) => `(unreadable: ${err.message})`);
+      await testInfo.attach(`editor-${i}-side.txt`, { body: text, contentType: 'text/plain' });
+    }
+  },
+
+  composer: async ({ context }, use) => {
+    // Event-driven: a probe-mode popup can open, navigate and close between two polls.
+    const igPages: Page[] = [];
+    const watch = (p: Page): void => {
+      const check = () => {
+        if (p.url().startsWith(`${IG_ORIGIN}/`) && !igPages.includes(p)) igPages.push(p);
+      };
+      p.on('framenavigated', (f) => {
+        if (f === p.mainFrame()) check();
+      });
+      check();
+    };
+    for (const p of context.pages()) watch(p);
+    context.on('page', watch);
+    await use(async ({ timeout = 20_000, not = [] } = {}) => {
+      const deadline = Date.now() + timeout;
+      for (;;) {
+        const hit = igPages.filter((p) => !not.includes(p)).at(-1);
+        if (hit) return hit;
+        if (Date.now() > deadline) throw new Error(`e2e: no composer page within ${timeout} ms`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    });
+  },
+
+  // biome-ignore lint/correctness/noEmptyPattern: Playwright fixtures take a destructured first argument
+  human: async ({}, use) => {
+    await use(human);
+  },
+
+  exportBytes: async ({ extension }, use) => {
+    await use(async (exportId) => {
+      const b64 = await extension.sw.evaluate(async (id) => {
+        const db = await new Promise<IDBDatabase>((ok, fail) => {
+          const req = indexedDB.open('instapost');
+          // Never create the database from here: that would skip the extension's own upgrade.
+          req.onupgradeneeded = () => req.transaction?.abort();
+          req.onsuccess = () => ok(req.result);
+          req.onerror = () => fail(req.error ?? new Error('indexedDB.open failed'));
+        });
+        try {
+          const rec = await new Promise<{ blob: Blob } | undefined>((ok, fail) => {
+            const get = db.transaction('exports').objectStore('exports').get(id);
+            get.onsuccess = () => ok(get.result as { blob: Blob } | undefined);
+            get.onerror = () => fail(get.error);
+          });
+          if (!rec) return null;
+          const u8 = new Uint8Array(await rec.blob.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+          return btoa(bin);
+        } finally {
+          db.close();
+        }
+      }, exportId);
+      if (b64 === null) throw new Error(`e2e: export ${exportId} not found in IndexedDB`);
+      return Buffer.from(b64, 'base64');
+    });
+  },
+
+  handoffRecords: async ({ extension }, use) => {
+    await use(async () => {
+      const records = await extension.sw.evaluate(async () => {
+        const db = await new Promise<IDBDatabase>((ok, fail) => {
+          const req = indexedDB.open('instapost');
+          req.onupgradeneeded = () => req.transaction?.abort();
+          req.onsuccess = () => ok(req.result);
+          req.onerror = () => fail(req.error ?? new Error('indexedDB.open failed'));
+        });
+        try {
+          return await new Promise<unknown[]>((ok, fail) => {
+            const all = db.transaction('handoffs').objectStore('handoffs').getAll();
+            all.onsuccess = () => ok(all.result);
+            all.onerror = () => fail(all.error);
+          });
+        } finally {
+          db.close();
+        }
+      });
+      return (records as HandoffRecord[]).sort((a, b) => a.startedAt - b.startedAt);
+    });
+  },
+
+  downloadsSearch: async ({ extension }, use) => {
+    await use(() =>
+      extension.sw.evaluate(async () =>
+        (await (globalThis as ExtGlobal).chrome.downloads.search({})).map((d) => ({
+          id: d.id,
+          filename: d.filename,
+          state: d.state,
+          bytesReceived: d.bytesReceived,
+          totalBytes: d.totalBytes,
+          fileSize: d.fileSize,
+          mime: d.mime,
+        })),
+      ),
+    );
+  },
+
+  sessionRules: async ({ extension }, use) => {
+    await use(
+      async () =>
+        (await extension.sw.evaluate(() =>
+          (globalThis as ExtGlobal).chrome.declarativeNetRequest.getSessionRules(),
+        )) as unknown as DnrRule[],
+    );
+  },
+
+  handoffState: async ({ extension }, use) => {
+    await use(
+      async () =>
+        (await extension.sw.evaluate(async () => {
+          const got = await (globalThis as ExtGlobal).chrome.storage.session.get('handoff');
+          return got.handoff;
+        })) as HandoffState | undefined,
+    );
+  },
+
+  storedSettings: async ({ extension }, use) => {
+    await use(
+      async () =>
+        (await extension.sw.evaluate(async () => {
+          // The kill-switch lock has its own key since AM25 (only the background writes it).
+          const got = await (globalThis as ExtGlobal).chrome.storage.local.get(['settings', 'msiteLock']);
+          const settings = got.settings as Record<string, unknown> | undefined;
+          if (settings === undefined && got.msiteLock === undefined) return undefined;
+          const lock = (got.msiteLock as number | null | undefined) ?? settings?.msiteLockedUntil ?? null;
+          return { ...settings, msiteLockedUntil: lock };
+        })) as Partial<Settings> | undefined,
+    );
+  },
+
+  clearRateLog: async ({ extension }, use) => {
+    await use(() => extension.sw.evaluate(() => (globalThis as ExtGlobal).chrome.storage.local.remove('rateLog')));
+  },
+
+  invariants: async ({ fake, tripwire, extension }, use) => {
+    let violationsAllowed = false;
+    const check = () => checkInvariants({ fake, tripwire, mode: extension.mode, violationsAllowed });
+    await use({
+      allowViolations: () => {
+        violationsAllowed = true;
+      },
+      check,
+    });
+    // Let in-flight requests settle (a NOTFOUND failure arrives within a few ms).
+    await new Promise((r) => setTimeout(r, 250));
+    await check();
+  },
+
+  _autoInvariants: [
+    async ({ invariants }, use) => {
+      void invariants;
+      await use(undefined);
+    },
+    { auto: true },
+  ],
+
+  _preinstalledSw: [
+    async ({ context, fake, preinstallFakeSw }, use) => {
+      if (preinstallFakeSw) await installFakeSw(context, fake);
+      await use(undefined);
+    },
+    { auto: true },
+  ],
+});

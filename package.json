@@ -1,0 +1,52 @@
+{
+  "name": "instapost",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22.18 <23"
+  },
+  "scripts": {
+    "postinstall": "wxt prepare",
+    "bootstrap": "node scripts/gen-keys.ts && node scripts/gen-icons.ts && node tools/fake-ig/cert.ts && node tools/chrome/install-cft.ts",
+    "fake:cert": "node tools/fake-ig/cert.ts",
+    "fake": "node tools/fake-ig/server.ts",
+    "dev": "node scripts/dev.ts",
+    "build:mock": "wxt build --mode mock",
+    "build:live": "INSTAPOST_LIVE=1 wxt build --mode live",
+    "build:all": "pnpm run build:mock && pnpm run build:live",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/core/tsconfig.json && tsc --noEmit -p tools/fake-ig/client/tsconfig.json",
+    "lint": "biome check .",
+    "test": "vitest run --project unit",
+    "test:browser": "vitest run --project browser",
+    "test:e2e": "pnpm run build:all && playwright test --project=mock --project=live",
+    "test:smoke155": "pnpm run build:all && playwright test --project=cft155-mock --project=cft155-live",
+    "check:bundle": "node scripts/check-bundle.ts",
+    "contract:check": "node tools/contract/check-ua.ts",
+    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:browser && pnpm run build:all && pnpm run check:bundle && playwright test"
+  },
+  "dependencies": {
+    "preact": "10.29.8",
+    "@preact/signals": "2.11.3",
+    "idb": "8.0.3"
+  },
+  "devDependencies": {
+    "wxt": "0.21.4",
+    "web-ext": "10.7.0",
+    "vite": "8.3.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11",
+    "@vitest/browser-playwright": "4.1.11",
+    "@playwright/test": "1.64.0",
+    "playwright": "1.64.0",
+    "@puppeteer/browsers": "3.2.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "esbuild": "0.28.2",
+    "@biomejs/biome": "2.5.14",
+    "@types/node": "22.20.4"
+  }
+}

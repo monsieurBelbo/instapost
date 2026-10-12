@@ -1,0 +1,15 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "types": ["node"]
+  },
+  "exclude": ["tools/fake-ig/client", ".output", "node_modules", ".cache", ".profiles", ".fake-ig", ".spikes"]
+}

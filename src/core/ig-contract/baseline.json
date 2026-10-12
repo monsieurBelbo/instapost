@@ -1,0 +1,15 @@
+{
+  "capturedAt": "pre-L4",
+  "chromeVersion": "155.0.8059.40",
+  "uaProfile": "android-reduced",
+  "chMode": "full",
+  "isMobileKeyFound": true,
+  "route": "unknown",
+  "storyInputBeforeTap": "unknown",
+  "accept": ["image/avif", "image/jpeg", "image/png"],
+  "untrustedInsertAccepted": "unknown",
+  "fileEvent": "unknown",
+  "swControlledAfterHardReload": false,
+  "firstLoadServedBySw": "unknown",
+  "geometry": { "model": "viewportDpr", "insets": [0, 0], "saveExposed": "unknown" }
+}

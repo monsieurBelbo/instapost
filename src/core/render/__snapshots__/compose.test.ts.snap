@@ -1,0 +1,122 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`U5 compose > display-list snapshot (preview) 1`] = `
+[
+  {
+    "color": "#101010",
+    "op": "fillRect",
+    "rect": {
+      "h": 1920,
+      "w": 1080,
+      "x": 0,
+      "y": 0,
+    },
+  },
+  {
+    "assetId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "layerId": "lyr_image",
+    "matrix": [
+      0.64,
+      0,
+      0,
+      0.64,
+      -740,
+      0,
+    ],
+    "op": "image",
+    "srcSize": {
+      "h": 3000,
+      "w": 4000,
+    },
+  },
+  {
+    "align": "center",
+    "boxColor": "#e4405f",
+    "color": "#ffffff",
+    "font": {
+      "fontId": "instrument-sans",
+      "letterSpacingPx": 0,
+      "sizePx": 64,
+    },
+    "layerId": "lyr_text",
+    "lines": [
+      {
+        "baseline": 57.6,
+        "box": {
+          "h": 76.8,
+          "w": 352,
+          "x": 80,
+          "y": 0,
+        },
+        "text": "Hola mundo",
+        "width": 320,
+        "x": 96,
+      },
+      {
+        "baseline": 134.4,
+        "box": {
+          "h": 76.8,
+          "w": 512,
+          "x": 0,
+          "y": 76.8,
+        },
+        "text": "desde instapost",
+        "width": 480,
+        "x": 16,
+      },
+    ],
+    "matrix": [
+      1.2469550628247803,
+      -0.08719559218015663,
+      0.08719559218015663,
+      1.2469550628247803,
+      214.0828824374202,
+      1326.555922773177,
+    ],
+    "op": "text",
+    "style": "highlight",
+  },
+  {
+    "label": "Music sticker",
+    "layerId": "lyr_music",
+    "op": "placeholder",
+    "purpose": "music",
+    "rect": {
+      "h": 140,
+      "w": 500,
+      "x": 290,
+      "y": 300,
+    },
+  },
+  {
+    "kind": "safe",
+    "op": "guide",
+    "rects": [
+      {
+        "h": 270,
+        "w": 1080,
+        "x": 0,
+        "y": 0,
+      },
+      {
+        "h": 384,
+        "w": 1080,
+        "x": 0,
+        "y": 1536,
+      },
+      {
+        "h": 1266,
+        "w": 65,
+        "x": 0,
+        "y": 270,
+      },
+      {
+        "h": 1266,
+        "w": 65,
+        "x": 1015,
+        "y": 270,
+      },
+    ],
+  },
+]
+`;

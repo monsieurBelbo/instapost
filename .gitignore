@@ -1,0 +1,14 @@
+node_modules
+.output
+.wxt
+.profiles
+.fake-ig
+.cache
+test-results
+playwright-report
+*.har
+captures/
+.env*.local
+.spikes/
+.vitest-attachments
+__screenshots__/
