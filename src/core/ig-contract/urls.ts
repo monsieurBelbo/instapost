@@ -8,6 +8,8 @@
  */
 
 export const IG_HOST = 'www.instagram.com';
+/** The hosts rule 1001 (the mobile UA) covers; CDN hosts are deliberately out of scope (OD6). */
+export const UA_RULE_HOSTS = ['www.instagram.com', 'i.instagram.com'] as const;
 export const IG_ORIGIN = 'https://www.instagram.com';
 export const COMPOSER_URL = 'https://www.instagram.com/create/story/';
 export const COMPOSER_PATH_PREFIX = '/create/story';
@@ -67,10 +69,15 @@ function under(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`);
 }
 
+/** A www path under COMPOSER_PATH_PREFIX (`/create/story`, `/create/story/…`). */
+export function isComposerPath(path: string): boolean {
+  return under(path, COMPOSER_PATH_PREFIX);
+}
+
 /** www.instagram.com under COMPOSER_PATH_PREFIX. */
 export function isComposerUrl(url: string | undefined): boolean {
   const path = url === undefined ? null : igPath(url);
-  return path !== null && under(path, COMPOSER_PATH_PREFIX);
+  return path !== null && isComposerPath(path);
 }
 
 /**

@@ -10,7 +10,16 @@
  *   composer-agent.js (no clicks, no synthetic events but input/change, no network, no storage, no
  *   fake hooks); in background.js (no network APIs) and the editor chunks (no network APIs but
  *   Vite's modulepreload, no Meta-host URLs); the write-endpoint strings outside background.js and
- *   rules/*.json; and the fake's test ids in extension source.
+ *   rules/*.json; and the fake's test ids in extension source. F2 (2026-10-12): no E2E hook (the
+ *   window-quirk shim and its `__e2e…` storage flags, the portrait shim's off switch) in any live
+ *   file, while the mock background.js must carry E2E_HOOK_MARKERS, so the live scan is known to look
+ *   for code that exists. AM37: `world:"MAIN"` nowhere but background.js, and there exactly once, as
+ *   the portrait shim's executeScript (top frame, injectImmediately, a func, no files); the shim's
+ *   body only in background.js, in both modes (live uses the shim too). SH-4 (2026-10-13): any `world`
+ *   key that is not a quoted ISOLATED counts (the ExecutionWorld enum, a variable), ExecutionWorld is
+ *   named nowhere else, no bundle registers content scripts, and the agent creates no script element.
+ *   SH-2: the shim's function, cut out of background.js, runs in a bare node:vm realm (a stand-in
+ *   `screen` only) and must give the expected readings, so it is self-contained as executeScript needs.
  * - T4 `tsc -p src/core` passes; src/core uses no chrome./browser./document. and (AM10) imports
  *   only relative `.ts`/`.json` specifiers that stay inside src/core (tests may add `vitest`).
  * - T5 Both artifacts exist at WXT's default paths; the three key-derived extension IDs differ.
@@ -26,12 +35,20 @@ import { blockRuleset, STATIC_RULESET_ID, STATIC_RULESET_PATH } from '../src/cor
 import {
   AGENT_ONLY,
   BACKGROUND_ONLY,
+  backgroundMainWorldProblems,
+  E2E_HOOK_MARKERS,
+  E2E_HOOKS,
   EDITOR_ONLY,
   EVERY_BUNDLE,
+  EXECUTION_WORLD,
   FAKE_TESTID,
   forbiddenDispatches,
   forbiddenEditorFetches,
   hits,
+  MAIN_WORLD,
+  PORTRAIT_SHIM_MARKER,
+  portraitShimRunProblems,
+  portraitShimSource,
   WRITE_STRINGS,
 } from '../tools/bundle/patterns.ts';
 import { extIdForMode, KEY_MODES } from '../tools/chrome/ext-id.ts';
@@ -217,6 +234,17 @@ function t3(m: Mode): void {
   for (const f of files) {
     const text = readFileSync(join(dir, f), 'utf8');
     for (const label of hits(text, EVERY_BUNDLE)) problems.push(`${f}: ${label}`);
+    // AM37: one MAIN-world injection, the portrait shim's, in background.js; none anywhere else (SH-4:
+    // however MAIN is spelled). SH-2: the shim's shipped function runs on its own in a bare realm.
+    if (f === 'background.js') {
+      for (const p of backgroundMainWorldProblems(text)) problems.push(`${f}: ${p}`);
+      const shim = portraitShimSource(text);
+      if ('problem' in shim) problems.push(`${f}: portrait shim: ${shim.problem}`);
+      else for (const p of portraitShimRunProblems(shim.source)) problems.push(`${f}: portrait shim run: ${p}`);
+    } else {
+      for (const label of hits(text, [MAIN_WORLD, EXECUTION_WORLD])) problems.push(`${f}: ${label}`);
+      if (text.includes(PORTRAIT_SHIM_MARKER)) problems.push(`${f}: the portrait shim outside background.js`);
+    }
     if (f === 'composer-agent.js') {
       for (const label of hits(text, AGENT_ONLY)) problems.push(`${f}: ${label}`);
       for (const d of forbiddenDispatches(text)) problems.push(`${f}: dispatchEvent other than input/change: ${d}`);
@@ -229,8 +257,20 @@ function t3(m: Mode): void {
     const writeAllowed = f === 'background.js' || (f.startsWith('rules/') && f.endsWith('.json'));
     if (!writeAllowed) for (const label of hits(text, WRITE_STRINGS)) problems.push(`${f}: ${label}`);
     if (text.includes(absRoot)) problems.push(`${f}: embeds the absolute path ${absRoot}`);
+    // F2: the E2E window-quirk shim and its flags are compiled out of live.
+    if (!MODE_INFO[m].guarded) for (const label of hits(text, E2E_HOOKS)) problems.push(`${f}: E2E hook ${label}`);
   }
   check('T3', `${m} forbidden patterns (${files.length} files)`, problems);
+  if (MODE_INFO[m].guarded) {
+    // Positive control: the shim really is in the guarded build, so the live scan above means something.
+    const bg = readFileSync(join(dir, 'background.js'), 'utf8');
+    const missing = E2E_HOOK_MARKERS.filter((x) => !bg.includes(x));
+    check(
+      'T3',
+      `${m} background.js carries the E2E hooks (positive control for the live scan)`,
+      missing.map((x) => `missing ${x}`),
+    );
+  }
 }
 
 /** Extension source (src/, entrypoints/) never names the fake's test hooks; tools/ and tests/ may. */

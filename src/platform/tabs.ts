@@ -21,6 +21,8 @@ export interface TabUpdate {
 
 export interface TabsPort {
   get(tabId: number): Promise<TabInfo>;
+  /** W5: tabs.getZoom (no permission needed); 1 = 100%. */
+  getZoom(tabId: number): Promise<number>;
   create(url: string): Promise<TabInfo>;
   activate(tabId: number): Promise<void>;
   navigate(tabId: number, url: string): Promise<void>;
@@ -39,6 +41,9 @@ const info = (t: Browser.tabs.Tab): TabInfo => {
 export const tabs: TabsPort = {
   async get(tabId) {
     return info(await browser.tabs.get(tabId));
+  },
+  async getZoom(tabId) {
+    return await browser.tabs.getZoom(tabId);
   },
   async create(url) {
     return info(await browser.tabs.create({ url, active: true }));

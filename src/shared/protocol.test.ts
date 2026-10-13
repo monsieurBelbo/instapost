@@ -20,9 +20,11 @@ import {
   isBackgroundToEditor,
   isEditorToBackground,
   isGetFileReply,
+  isPageOrientation,
   isProbeReport,
   PROBE_LIMITS,
   type SenderLike,
+  toPageOrientation,
 } from './protocol.ts';
 
 const RUNTIME_ID = 'jehchapoghccaofddgdkakdkjijmknhk';
@@ -37,6 +39,8 @@ const probe = (over: Partial<ProbeReport> = {}): ProbeReport => ({
   dpr: 2,
   portrait: true,
   swControlled: false,
+  swIntercepted: false,
+  navType: 'reload',
   storyInput: 'present',
   acceptOk: true,
   acceptSeen: ['image/avif,image/jpeg,image/png'],
@@ -224,8 +228,21 @@ describe('U12 guards', () => {
   const screen = { availLeft: 0, availTop: 33, availWidth: 1512, availHeight: 949 };
 
   it('isEditorToBackground', () => {
-    const start = { v: 1, type: 'handoff/start', exportId: 'exp_1', mode: 'post', rehearsal: true, screen };
+    const start = {
+      v: 1,
+      type: 'handoff/start',
+      exportId: 'exp_1',
+      mode: 'post',
+      rehearsal: true,
+      screen,
+      browser: 'chromium',
+    };
     expect(isEditorToBackground(start)).toBe(true);
+    // P6: the editor's browser flavour is one of the known ones, and required.
+    expect(isEditorToBackground({ ...start, browser: 'arc' })).toBe(true);
+    expect(isEditorToBackground({ ...start, browser: 'unknown' })).toBe(true);
+    expect(isEditorToBackground({ ...start, browser: 'safari' })).toBe(false);
+    expect(isEditorToBackground({ ...start, browser: undefined })).toBe(false);
     expect(isEditorToBackground({ ...start, exportId: null, mode: 'probe' })).toBe(true);
     expect(isEditorToBackground({ v: 1, type: 'handoff/cancel' })).toBe(true);
     expect(isEditorToBackground({ v: 1, type: 'handoff/outcome', handoffId: HID, posted: false })).toBe(true);
@@ -281,6 +298,52 @@ describe('U12 guards', () => {
     expect(isBackgroundToEditor({ ...status, error: 'OOPS' })).toBe(false);
     expect(isBackgroundToEditor({ ...status, level: 'H2' })).toBe(false);
     expect(isBackgroundToEditor({ ...status, probe: { marker: true } })).toBe(false);
+    // 2026-10-12: the guided resize, the window diagnostics, the page path, C4; the new codes and phase.
+    const win = {
+      screen,
+      requested: { left: 2970, top: -328, width: 524, height: 1012 },
+      created: { left: 1831, top: 13, width: 1512, height: 949 },
+      createdTab: { w: 1512, h: 902 },
+      frameDelta: { w: 0, h: 47 },
+      updates: [
+        {
+          step: 'fit',
+          box: { left: 2970, top: -212, width: 524, height: 979 },
+          target: { w: 524, h: 932 },
+          outer: { left: 1831, top: 13, width: 1512, height: 949 },
+          tab: { w: 1512, h: 902 },
+          fitted: false,
+        },
+      ],
+      attempts: 1,
+      manualResize: false,
+      finalTab: { w: 1512, h: 902 },
+      zoom: 1,
+    };
+    const resizing = {
+      ...status,
+      phase: 'resizing',
+      level: null,
+      resize: { tab: { w: 1512, h: 902 }, ok: false, until: 5, maxW: 767 },
+      window: win,
+    };
+    expect(isBackgroundToEditor(resizing)).toBe(true);
+    expect(isBackgroundToEditor({ ...resizing, window: { ...win, created: null, createdTab: null, zoom: null } })).toBe(
+      true,
+    );
+    expect(isBackgroundToEditor({ ...resizing, resize: { tab: { w: 1, h: 1 }, ok: 'no', until: 5, maxW: 767 } })).toBe(
+      false,
+    );
+    // AF-8: the width limit the indicator uses travels with it.
+    expect(isBackgroundToEditor({ ...resizing, resize: { tab: { w: 1, h: 1 }, ok: false, until: 5 } })).toBe(false);
+    expect(isBackgroundToEditor({ ...resizing, window: { ...win, attempts: 'one' } })).toBe(false);
+    expect(isBackgroundToEditor({ ...resizing, window: { ...win, updates: [{ step: 'again' }] } })).toBe(false);
+    expect(isBackgroundToEditor({ ...status, path: '/', c4: 'unknown' })).toBe(true);
+    expect(isBackgroundToEditor({ ...status, path: 'x'.repeat(513) })).toBe(false);
+    expect(isBackgroundToEditor({ ...status, c4: 'maybe' })).toBe(false);
+    for (const code of ['SW_INTERCEPTS', 'WINDOW_NOT_FITTED', 'LAYOUT_TOO_WIDE', 'SW_TOOK_CONTROL']) {
+      expect(isBackgroundToEditor({ ...status, error: code })).toBe(true);
+    }
   });
 
   it('isBackgroundToAgent', () => {
@@ -306,6 +369,7 @@ describe('U12 guards', () => {
       'inject-ignored',
       'inject-unconfirmed',
       'sw-controller-change',
+      'sw-intercepted',
     ]) {
       expect(isAgentToBackground(event(name))).toBe(true);
     }
@@ -317,6 +381,11 @@ describe('U12 guards', () => {
     expect(isProbeReport(probe({ isMobile: 'unknown', swControlled: 'unknown', storyInput: 'absent' }))).toBe(true);
     expect(isProbeReport(probe({ canvas: { w: 1022, h: 1818, css: { x: 0, y: 0, w: 511, h: 909 } } }))).toBe(true);
     expect(isProbeReport(probe({ acceptSeen: undefined }))).toBe(true);
+    // P3: the tripwire reading and the navigation type are required.
+    expect(isProbeReport(probe({ swIntercepted: 'unknown', navType: 'unknown' }))).toBe(true);
+    expect(isProbeReport(probe({ swIntercepted: true, navType: 'navigate' }))).toBe(true);
+    expect(isProbeReport({ ...probe(), swIntercepted: undefined })).toBe(false);
+    expect(isProbeReport(probe({ navType: 'teleport' as never }))).toBe(false);
 
     expect(isProbeReport(probe({ dpr: 0 }))).toBe(false);
     expect(isProbeReport(probe({ inner: { w: Number.NaN, h: 1 } }))).toBe(false);
@@ -381,4 +450,59 @@ describe('U12 base64 (b64.ts)', () => {
       expect(() => b64ToBytes(s)).toThrow(TypeError);
     },
   );
+});
+
+describe('U12 AM37: the portrait shim’s reading is the background’s, never the agent’s', () => {
+  it('an agent report that carries an orientation is accepted with it dropped', () => {
+    const forged = report({ probe: probe({ orientation: { type: 'portrait-primary', shim: 'installed' } }) });
+    const r = acceptAgentMessage(forged, sender(), active('probing'));
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.msg.type !== 'agent/report') throw new Error('not accepted');
+    expect('orientation' in r.msg.probe).toBe(false);
+  });
+
+  it('isPageOrientation: a known shim state and a short lower-case type, or null', () => {
+    expect(isPageOrientation({ type: 'portrait-primary', shim: 'installed' })).toBe(true);
+    expect(isPageOrientation({ type: 'landscape-secondary', shim: 'off' })).toBe(true);
+    expect(isPageOrientation({ type: null, shim: 'absent' })).toBe(true);
+    for (const shim of ['present', 'portrait', 'failed']) {
+      expect(isPageOrientation({ type: 'portrait-primary', shim })).toBe(true);
+    }
+    expect(isPageOrientation({ type: 'portrait-primary', shim: 'maybe' })).toBe(false);
+    expect(isPageOrientation({ type: 'Portrait-Primary', shim: 'installed' })).toBe(false);
+    expect(isPageOrientation({ type: 'x'.repeat(PROBE_LIMITS.orientationType + 1), shim: 'installed' })).toBe(false);
+    expect(isPageOrientation({ shim: 'installed' })).toBe(false);
+    expect(isPageOrientation('portrait-primary')).toBe(false);
+    // SH-1: the background's own mark, on records and statuses, is true or absent.
+    expect(isPageOrientation({ type: 'portrait-primary', shim: 'installed', afterComposerMount: true })).toBe(true);
+    expect(isPageOrientation({ type: 'portrait-primary', shim: 'installed', afterComposerMount: false })).toBe(false);
+    expect(isPageOrientation({ type: 'portrait-primary', shim: 'installed', afterComposerMount: 1 })).toBe(false);
+  });
+
+  it('SH-1: a page cannot set the background’s late-shim mark: toPageOrientation drops it', () => {
+    expect(toPageOrientation({ type: 'portrait-primary', shim: 'installed', afterComposerMount: true })).toEqual({
+      type: 'portrait-primary',
+      shim: 'installed',
+    });
+  });
+
+  it('SH-2: every unreadable shim result (a throw in the page gives null or undefined) is {null, failed}', () => {
+    for (const raw of [undefined, null, {}, [], 'x', { type: 'portrait-primary' }, { type: 1, shim: 'present' }]) {
+      expect(toPageOrientation(raw), JSON.stringify(raw)).toEqual({ type: null, shim: 'failed' });
+    }
+  });
+
+  it('toPageOrientation keeps a valid reading’s two fields; anything else is a failed shim with no type', () => {
+    expect(toPageOrientation({ type: 'portrait-primary', shim: 'present', extra: 1 })).toEqual({
+      type: 'portrait-primary',
+      shim: 'present',
+    });
+    expect(toPageOrientation(undefined)).toEqual({ type: null, shim: 'failed' });
+    expect(toPageOrientation({ type: '<b>', shim: 'installed' })).toEqual({ type: null, shim: 'failed' });
+  });
+
+  it('isProbeReport and statuses accept a stamped report, and reject a malformed reading', () => {
+    expect(isProbeReport(probe({ orientation: { type: 'portrait-primary', shim: 'installed' } }))).toBe(true);
+    expect(isProbeReport(probe({ orientation: { type: 'portrait-primary', shim: 'yes' } as never }))).toBe(false);
+  });
 });

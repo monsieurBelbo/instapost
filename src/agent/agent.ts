@@ -87,9 +87,13 @@ export function startAgent(win: AgentWindow, runtime: AgentRuntime): AgentHandle
 
   function handle(msg: BackgroundToAgent): void {
     switch (msg.type) {
-      case 'agent/probe':
-        void send({ type: 'agent/report', probe: probeComposer(win) }).catch(() => undefined);
+      case 'agent/probe': {
+        // P3: the watch's observer also sees entries past the page's full resource-timing buffer.
+        const probe = probeComposer(win);
+        const report = probe.swIntercepted !== true && watch.intercepted() ? { ...probe, swIntercepted: true } : probe;
+        void send({ type: 'agent/report', probe: report }).catch(() => undefined);
         return;
+      }
       case 'agent/watch':
         watch.restart(msg.readyTimeoutMs);
         return;

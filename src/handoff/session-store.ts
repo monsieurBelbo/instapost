@@ -25,7 +25,15 @@ export interface SessionStore {
 }
 
 /** Every reducer timer: one left out here would be lost with a service-worker restart (AM20's `navigation`). */
-const TIMER_NAMES = ['closeDelay', 'inactivity', 'navigation'] as const satisfies readonly HandoffTimer[];
+const TIMER_NAMES = [
+  'closeDelay',
+  'inactivity',
+  'navigation',
+  'fitRetry',
+  'resizeDeadline',
+  'resizePoll',
+  'inputWait',
+] as const satisfies readonly HandoffTimer[];
 const _timersComplete: [Exclude<HandoffTimer, (typeof TIMER_NAMES)[number]>] extends [never] ? true : never = true;
 void _timersComplete;
 

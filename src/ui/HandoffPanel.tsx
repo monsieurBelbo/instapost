@@ -5,13 +5,23 @@
  *
  * AM21: while a hand-off runs, the switch chips show that session's own switches (fixed at start,
  * reported by the background), never the stored settings, which only apply to the next hand-off.
+ *
+ * U1/U2 (2026-10-12): the diagnostics list names the page, the window sizing, the browser, the story
+ * input as the deciding probe saw it (with "not checked" when the decision stopped earlier) and the
+ * service worker (control is normal on Instagram; interception is not). While `resizing`, the owner
+ * is guided to drag the window narrow and tall, with the tab size live (test ids `handoff-resize`,
+ * `handoff-resize-size` with `data-ok`, `data-w`, `data-h`; rows `data-row` on each `dd`).
+ * AM37: the Screen row (`data-row="screen"`, `data-type`, `data-shim`) is the screen orientation the
+ * composer page reads after the portrait shim, and what the shim did (C3b).
  */
-import { useSignalEffect } from '@preact/signals';
+import { useSignal, useSignalEffect } from '@preact/signals';
 import { useRef } from 'preact/hooks';
 import type { ErrorCode, HandoffPhase } from '../core/handoff/state.ts';
 import {
   answerPosted,
+  browserFlavour,
   cancelHandoff,
+  decision,
   fakeBanner,
   finishedInfo,
   handoffFile,
@@ -19,12 +29,15 @@ import {
   lastError,
   postedAnswer,
   probeReport,
+  resizeInfo,
   sessionSwitches,
   starting,
   status,
   timeline,
+  windowInfo,
 } from './handoff-state.ts';
 import {
+  browserText,
   DEGRADES_TO_H0,
   errorDetail,
   errorText,
@@ -33,9 +46,17 @@ import {
   HOLD_OPEN_UNKNOWN_TEXT,
   PHASE_LABEL,
   PHASE_ORDER,
+  pageText,
   pickText,
   postedPrompt,
+  resizeSizeText,
+  resizeText,
   SHARE_TEXT,
+  screenText,
+  secondsLeft,
+  serviceWorkerText,
+  storyInputText,
+  windowText,
 } from './messages.ts';
 import { isMsiteLocked, settings } from './settings-state.ts';
 
@@ -43,6 +64,7 @@ const CANCELLABLE: readonly HandoffPhase[] = [
   'opening',
   'scoping',
   'fitting',
+  'resizing',
   'navigating',
   'reloading',
   'probing',
@@ -51,8 +73,40 @@ const CANCELLABLE: readonly HandoffPhase[] = [
   'awaitingShare',
 ];
 
+/** W3: the guided resize, with the tab size live and the time left. */
+function ResizeGuide() {
+  const r = resizeInfo.value;
+  const now = useSignal(Date.now());
+  useSignalEffect(() => {
+    const id = setInterval(() => {
+      now.value = Date.now();
+    }, 1000);
+    return () => clearInterval(id);
+  });
+  return (
+    <div class="instruction resize" data-testid="handoff-resize">
+      <p>{resizeText(r?.maxW)}</p>
+      {r && (
+        <p>
+          The window now:{' '}
+          <strong
+            data-testid="handoff-resize-size"
+            data-ok={r.ok ? 'true' : 'false'}
+            data-w={String(Math.round(r.tab.w))}
+            data-h={String(Math.round(r.tab.h))}
+          >
+            {resizeSizeText(r.tab, r.ok)}
+          </strong>{' '}
+          <span class="hint">({secondsLeft(r.until, now.value)} s left)</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Instructions({ phase }: { phase: HandoffPhase }) {
   const s = status.value;
+  if (phase === 'resizing') return <ResizeGuide />;
   if (phase === 'awaitingPick') {
     return <p class="instruction">{pickText(handoffFile.value, s?.route === 'homeOnly')}</p>;
   }
@@ -99,7 +153,9 @@ function Instructions({ phase }: { phase: HandoffPhase }) {
 
 function ErrorBox({ code, freeAt, detail }: { code: ErrorCode; freeAt: number | undefined; detail?: string }) {
   const degraded = DEGRADES_TO_H0.includes(code);
-  const extra = errorDetail(code, detail);
+  // AF-10: DESKTOP_SHELL says which is_mobile the deciding probe read (false, or none on a later page).
+  // AM37: SCREEN_LANDSCAPE says what the composer read (the last probe shown carries that reading).
+  const extra = errorDetail(code, detail, decision.value?.probe.isMobile, probeReport.value?.orientation);
   // AM28: Share may have been tapped (an unknown page after Share): never point at the phone lane blindly.
   const unknown = finishedInfo.value?.postedUnknown === true;
   return (
@@ -120,27 +176,69 @@ function ErrorBox({ code, freeAt, detail }: { code: ErrorCode; freeAt: number | 
 
 function ProbeSummary() {
   const p = probeReport.value;
-  if (!p) return null;
+  const d = decision.value;
+  const w = windowInfo.value;
+  const flavour = browserFlavour.value;
+  if (!p && !w) return null;
   const yes = (b: boolean | 'unknown') => (b === 'unknown' ? 'unknown' : b ? 'yes' : 'no');
+  // The story input as the deciding probe saw it; "accept list changed" only for a decided drift.
+  const drift = lastError.value?.code === 'ACCEPT_DRIFT';
+  // AF-2: a session the watch's tripwire ended says so even if the last probe shown saw nothing.
+  const intercepted = lastError.value?.code === 'SW_INTERCEPTS';
   return (
     <dl class="probe" data-testid="handoff-probe">
-      <dt>Mobile page</dt>
-      <dd>{yes(p.isMobile)}</dd>
-      <dt>Viewport</dt>
-      <dd>
-        {p.inner.w}×{p.inner.h} @{p.dpr}x {p.portrait ? 'portrait' : 'landscape'}
-      </dd>
-      <dt>Story input</dt>
-      <dd>
-        {p.storyInput}
-        {p.acceptOk ? '' : ' (accept list changed)'}
-      </dd>
-      <dt>Service worker</dt>
-      <dd>{yes(p.swControlled)}</dd>
-      {p.canvas && (
+      {d && (
+        <>
+          <dt>Page</dt>
+          <dd data-row="page">{pageText(d.route, d.path)}</dd>
+        </>
+      )}
+      {w && (
+        <>
+          <dt>Window</dt>
+          <dd data-row="window">{windowText(w)}</dd>
+        </>
+      )}
+      {flavour && (
+        <>
+          <dt>Browser</dt>
+          <dd data-row="browser">{browserText(flavour)}</dd>
+        </>
+      )}
+      {p && (
+        <>
+          <dt>Mobile page</dt>
+          <dd data-row="mobile">{yes(p.isMobile)}</dd>
+          <dt>Viewport</dt>
+          <dd data-row="viewport">
+            {p.inner.w}×{p.inner.h} @{p.dpr}x {p.portrait ? 'portrait' : 'landscape'}
+          </dd>
+        </>
+      )}
+      {p?.orientation && (
+        <>
+          <dt>Screen</dt>
+          <dd data-row="screen" data-type={p.orientation.type ?? ''} data-shim={p.orientation.shim}>
+            {screenText(p.orientation)}
+          </dd>
+        </>
+      )}
+      {d && (
+        <>
+          <dt>Story input</dt>
+          <dd data-row="story-input">{storyInputText(d.probe, d.c4, drift)}</dd>
+        </>
+      )}
+      {p && (
+        <>
+          <dt>Service worker</dt>
+          <dd data-row="service-worker">{serviceWorkerText(p, intercepted)}</dd>
+        </>
+      )}
+      {p?.canvas && (
         <>
           <dt>Canvas</dt>
-          <dd>
+          <dd data-row="canvas">
             {p.canvas.w}×{p.canvas.h} px in {Math.round(p.canvas.css.w)}×{Math.round(p.canvas.css.h)} CSS px
           </dd>
         </>

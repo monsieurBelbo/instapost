@@ -9,19 +9,30 @@
  *   same state object and no effects, so the runner may skip the write.
  * - Sample `ctx` per event: `now`, `guarded`, `chromeMajor` (chromeMajorFromUa of the
  *   background's UA), `settings` (storage.local), `rate` = checkRate(log, now, effectiveCaps(…)),
- *   `uuid` = crypto.randomUUID.
+ *   `uuid` = crypto.randomUUID, `resizeTimeoutMs` (guarded E2E flag only).
  * - Every effect whose platform call rejects is reported back as
  *   `{type:'effectFailed', effect: <effect type>, message}`. The reducer decides; the runner
  *   never retries. Failures of bookkeeping effects (notifyEditor, writeRecord, lockMsite, …)
  *   are ignored here and only logged by the runner.
  * - Events that answer effects: openWindow → `windowCreated`; installRules → `rulesInstalled`;
- *   measureTab → `tabMeasured` (tabs.get inner size + windows.get outer box); updateWindow →
- *   `windowFitted`; injectAgent → `agentInjected` with `fresh` (false when the agent's sentinel was
- *   already set in that document, AM16). navigate, hardReload, sendAgent, serveFile, closeWindow,
- *   removeRules and the bookkeeping effects (incl. rememberWindow/forgetWindow) answer nothing.
+ *   measureTab → `tabMeasured` (with `settle`, the runner first lets the window settle: windows.get
+ *   until two reads FIT_SETTLE_POLL_MS apart agree, at most FIT_SETTLE_MAX_MS; then tabs.get inner
+ *   size, windows.get outer box, tabs.getZoom); updateWindow → `windowFitted` (windows.update with
+ *   `state:'normal'`, then tabs.get every FIT_VERIFY_POLL_MS until the tab is within FIT_TOLERANCE_PX
+ *   of the target, at most FIT_VERIFY_MAX_MS: `fitted`, with the last tab and window sizes and
+ *   `applied`; with `reapply`, in `fitting` only, the same box is re-applied at FIT_REAPPLY_MS while
+ *   the tab is not fitted, and the fit must still hold FIT_HOLD_MS after the first update; without
+ *   it, the refit, the verification runs beside the event queue, AL-3); readSize →
+ *   `windowSized` (tabs.get + windows.get at once); injectAgent → `agentInjected` with `fresh` (false
+ *   when the agent's sentinel was already set in that document, AM16) and `orientation` (AM37: the
+ *   MAIN-world portrait shim, injected into the same tab and frame just before the agent, reports the
+ *   screen orientation the page reads and what it did). navigate, hardReload,
+ *   sendAgent, serveFile, closeWindow, removeRules and the bookkeeping effects (incl.
+ *   rememberWindow/forgetWindow) answer nothing.
  * - `tabUpdated`: forward every tabs.onUpdated for the composer tab with
  *   `status = changeInfo.status` and `url = tab.url` (undefined without host permission).
  *   Do not filter: the kill switch (urls.ts) runs here, on every update after arming.
+ * - `boundsChanged`: windows.onBoundsChanged for the composer window (others may be dropped).
  * - `windowRemoved` / `tabRemoved`: forward at least those for the composer window/tab. In idle
  *   every forwarded one emits `removeRules` (idempotent cleanup); in a session, others are ignored.
  * - `startup`: on runtime.onStartup and onInstalled.
@@ -32,25 +43,59 @@
  *   none is pending. `inactivity` is armed once at start; when it fires the reducer either times
  *   out (15 min with no state-changing event) or re-arms it for the remainder. `closeDelay` (3 s)
  *   closes a finished session (unless it is held open, AM19). `navigation` (30 s, AM20) bounds the
- *   first navigation. Fire them as `{type:'timer', timer}`.
+ *   first navigation. `fitRetry` (300 ms) is the one windows.update retry; `resizeDeadline` (3 min)
+ *   and `resizePoll` (1 s) belong to `resizing`; `inputWait` (6 s) to probing's `awaitInput`. Fire
+ *   them as `{type:'timer', timer}`. Every end of a session clears all of them.
  * - Agent commands go out as `sendAgent`. The H1 ready deadline (10 s) lives in the agent's
  *   watch: H1 sends `watch {readyTimeoutMs: 10000}` then `inject`; H0 sends `watch {0}` (no
  *   deadline). A repeated watch restarts the agent's watch with the new deadline.
  *
- * ## Sequence (§3.6)
+ * ## Sequence (§3.6, with the 2026-10-12 changes W1–W5, P1–P6)
  *
- *   start → opening ─windowCreated→ scoping ─rulesInstalled→ fitting ─tabMeasured→ (updateWindow)
- *   ─windowFitted→ navigating ─first www `loading`→ reloading (hardReload once; kill switch armed)
+ *   start → opening ─windowCreated→ scoping ─rulesInstalled→ fitting (still about:blank):
+ *     measure (settled window: created box, frame delta, zoom) → update (state normal, re-applied at
+ *     0/150/300/500/1000 ms while not fitted, verified to hold 1.1 s: Arc ignores early updates and
+ *     re-places new popups late) ─fitted→ navigating | ─not fitted→ fitRetry (300 ms) → retry (same)
+ *     ─fitted, or usable as it is (≤ 767 wide, portrait, ≥ 640 tall)→ navigating
+ *     ─else→ resizing: the owner drags the popup; boundsChanged / resizePoll → readSize → windowSized
+ *       ─usable→ navigating | resizeDeadline → WINDOW_NOT_FITTED (close)
+ *   navigating ─first www `loading`→ reloading (hardReload once; kill switch armed)
  *   ─reload's `loading`, then `complete`→ probing (injectAgent → agent/probe → agentReport)
- *   → evaluateProbe (probe-eval.ts): fail → closing | refit once | probe-done → closing
- *   | H0 → awaitingPick | H1 → injecting ─composer-ready→ awaitingShare (agent/probe for C8,
- *   AM13) ─C9→ finished ─closeDelay→ closing ─windowRemoved→ idle (removeRules 1001–1019).
+ *   → evaluateProbe (probe-eval.ts): fail → closing | refit once (P4: too wide or landscape)
+ *   | probe-done → closing | H0 → awaitingPick | H1 → injecting
+ *   | (P5) the first decision that reads C4 with no story input (H1 → INPUT_MISSING, H0 with H1
+ *     off, or probe-done; AL-1/AF-1) → awaitInput (agent/watch, inputWait 6 s): `input-appeared` →
+ *     agent/probe once more → decided as above; inputWait → decided on the probe as it was
+ *   injecting ─composer-ready→ awaitingShare (agent/probe for C8, AM13) ─C9→ finished
+ *   ─closeDelay→ closing ─windowRemoved→ idle (removeRules 1001–1019).
+ *   P5: an H1 insert into msite's header input on `/` starts the story session and SPA-navigates to
+ *   /create/story/: that `loading` is a same-document load (AM16), so `injecting` resumes and the
+ *   buffered composer-ready lands. P2: `sw-controller-change` is only counted. P3: `sw-intercepted`
+ *   (from the watch) or a probe with `swIntercepted` ends the session with SW_INTERCEPTS.
+ *   AM37 (C3b): every agent report is stamped with the portrait shim's latest reading
+ *   (`orientation`); a probe on /create/story that may read a landscape screen fails SCREEN_LANDSCAPE
+ *   (probe-eval row 5b), and so does a same-document load that reaches the composer (the pick's SPA
+ *   navigation) while the page may still read landscape: the composer would hide Share there. "May
+ *   read landscape": a landscape type; an unreadable reading (SH-2); or (SH-1) a shim that installed
+ *   itself only at the injection after a commit had reached the composer (`composerEntered`, set by
+ *   the pick's SPA navigation, or by a commit after the reload's own one), so the composer mounted and
+ *   read the landscape screen first (the reading gets `afterComposerMount`).
  *
  * ## Invariants (tested generically in U9)
  *
- * - Never a retry: at most one openWindow, installRules, navigate and hardReload per hand-off;
- *   at most one `agent/inject` and one serveFile per handoffId; at most two updateWindow (the fit
- *   and the single landscape refit); after a session ends no flow effect is emitted for it.
+ * - Never a retry beyond the stated ones: at most one openWindow, installRules, navigate and
+ *   hardReload per hand-off; at most one `agent/inject` and one serveFile per handoffId; at most two
+ *   measureTab (the fit and the single refit) and three updateWindow (the fit, its one retry 300 ms
+ *   later, and the single refit); one input wait; after a session ends no flow effect is emitted
+ *   for it. readSize only while `resizing`. Only the two pre-navigation updateWindow carry `reapply`
+ *   (the runner's bounded re-applies of the same box while the tab is still about:blank); the refit
+ *   never does. Runner-level windows.update budget (AM29, an amendment of W2's "one update, one
+ *   retry" that awaits the owner's sign-off, AL-4): at most FIT_REAPPLY_MS.length (5) calls for each
+ *   of the two pre-navigation updateWindow, so at most 10 before Instagram loads, all on about:blank;
+ *   exactly 1 for the refit. U11 asserts these counts.
+ * - Only the fitting measureTab settles (`settle`); the refit's reads the window once (AL-3).
+ * - No navigation before the window is fitted or usable: `navigate` follows a verified fit, a
+ *   usable tab after the retry, or a usable size read while resizing (W2/W3).
  * - Probe mode never injects. A guarded build injects only after a probe that saw the marker.
  * - AM2/AM16: after the hard reload, every later `loading` of the composer tab re-injects the agent.
  *   A same-document load (`fresh: false`: pushState, replaceState, hash) resumes the interrupted
@@ -62,9 +107,10 @@
  * - AM13: entering `awaitingShare` sends one more `agent/probe`; its report only sets `readyProbe`
  *   (C8 on the record) and never re-evaluates the flow.
  * - C9 counts only once the composer is engaged (AM18): a file reached it (composer-ready, the H1
- *   file served, or, AM28, an insert dispatched but never confirmed). Leaving /create/story for `/`
- *   before that is C5 failing (`route:'homeOnly'`, H0 "tap + → Story"), not "composer left". Any
- *   other www page (AM17) ends the session without a "posted" pre-answer: UNEXPECTED_PAGE before
+ *   file served on the composer, or, AM28, an insert dispatched on the composer but never confirmed).
+ *   Leaving /create/story for `/` before that is C5 failing (`route:'homeOnly'`, H0 "tap + → Story"),
+ *   not "composer left"; an H1 insert made on `/` (P5) engages only once the tab shows the composer.
+ *   Any other www page (AM17) ends the session without a "posted" pre-answer: UNEXPECTED_PAGE before
  *   engagement, an unanswered "Posted?" after.
  * - AM19: a C9 after Share in a post with rehearsal off holds the popup open (no closeDelay) until
  *   the owner answers "Posted?", so an upload still running in the page is never cut off. AM28: so
@@ -73,10 +119,22 @@
  *   (windowRemoved/tabRemoved, a failed closeWindow, startup), so rehearsal blocks stay in force
  *   while the popup can still send anything.
  */
-import { firstGuess, type ScreenAvail, windowFit } from '../geometry/window-fit.ts';
-import { type ProbeReport, preflightOf } from '../ig-contract/contract.ts';
+import type { Size } from '../geometry/fit.ts';
+import {
+  type FrameDelta,
+  firstGuess,
+  frameDeltaOf,
+  isUsableInner,
+  maxMsiteInnerW,
+  type ScreenAvail,
+  type WindowBox,
+  windowFit,
+  zoomOf,
+} from '../geometry/window-fit.ts';
+import { isBrandedFlavour } from '../ig-contract/browser-flavour.ts';
+import { type CheckResult, type PageOrientation, type ProbeReport, preflightOf } from '../ig-contract/contract.ts';
 import { isChromeMajor, uaRule } from '../ig-contract/device-profile.ts';
-import { evaluateProbe } from '../ig-contract/probe-eval.ts';
+import { composerMayReadLandscape, evaluateProbe } from '../ig-contract/probe-eval.ts';
 import { rehearsalRules, SESSION_RULE_IDS } from '../ig-contract/rules.ts';
 import { COMPOSER_URL, classifyComposerUrl, igPath, isComposerUrl, type UrlVerdict } from '../ig-contract/urls.ts';
 import { newId } from '../model/ids.ts';
@@ -85,6 +143,8 @@ import {
   type AgentEventName,
   CLOSE_DELAY_MS,
   type ErrorCode,
+  FIT_RETRY_DELAY_MS,
+  HANDOFF_TIMERS,
   type HandoffCtx,
   type HandoffEffect,
   type HandoffEvent,
@@ -96,14 +156,20 @@ import {
   type IdleState,
   INACTIVITY_TIMEOUT_MS,
   INJECT_READY_TIMEOUT_MS,
+  INPUT_WAIT_MS,
   isArmed,
+  MAX_WINDOW_UPDATES,
   MSITE_LOCK_MS,
   NAVIGATION_TIMEOUT_MS,
   type PhaseLogEntry,
   type ProbeStep,
+  RESIZE_POLL_MS,
+  RESIZE_TIMEOUT_MS,
   type SessionBase,
   type SessionResult,
+  type WindowDiagnostics,
   type WindowedSession,
+  type WindowUpdateDiag,
 } from './state.ts';
 
 export interface Transition {
@@ -116,6 +182,8 @@ type Closing = Extract<ActiveState, { phase: 'closing' }>;
 /** Every state that owns a popup window. */
 type Windowed = Exclude<ActiveState, Opening | Closing>;
 type Probing = Extract<ActiveState, { phase: 'probing' }>;
+type Fitting = Extract<ActiveState, { phase: 'fitting' }>;
+type Resizing = Extract<ActiveState, { phase: 'resizing' }>;
 type Finished = Extract<ActiveState, { phase: 'finished' }>;
 type TabUpdated = Extract<HandoffEvent, { type: 'tabUpdated' }>;
 
@@ -144,11 +212,7 @@ function dispatch(state: HandoffState, event: HandoffEvent, ctx: HandoffCtx): Tr
 
 const isId = (n: number): boolean => Number.isInteger(n) && n >= 0;
 const removeRules = (): HandoffEffect => ({ type: 'removeRules', ruleIds: [...SESSION_RULE_IDS] });
-const clearTimers = (): HandoffEffect[] => [
-  { type: 'clearTimer', timer: 'inactivity' },
-  { type: 'clearTimer', timer: 'closeDelay' },
-  { type: 'clearTimer', timer: 'navigation' },
-];
+const clearTimers = (): HandoffEffect[] => HANDOFF_TIMERS.map((timer) => ({ type: 'clearTimer', timer }));
 const watch = (tabId: number, readyTimeoutMs: number): HandoffEffect => ({
   type: 'sendAgent',
   tabId,
@@ -170,6 +234,8 @@ function base(s: SessionBase): SessionBase {
     chMode: s.chMode,
     chromeMajor: s.chromeMajor,
     screen: s.screen,
+    browser: s.browser,
+    win: s.win,
     startedAt: s.startedAt,
     lastEventAt: s.lastEventAt,
     phaseLog: s.phaseLog,
@@ -198,6 +264,13 @@ function common(s: Windowed): WindowedSession {
     composerReached: s.composerReached,
     route: s.route,
     url: s.url,
+    inputWaitUsed: s.inputWaitUsed,
+    inputWaitUntil: s.inputWaitUntil,
+    swControllerChanges: s.swControllerChanges,
+    c4Reached: s.c4Reached,
+    injectAt: s.injectAt,
+    pageOrientation: s.pageOrientation,
+    composerEntered: s.composerEntered === true,
   };
 }
 
@@ -254,6 +327,7 @@ function record(
 ): HandoffRecord {
   const probe = s.probe ?? null;
   const ready = s.readyProbe ?? null;
+  const c4Reached = s.c4Reached ?? true;
   return {
     id: s.handoffId,
     exportId: s.exportId,
@@ -262,10 +336,13 @@ function record(
     rehearsal: s.rehearsal,
     chMode: s.chMode,
     phaseLog,
-    ...(probe ? { probe, preflight: preflightOf(probe, s.url ?? undefined, s.route ?? null, ready) } : {}),
+    ...(probe ? { probe, preflight: preflightOf(probe, s.url ?? undefined, s.route ?? null, ready, c4Reached) } : {}),
     ...(ready ? { readyProbe: ready } : {}),
     ...(s.route ? { route: s.route } : {}),
     ...(detail ? { detail } : {}),
+    window: s.win,
+    browser: s.browser,
+    ...(s.swControllerChanges ? { swControllerChanges: s.swControllerChanges } : {}),
     outcome,
     startedAt: s.startedAt,
     endedAt: now,
@@ -318,7 +395,10 @@ function validScreen(sc: ScreenAvail): boolean {
 function start(s: IdleState, e: Extract<HandoffEvent, { type: 'start' }>, ctx: HandoffCtx): Transition {
   // AM23 (SG4, network-free): a guarded build in a branded browser profile is the G6 mistake; the
   // DOM marker check would come only after a spoofed visit to whatever that profile is logged in to.
-  if (ctx.guarded && ctx.brandedBrowser) return refuse(s, 'BRANDED_BROWSER');
+  // P6: the editor's detection adds Arc, whose brands look like Playwright's Chromium.
+  if (ctx.guarded && (ctx.brandedBrowser || isBrandedFlavour(e.browser))) {
+    return refuse(s, 'BRANDED_BROWSER', isBrandedFlavour(e.browser) ? { detail: `browser ${e.browser}` } : {});
+  }
   const lockedUntil = ctx.settings.msiteLockedUntil;
   if (lockedUntil !== null && ctx.now < lockedUntil) return refuse(s, 'MSITE_LOCKED', { freeAt: lockedUntil });
   if (!ctx.rate.ok) return refuse(s, 'RATE_LIMITED', { freeAt: ctx.rate.freeAt });
@@ -341,6 +421,19 @@ function start(s: IdleState, e: Extract<HandoffEvent, { type: 'start' }>, ctx: H
     chMode: ctx.settings.chMode,
     chromeMajor: ctx.chromeMajor,
     screen: { ...e.screen },
+    browser: e.browser,
+    win: {
+      screen: { ...e.screen },
+      requested: { ...guess.outer },
+      created: null,
+      createdTab: null,
+      frameDelta: null,
+      updates: [],
+      attempts: 0,
+      manualResize: false,
+      finalTab: null,
+      zoom: null,
+    },
     startedAt: now,
     lastEventAt: now,
     phaseLog: [{ phase: 'opening', t: now }],
@@ -436,14 +529,15 @@ const afterShare = (s: Windowed): boolean =>
 
 /**
  * AM18: the composer is in use, so leaving it is C9. A file reached it: C6 held (awaitingShare), the
- * H1 file was served (the insert may still be landing), or (AM28) the insert was dispatched and C6
- * never confirmed it, so the owner may share it from H0. Not engaged, `/` is only C5 (homeOnly).
- * A probe after a new document was detected (resumeFrom null) is never engaged.
+ * H1 file was served on the composer (the insert may still be landing), or (AM28) the insert was
+ * dispatched there and C6 never confirmed it, so the owner may share it from H0. Not engaged, `/` is
+ * only C5 (homeOnly). A probe after a new document was detected (resumeFrom null) is never engaged.
  */
 function engaged(s: Windowed): boolean {
   if (afterShare(s)) return true;
   const from = s.phase === 'probing' ? s.resumeFrom : s.phase;
-  if (from === 'injecting') return s.fileServed;
+  // P5: an insert made on `/` (msite's header input) engages once the tab shows the composer.
+  if (from === 'injecting') return s.fileServed && s.injectAt === 'composer';
   if (from === 'awaitingPick') return s.insertDispatched;
   return false;
 }
@@ -526,6 +620,13 @@ function onOpening(s: Opening, e: HandoffEvent, ctx: HandoffCtx): Transition {
         composerReached: false,
         route: null,
         url: null,
+        inputWaitUsed: false,
+        inputWaitUntil: null,
+        swControllerChanges: 0,
+        c4Reached: false,
+        injectAt: null,
+        pageOrientation: null,
+        composerEntered: false,
       };
       // Installed while the tab is still about:blank, before the first navigation (§3.6 step 2).
       const addRules = [uaRule(e.tabId, s.chromeMajor, s.chMode), ...(s.rehearsal ? rehearsalRules(e.tabId) : [])];
@@ -641,6 +742,22 @@ function onWindowed(s: Windowed, e: HandoffEvent, ctx: HandoffCtx): Transition {
     case 'timer':
       if (e.timer === 'closeDelay') return s.phase === 'finished' ? closeFinished(s, ctx) : none(s);
       if (e.timer === 'navigation') return s.phase === 'navigating' ? navigationDeadline(s, ctx) : none(s);
+      if (e.timer === 'fitRetry')
+        return s.phase === 'fitting' && s.fitStep === 'retryWait' ? fitRetry(s, ctx) : none(s);
+      if (e.timer === 'resizeDeadline') {
+        return s.phase === 'resizing' ? fail(s, 'WINDOW_NOT_FITTED', ctx, { window: s.win }) : none(s);
+      }
+      if (e.timer === 'resizePoll') {
+        if (s.phase !== 'resizing') return none(s);
+        return { state: s, effects: [readSize(s), { type: 'armTimer', timer: 'resizePoll', ms: RESIZE_POLL_MS }] };
+      }
+      if (e.timer === 'inputWait') {
+        // P5: no story input appeared: the probe that started the wait decides as it is (H0
+        // INPUT_MISSING, H0 with H1 off, or the probe mode's report), with C4 as it saw it.
+        if (s.phase !== 'probing' || s.step !== 'awaitInput' || s.probe === null) return none(s);
+        // The agent's watch (no deadline) already runs in this document since the wait began.
+        return decide({ ...s, step: 'awaitReport', inputWaitUntil: null }, s.probe, ctx, true);
+      }
       return inactivity(s, ctx, () => {
         if (s.phase === 'finished') return closeFinished(s, ctx);
         // AM20: the backstop for a navigation deadline lost with a worker restart; an off-host load still kills.
@@ -651,27 +768,28 @@ function onWindowed(s: Windowed, e: HandoffEvent, ctx: HandoffCtx): Transition {
       return onEffectFailed(s, e, ctx);
     case 'rulesInstalled':
       if (s.phase !== 'scoping') return none(s);
-      return to(s, 'fitting', ctx, {}, [{ type: 'measureTab', tabId: s.tabId, windowId: s.windowId }]);
+      return toFitting(s, ctx);
     case 'tabMeasured':
       return onTabMeasured(s, e, ctx);
     case 'windowFitted':
-      if (s.phase === 'fitting' && s.frameDelta !== null) {
-        return to(s, 'navigating', ctx, {}, [
-          { type: 'navigate', tabId: s.tabId, url: COMPOSER_URL },
-          { type: 'armTimer', timer: 'navigation', ms: NAVIGATION_TIMEOUT_MS },
-        ]);
-      }
-      if (s.phase === 'probing' && s.step === 'refitUpdate') return probeStep(s, 'awaitReport', probeCmd(s));
-      return none(s);
+      return onWindowFitted(s, e, ctx);
+    case 'windowSized':
+      return s.phase === 'resizing' ? onResized(s, e, ctx) : none(s);
+    case 'boundsChanged':
+      // W3: the owner is dragging the popup; read its tab size now (the poll is the fallback).
+      return s.phase === 'resizing' && e.windowId === s.windowId ? { state: s, effects: [readSize(s)] } : none(s);
     case 'agentInjected':
-      if (s.phase === 'probing' && s.step === 'injectAgent') return onInjected(s, e.fresh !== false, ctx);
+      if (s.phase === 'probing' && s.step === 'injectAgent') {
+        return onInjected(s, e.fresh !== false, e.orientation ?? null, ctx);
+      }
       return none(s);
     case 'agentReport':
       if (s.phase === 'probing' && s.step === 'awaitReport') return onReport(s, e.probe, ctx);
       // AM13: the C8 report asked for at composer-ready; diagnostics only, never a decision.
       if (s.phase === 'awaitingShare') {
-        const next: Windowed = { ...s, readyProbe: e.probe };
-        return { state: next, effects: [notify(next, { probe: e.probe })] };
+        const probe = stamped(e.probe, s.pageOrientation);
+        const next: Windowed = { ...s, readyProbe: probe };
+        return { state: next, effects: [notify(next, { probe })] };
       }
       return none(s);
     case 'agentGetFile':
@@ -684,16 +802,17 @@ function onWindowed(s: Windowed, e: HandoffEvent, ctx: HandoffCtx): Transition {
   }
 }
 
-/** Moves to a non-probing windowed phase, logging it and notifying the editor. */
+/** Moves to `navigating` or `reloading`, logging it and notifying the editor. */
 function to(
   s: Windowed,
-  phase: 'fitting' | 'navigating' | 'reloading',
+  phase: 'navigating' | 'reloading',
   ctx: HandoffCtx,
   patch: Partial<WindowedSession>,
   actions: HandoffEffect[],
+  extra: Partial<HandoffStatus> = {},
 ): Transition {
   const next: Windowed = { ...common(s), ...patch, phase, phaseLog: logPhase(s, phase, ctx.now) };
-  return { state: next, effects: [...actions, notify(next)] };
+  return { state: next, effects: [...actions, notify(next, extra)] };
 }
 
 const probeCmd = (s: Windowed): HandoffEffect[] => [
@@ -726,17 +845,200 @@ function closeFinished(s: Finished, ctx: HandoffCtx): Transition {
   return close(s, { kind: 'finished', detectedPosted: s.detectedPosted }, ctx);
 }
 
+// ---------------------------------------------------------------------------------------
+// W2/W3: fitting the popup while it is still about:blank (Arc ignores windows.create bounds, F1)
+
+const readSize = (s: Windowed): HandoffEffect => ({ type: 'readSize', windowId: s.windowId, tabId: s.tabId });
+
+/** `reapply`: in `fitting` only (the tab is still about:blank); never for the refit after the navigation. */
+const updateWindow = (s: Windowed, box: WindowBox, inner: Size, reapply: boolean): HandoffEffect => ({
+  type: 'updateWindow',
+  windowId: s.windowId,
+  tabId: s.tabId,
+  box,
+  inner,
+  reapply,
+});
+
+/** tabs.getZoom's factor when it is a plausible one; null otherwise (windowFit then assumes 100%). */
+function saneZoom(z: number | null | undefined): number | null {
+  return typeof z === 'number' && zoomOf(z) === z ? z : null;
+}
+
+const copySize = (x: Size): Size => ({ w: x.w, h: x.h });
+const copyBox = (b: WindowBox): WindowBox => ({ left: b.left, top: b.top, width: b.width, height: b.height });
+
+/** W5: the diagnostics with one more windows.update and what its verification saw. */
+function withUpdate(
+  win: WindowDiagnostics,
+  step: WindowUpdateDiag['step'],
+  e: Extract<HandoffEvent, { type: 'windowFitted' }>,
+): WindowDiagnostics {
+  const entry: WindowUpdateDiag = {
+    step,
+    box: copyBox(e.box),
+    target: copySize(e.target),
+    outer: copyBox(e.outer),
+    tab: copySize(e.inner),
+    fitted: e.fitted === true,
+    applied: typeof e.applied === 'number' && Number.isFinite(e.applied) && e.applied >= 1 ? Math.floor(e.applied) : 1,
+  };
+  return { ...win, updates: [...win.updates, entry].slice(-MAX_WINDOW_UPDATES), finalTab: copySize(e.inner) };
+}
+
+/** Enters `fitting`: the runner lets the about:blank window settle, then measures it (W2). */
+function toFitting(s: Windowed, ctx: HandoffCtx): Transition {
+  const next: Fitting = {
+    ...common(s),
+    phase: 'fitting',
+    fitStep: 'measure',
+    phaseLog: logPhase(s, 'fitting', ctx.now),
+  };
+  return {
+    state: next,
+    effects: [{ type: 'measureTab', tabId: s.tabId, windowId: s.windowId, settle: true }, notify(next)],
+  };
+}
+
+/** The window is fitted or usable: start the one navigation (§3.6 step 4). */
+function toNavigating(
+  s: Windowed,
+  win: WindowDiagnostics,
+  ctx: HandoffCtx,
+  extra: Partial<HandoffStatus> = {},
+): Transition {
+  return to(
+    s,
+    'navigating',
+    ctx,
+    { win },
+    [
+      { type: 'navigate', tabId: s.tabId, url: COMPOSER_URL },
+      { type: 'armTimer', timer: 'navigation', ms: NAVIGATION_TIMEOUT_MS },
+    ],
+    { window: win, ...extra },
+  );
+}
+
+/** W3's deadline: RESIZE_TIMEOUT_MS, or a shorter one from a guarded build's E2E flag. */
+function resizeTimeout(ctx: HandoffCtx): number {
+  const t = ctx.resizeTimeoutMs;
+  const ok = ctx.guarded && typeof t === 'number' && Number.isFinite(t) && t > 0 && t < RESIZE_TIMEOUT_MS;
+  return ok ? Math.round(t) : RESIZE_TIMEOUT_MS;
+}
+
+/** W3: auto-fit failed and the tab is not usable: the owner drags the popup narrow and tall. */
+function toResizing(s: Windowed, win: WindowDiagnostics, ctx: HandoffCtx): Transition {
+  const ms = resizeTimeout(ctx);
+  const until = ctx.now + ms;
+  const next: Resizing = {
+    ...common(s),
+    win,
+    phase: 'resizing',
+    resizeUntil: until,
+    phaseLog: logPhase(s, 'resizing', ctx.now),
+  };
+  const tab = win.finalTab ?? { w: 0, h: 0 };
+  return {
+    state: next,
+    effects: [
+      { type: 'armTimer', timer: 'resizeDeadline', ms },
+      { type: 'armTimer', timer: 'resizePoll', ms: RESIZE_POLL_MS },
+      notify(next, { window: win, resize: { tab, ok: false, until, maxW: maxMsiteInnerW(win.zoom) } }),
+    ],
+  };
+}
+
+/** W3: a size read while resizing. Usable → navigate; else show the owner the size it has now. */
+function onResized(s: Resizing, e: Extract<HandoffEvent, { type: 'windowSized' }>, ctx: HandoffCtx): Transition {
+  const tab = copySize(e.inner);
+  if (!Number.isFinite(tab.w) || !Number.isFinite(tab.h)) return none(s);
+  // AF-8: the width limit the ✓ uses, so the instruction can name it (767 × the tab zoom).
+  const maxW = maxMsiteInnerW(s.win.zoom);
+  if (isUsableInner(tab, s.win.zoom)) {
+    const win: WindowDiagnostics = { ...s.win, manualResize: true, finalTab: tab };
+    const t = toNavigating(s, win, ctx, { resize: { tab, ok: true, until: s.resizeUntil, maxW } });
+    return {
+      state: t.state,
+      effects: [
+        { type: 'clearTimer', timer: 'resizeDeadline' },
+        { type: 'clearTimer', timer: 'resizePoll' },
+        ...t.effects,
+      ],
+    };
+  }
+  const seen = s.win.finalTab;
+  if (seen !== null && seen.w === tab.w && seen.h === tab.h) return none(s);
+  const next: Resizing = { ...s, win: { ...s.win, finalTab: tab } };
+  return { state: next, effects: [notify(next, { resize: { tab, ok: false, until: s.resizeUntil, maxW } })] };
+}
+
+/**
+ * The settled window was measured (fitting), or the refit measured the composer (probing): frame
+ * delta = outer − tab size, windowFit (capped at the msite width, W4), one windows.update.
+ */
 function onTabMeasured(s: Windowed, e: Extract<HandoffEvent, { type: 'tabMeasured' }>, ctx: HandoffCtx): Transition {
-  const measuring =
-    (s.phase === 'fitting' && s.frameDelta === null) || (s.phase === 'probing' && s.step === 'refitMeasure');
-  if (!measuring) return none(s);
-  const delta = { w: Math.max(0, e.outer.width - e.inner.w), h: Math.max(0, e.outer.height - e.inner.h) };
-  if (!Number.isFinite(delta.w) || !Number.isFinite(delta.h)) return fail(s, 'SCREEN_TOO_SMALL', ctx);
-  const fit = windowFit(s.screen, delta, ctx.settings.composerProfile);
+  const refit = s.phase === 'probing' && s.step === 'refitMeasure';
+  if (!refit && !(s.phase === 'fitting' && s.fitStep === 'measure')) return none(s);
+  const delta: FrameDelta | null = frameDeltaOf(e.inner, e.outer);
+  if (delta === null) return fail(s, 'SCREEN_TOO_SMALL', ctx);
+  const zoom = saneZoom(e.zoom);
+  const fit = windowFit(s.screen, delta, ctx.settings.composerProfile, zoom);
   if (!fit.ok) return fail(s, 'SCREEN_TOO_SMALL', ctx);
-  const update: HandoffEffect = { type: 'updateWindow', windowId: s.windowId, box: fit.outer };
-  if (s.phase === 'probing') return { state: { ...s, frameDelta: delta, step: 'refitUpdate' }, effects: [update] };
-  return { state: { ...s, frameDelta: delta }, effects: [update] };
+  const update = updateWindow(s, fit.outer, fit.inner, !refit);
+  if (s.phase === 'probing') {
+    const win: WindowDiagnostics = { ...s.win, zoom: zoom ?? s.win.zoom };
+    return { state: { ...s, frameDelta: delta, win, step: 'refitUpdate' }, effects: [update] };
+  }
+  if (s.phase !== 'fitting') return none(s);
+  const win: WindowDiagnostics = {
+    ...s.win,
+    created: copyBox(e.outer),
+    createdTab: copySize(e.inner),
+    frameDelta: delta,
+    attempts: 1,
+    zoom,
+  };
+  return { state: { ...s, frameDelta: delta, win, fitStep: 'update' }, effects: [update] };
+}
+
+/**
+ * updateWindow's verification (W2). Fitted → navigate. The first miss → one retry FIT_RETRY_DELAY_MS
+ * later. A second miss → navigate if the tab is usable anyway, else guided resize (W3). After the
+ * refit (probing) the composer is probed again whatever the verification said.
+ */
+function onWindowFitted(s: Windowed, e: Extract<HandoffEvent, { type: 'windowFitted' }>, ctx: HandoffCtx): Transition {
+  if (s.phase === 'probing' && s.step === 'refitUpdate') {
+    const win = withUpdate(s.win, 'refit', e);
+    const next: Probing = { ...s, win, step: 'awaitReport' };
+    return { state: next, effects: [...probeCmd(s), notify(next, { window: win })] };
+  }
+  if (s.phase !== 'fitting' || (s.fitStep !== 'update' && s.fitStep !== 'retry')) return none(s);
+  const win = withUpdate(s.win, s.fitStep === 'update' ? 'fit' : 'retry', e);
+  if (e.fitted === true) return toNavigating(s, win, ctx);
+  if (s.fitStep === 'update') {
+    return {
+      state: { ...s, win, fitStep: 'retryWait' },
+      effects: [{ type: 'armTimer', timer: 'fitRetry', ms: FIT_RETRY_DELAY_MS }],
+    };
+  }
+  if (isUsableInner(e.inner, s.win.zoom)) return toNavigating(s, win, ctx);
+  return toResizing(s, win, ctx);
+}
+
+/** W2: the one retry. The frame the window shows now (outer − tab) refines the box when it is sane. */
+function fitRetry(s: Fitting, ctx: HandoffCtx): Transition {
+  const last = s.win.updates.at(-1);
+  const now = last ? frameDeltaOf(last.tab, last.outer) : null;
+  const refined = now ? windowFit(s.screen, now, ctx.settings.composerProfile, s.win.zoom) : null;
+  const fit = refined?.ok
+    ? refined
+    : windowFit(s.screen, s.frameDelta ?? { w: 0, h: 0 }, ctx.settings.composerProfile, s.win.zoom);
+  if (!fit.ok) return fail(s, 'SCREEN_TOO_SMALL', ctx);
+  return {
+    state: { ...s, fitStep: 'retry', win: { ...s.win, attempts: 2 } },
+    effects: [updateWindow(s, fit.outer, fit.inner, true)],
+  };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -766,6 +1068,9 @@ function onTabUpdated(s: Windowed, e: TabUpdated, ctx: HandoffCtx): Transition {
     url,
     composerReached: s.composerReached || verdict.kind === 'ok',
     route: home && s.route === 'direct' ? 'homeOnly' : s.route,
+    // P5: the insert into msite's header input on `/` opened the composer (an SPA navigation).
+    injectAt: s.injectAt === 'home' && verdict.kind === 'ok' ? 'composer' : s.injectAt,
+    composerEntered: s.composerEntered === true || entersComposer(s.url, e.url),
   };
   const routed = seen.route !== s.route;
   if (e.status === 'loading') {
@@ -789,7 +1094,8 @@ function onTabUpdated(s: Windowed, e: TabUpdated, ctx: HandoffCtx): Transition {
     return routed ? { state: t.state, effects: [...t.effects, notify(t.state as Probing)] } : t;
   }
   // AM18: the composer went away before the insert landed: H0 from home (one inject, never a second).
-  if (home && seen.phase === 'injecting') return toPick(seen, 'INJECTION_IGNORED', ctx);
+  // An insert made on home (P5) has no composer to leave yet.
+  if (home && seen.phase === 'injecting' && s.injectAt === 'composer') return toPick(seen, 'INJECTION_IGNORED', ctx);
   if (routed) return { state: seen, effects: [notify(seen)] };
   return changed(s, seen);
 }
@@ -836,15 +1142,20 @@ function onReloading(s: Windowed, e: TabUpdated, url: string | null, verdict: Ur
   if (verdict.kind === 'unknown-left') {
     return fail({ ...s, url }, 'UNEXPECTED_PAGE', ctx, { detail: `page ${pageOf(e.url)}` });
   }
-  if (e.status === 'loading') return { state: { ...s, url, loadsSinceReload: s.loadsSinceReload + 1 }, effects: [] };
-  if (e.status !== 'complete' || s.loadsSinceReload < 1) return changed(s, { ...s, url });
+  // SH-1: after the reload's own commit, a commit that reaches the composer (the owner's pick, made
+  // before this document's first `complete`) mounts it before the first injection's shim.
+  const entered = s.composerEntered === true || (s.loadsSinceReload >= 1 && entersComposer(s.url, e.url));
+  if (e.status === 'loading') {
+    return { state: { ...s, url, loadsSinceReload: s.loadsSinceReload + 1, composerEntered: entered }, effects: [] };
+  }
+  if (e.status !== 'complete' || s.loadsSinceReload < 1) return changed(s, { ...s, url, composerEntered: entered });
   const direct = isComposerUrl(e.url);
   return toProbing(
     s,
     ctx,
     // A second commit before this `complete` is already a "later" load (AM2): strict.
     { step: 'injectAgent', strict: s.loadsSinceReload > 1, resumeFrom: null, amLoad: false, pending: [] },
-    { url, route: direct ? 'direct' : 'homeOnly', composerReached: direct },
+    { url, route: direct ? 'direct' : 'homeOnly', composerReached: direct, composerEntered: entered },
     [{ type: 'injectAgent', tabId: s.tabId }],
   );
 }
@@ -865,7 +1176,17 @@ function resumeOf(s: Windowed): Probing['resumeFrom'] {
 
 /** Keeps the old object when nothing observable changed. */
 function changed(s: Windowed, next: Windowed): Transition {
-  return next.url === s.url && next.composerReached === s.composerReached ? none(s) : { state: next, effects: [] };
+  const same =
+    next.url === s.url &&
+    next.composerReached === s.composerReached &&
+    next.injectAt === s.injectAt &&
+    next.composerEntered === s.composerEntered;
+  return same ? none(s) : { state: next, effects: [] };
+}
+
+/** SH-1: this update moved the tab from another page (or none yet) onto the composer. */
+function entersComposer(from: string | null, to: string | undefined): boolean {
+  return !isComposerUrl(from ?? undefined) && isComposerUrl(to);
 }
 
 /**
@@ -876,8 +1197,23 @@ function changed(s: Windowed, next: Windowed): Transition {
  * and the insert happened there, not in this one, and a later same-document load re-probes instead
  * of resuming a phase whose agent and watch are gone. An interrupted H1 counts as INJECTION_IGNORED.
  */
-function onInjected(s: Probing, fresh: boolean, ctx: HandoffCtx): Transition {
+function onInjected(s0: Probing, fresh: boolean, orientation: PageOrientation | null, ctx: HandoffCtx): Transition {
+  // AM37: the portrait shim's reading belongs to this document (a new one starts from its own).
+  const reading: PageOrientation | null =
+    orientation && lateShim(s0, fresh, orientation) ? { ...orientation, afterComposerMount: true } : orientation;
+  const s: Probing = {
+    ...s0,
+    pageOrientation: reading ?? (fresh ? null : s0.pageOrientation),
+    // SH-1: this injection's shim follows every composer entry so far.
+    composerEntered: false,
+  };
+  const sameDocument = s.amLoad && !fresh && (s.resumeFrom !== null || s.inputWaitUntil !== null);
+  // AM37 (C3b): this load reached the composer (the pick's or the insert's SPA navigation) and the page
+  // may still read a landscape screen there (a landscape type, an unreadable reading, or a shim that came
+  // after the composer mounted): the composer shows its rotate snackbar and hides Share.
+  if (sameDocument && composerMayReadLandscape(s.pageOrientation, s.url ?? undefined)) return screenLandscape(s, ctx);
   if (s.amLoad && !fresh && s.resumeFrom !== null) return resume(s, ctx);
+  if (s.amLoad && !fresh && s.inputWaitUntil !== null) return resumeInputWait(s, ctx);
   if (s.amLoad && fresh) {
     const degradedFrom = s.resumeFrom === 'injecting' ? 'INJECTION_IGNORED' : s.degradedFrom;
     const next: Probing = {
@@ -887,11 +1223,42 @@ function onInjected(s: Probing, fresh: boolean, ctx: HandoffCtx): Transition {
       resumeFrom: null,
       degradedFrom,
       insertDispatched: false,
+      // P5: the wait's watch went with the old document; the strict probe decides.
+      inputWaitUntil: null,
       pending: [],
     };
-    return { state: next, effects: probeCmd(s) };
+    return { state: next, effects: [{ type: 'clearTimer', timer: 'inputWait' }, ...probeCmd(s)] };
   }
   return { state: { ...s, step: 'awaitReport', pending: [] }, effects: probeCmd(s) };
+}
+
+/**
+ * SH-1 (2026-10-13): the shim installed itself (`installed`) on the composer, which a commit had reached
+ * since the previous injection, in the document this injection went into (the same one, `!fresh`, or
+ * the reloaded one at the first injection, `!amLoad`): the composer mounted and read the landscape
+ * screen before the shim was there, and re-reads it only on `resize`. A new document found by a later
+ * load (`amLoad && fresh`) is exempt: its composer has no photo until the owner picks one, by then
+ * the shim is in place. Neither is the reload's own commit to /create/story (route `direct`).
+ */
+function lateShim(s: Probing, fresh: boolean, o: PageOrientation): boolean {
+  return (
+    s.composerEntered === true && !(s.amLoad && fresh) && o.shim === 'installed' && isComposerUrl(s.url ?? undefined)
+  );
+}
+
+/**
+ * P5 + AM16: a same-document load (msite's hydration may replaceState) interrupted the wait for the
+ * story input. With time left, the wait goes on: the watch restarts, which re-reports an input that
+ * appeared meanwhile, and the deadline is re-armed for the rest. Without, one more probe decides.
+ */
+function resumeInputWait(s: Probing, ctx: HandoffCtx): Transition {
+  const left = (s.inputWaitUntil ?? ctx.now) - ctx.now;
+  if (left <= 0)
+    return { state: { ...s, step: 'awaitReport', inputWaitUntil: null, pending: [] }, effects: probeCmd(s) };
+  return {
+    state: { ...s, step: 'awaitInput', pending: [] },
+    effects: [watch(s.tabId, 0), { type: 'armTimer', timer: 'inputWait', ms: left }],
+  };
 }
 
 /** AM16: back to the phase a same-document load interrupted; then the agent events it buffered. */
@@ -899,7 +1266,7 @@ function resume(s: Probing, ctx: HandoffCtx): Transition {
   const from = s.resumeFrom;
   const phaseLog = logPhase(s, from ?? 'probing', ctx.now);
   let t: Transition;
-  if (from === 'injecting' && !s.fileServed && !isComposerUrl(s.url ?? undefined)) {
+  if (from === 'injecting' && !s.fileServed && s.injectAt === 'composer' && !isComposerUrl(s.url ?? undefined)) {
     // AM18: the composer went away before the insert landed (a client-side redirect home).
     t = toPick(s, 'INJECTION_IGNORED', ctx);
   } else if (from === 'injecting') {
@@ -926,7 +1293,65 @@ function resume(s: Probing, ctx: HandoffCtx): Transition {
 // ---------------------------------------------------------------------------------------
 // the probe report (§3.6 step 7)
 
+/**
+ * U1: what a status carrying the deciding probe adds: the probe, C4 as the preflight has it, the path
+ * and C5's route. The route is repeated here because a decision that ends the session is sent from
+ * `closing`, whose status carries no route of its own (the Page row would lose "home").
+ */
+function decisionStatus(s: Windowed): Partial<HandoffStatus> {
+  const probe = s.probe;
+  if (!probe) return {};
+  const c4: CheckResult = preflightOf(probe, undefined, null, null, s.c4Reached).C4;
+  const path = s.url !== null ? igPath(s.url) : null;
+  return { probe, c4, ...(path !== null ? { path } : {}), ...(s.route ? { route: s.route } : {}) };
+}
+
 function onReport(s: Probing, probe: ProbeReport, ctx: HandoffCtx): Transition {
+  return decide(s, stamped(probe, s.pageOrientation), ctx, false);
+}
+
+/**
+ * AM37: the agent's report with the portrait shim's reading for that document (C3b). The agent cannot
+ * read it (its isolated world sees the native getter) and anything it sent there was dropped.
+ */
+function stamped(probe: ProbeReport, orientation: PageOrientation | null): ProbeReport {
+  if (!orientation) return probe;
+  const { type, shim, afterComposerMount } = orientation;
+  return { ...probe, orientation: afterComposerMount ? { type, shim, afterComposerMount } : { type, shim } };
+}
+
+/**
+ * AM37: what SCREEN_LANDSCAPE's status and record name: the type the page read and the shim's state,
+ * e.g. `screen landscape-primary, portrait shim off`; `screen unknown, portrait shim failed` (SH-2);
+ * `screen portrait-primary, portrait shim installed after the composer mounted` (SH-1).
+ */
+function screenDetail(o: PageOrientation | null | undefined): string {
+  const late = o?.afterComposerMount ? ' after the composer mounted' : '';
+  return `screen ${o?.type ?? 'unknown'}, portrait shim ${o?.shim ?? 'unknown'}${late}`;
+}
+
+/**
+ * AM37 (C3b): the composer was reached by a same-document load and the page still reads a landscape
+ * screen. As for the watch's interception (AF-2), the record's probes take the reading that ended the
+ * session, so the preflight's C3b says it; the status shows that probe (no `c4`, so the Story input row
+ * keeps the decision it showed).
+ */
+function screenLandscape(s: Windowed, ctx: HandoffCtx): Transition {
+  const o = s.pageOrientation;
+  const probe = s.probe && o ? stamped(s.probe, o) : s.probe;
+  const readyProbe = s.readyProbe && o ? stamped(s.readyProbe, o) : s.readyProbe;
+  const shown = readyProbe ?? probe;
+  return fail({ ...s, probe, readyProbe }, 'SCREEN_LANDSCAPE', ctx, {
+    ...(shown ? { probe: shown } : {}),
+    detail: screenDetail(o),
+  });
+}
+
+/**
+ * Evaluates `probe` (probe-eval.ts) and acts on the decision. `waited`: the one input wait just ran
+ * out, so its watch (no deadline) already runs in this document and the probe decides as it is.
+ */
+function decide(s: Probing, probe: ProbeReport, ctx: HandoffCtx, waited: boolean): Transition {
   const ev = evaluateProbe({
     probe,
     guarded: ctx.guarded,
@@ -936,61 +1361,119 @@ function onReport(s: Probing, probe: ProbeReport, ctx: HandoffCtx): Transition {
     refitUsed: s.refitUsed,
     strict: s.strict,
   });
-  const p: Probing = { ...s, probe, fakeBanner: s.fakeBanner || ev.banner };
+  const p: Probing = { ...s, probe, fakeBanner: s.fakeBanner || ev.banner, c4Reached: ev.c4Reached };
   const d = ev.decision;
+  if (ev.c4Reached && probe.storyInput === 'absent' && s.level === null && !s.inputWaitUsed) {
+    // P5: on `/` msite mounts its header (+ → Story and the story input) after hydration. Every first
+    // decision that reads C4 waits once for the agent's input-appeared and probes again before it is
+    // taken: H1 or H0 in a post, and the probe mode's report (AL-1/AF-1: C4 and storyInputBeforeTap
+    // must not come from a snapshot taken before hydration). The watch is no inject. Until the wait
+    // ends C4 counts as not reached, so a session that ends during it records C4 `unknown`.
+    return {
+      state: {
+        ...p,
+        c4Reached: false,
+        step: 'awaitInput',
+        inputWaitUsed: true,
+        inputWaitUntil: ctx.now + INPUT_WAIT_MS,
+      },
+      effects: [watch(s.tabId, 0), { type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS }],
+    };
+  }
+  const decided = decisionStatus(p);
   switch (d.kind) {
     case 'fail':
-      return fail(p, d.code, ctx, { probe });
+      // AM37: SCREEN_LANDSCAPE names the type the page read and the shim's state.
+      return fail(
+        p,
+        d.code,
+        ctx,
+        d.code === 'SCREEN_LANDSCAPE' ? { ...decided, detail: screenDetail(probe.orientation) } : decided,
+      );
     case 'probe-done':
-      return close(p, { kind: 'probe-done' }, ctx, { probe });
+      return close(p, { kind: 'probe-done' }, ctx, decided);
     case 'refit':
       return {
         state: { ...p, refitUsed: true, step: 'refitMeasure' },
-        effects: [{ type: 'measureTab', tabId: s.tabId, windowId: s.windowId }],
+        // AL-3: the window is not new and the kill switch is armed: one read, no settling.
+        effects: [{ type: 'measureTab', tabId: s.tabId, windowId: s.windowId, settle: false }],
       };
     case 'h0':
     case 'h1': {
       if (s.level !== null) {
         // A passing re-probe: never re-inject, never upgrade; carry on as H0 in the new document
         // (an interrupted H1 was marked INJECTION_IGNORED when the document was found new).
-        return toPick(p, s.degradedFrom, ctx, { probe });
+        return toPick(p, s.degradedFrom, ctx, decided);
       }
-      const canInject = d.kind === 'h1' && !s.injectSent && s.mode === 'post' && s.exportId !== null;
-      if (!canInject) return toPick(p, d.kind === 'h0' ? d.reason : null, ctx, { probe });
+      const canInject = !s.injectSent && s.mode === 'post' && s.exportId !== null && s.assistedInsert;
+      if (d.kind !== 'h1' || !canInject) {
+        return toPick(p, d.kind === 'h0' ? d.reason : null, ctx, decided, waited);
+      }
       const phaseLog = logPhase(p, 'injecting', ctx.now);
-      const next: Windowed = { ...common(p), phase: 'injecting', level: 'H1', injectSent: true, phaseLog };
+      const injectAt = isComposerUrl(s.url ?? undefined) ? 'composer' : 'home';
+      const next: Windowed = { ...common(p), phase: 'injecting', level: 'H1', injectSent: true, injectAt, phaseLog };
       return {
         state: next,
         effects: [
           watch(s.tabId, INJECT_READY_TIMEOUT_MS),
           { type: 'sendAgent', tabId: s.tabId, command: { type: 'agent/inject' } },
-          notify(next, { probe }),
+          notify(next, decided),
         ],
       };
     }
   }
 }
 
-/** H0: the owner taps + → Story and picks the file; the agent only watches (no deadline). */
+/**
+ * H0: the owner taps + → Story and picks the file; the agent only watches (no deadline).
+ * `watching`: a watch without deadline already runs in this document (P5's input wait).
+ */
 function toPick(
   s: Windowed,
   degradedFrom: ErrorCode | null,
   ctx: HandoffCtx,
   extra: Partial<HandoffStatus> = {},
+  watching = false,
 ): Transition {
   const phaseLog = logPhase(s, 'awaitingPick', ctx.now);
   const next: Windowed = { ...common(s), phase: 'awaitingPick', level: 'H0', degradedFrom, phaseLog };
-  return {
-    state: next,
-    effects: [watch(s.tabId, 0), notify(next, { ...(degradedFrom ? { error: degradedFrom } : {}), ...extra })],
-  };
+  const status = notify(next, { ...(degradedFrom ? { error: degradedFrom } : {}), ...extra });
+  return { state: next, effects: watching ? [status] : [watch(s.tabId, 0), status] };
+}
+
+/**
+ * P3 from the watch: the deciding probe saw no interception (row 4b would have failed it), the watch
+ * did later. AF-2: the record's probe (so its preflight) and the panel's Service worker row say what
+ * ended the session: the probes are kept as they were, with the tripwire's reading set. The status
+ * carries no `c4`, so the Story input row keeps the decision it showed.
+ */
+function interceptedByWatch(s: Windowed, ctx: HandoffCtx): Transition {
+  const probe: ProbeReport | null = s.probe ? { ...s.probe, swIntercepted: true } : null;
+  const readyProbe: ProbeReport | null = s.readyProbe ? { ...s.readyProbe, swIntercepted: true } : null;
+  const shown = readyProbe ?? probe;
+  return fail({ ...s, probe, readyProbe }, 'SW_INTERCEPTS', ctx, shown ? { probe: shown } : {});
 }
 
 /** At most this many distinct agent events are buffered across a same-document re-injection. */
 const MAX_PENDING_EVENTS = 8;
 
 function onAgentEvent(s: Windowed, event: AgentEventName, ctx: HandoffCtx): Transition {
+  // P2: Instagram's worker claims every logged-in page within about 1 s (F2): counted, never fatal.
+  if (event === 'sw-controller-change') {
+    return { state: { ...s, swControllerChanges: s.swControllerChanges + 1 }, effects: [] };
+  }
+  // P3: the tripwire. A worker handled page requests, which then left without rule 1001. Once the
+  // composer was left (finished, possibly an upload still running, AM19) nothing is cut off.
+  if (event === 'sw-intercepted') return s.phase === 'finished' ? none(s) : interceptedByWatch(s, ctx);
   if (s.phase === 'probing') {
+    // P5: the story input mounted after hydration: probe once more, then decide.
+    if (s.step === 'awaitInput') {
+      if (event !== 'input-appeared') return none(s);
+      return {
+        state: { ...s, step: 'awaitReport', inputWaitUntil: null },
+        effects: [{ type: 'clearTimer', timer: 'inputWait' }, ...probeCmd(s)],
+      };
+    }
     // AM16: until `fresh` is known, an event may belong to the phase this load interrupted.
     const waiting = s.resumeFrom !== null && (s.step === 'awaitComplete' || s.step === 'injectAgent');
     if (!waiting || s.pending.includes(event) || s.pending.length >= MAX_PENDING_EVENTS) return none(s);
@@ -1014,12 +1497,12 @@ function onAgentEvent(s: Windowed, event: AgentEventName, ctx: HandoffCtx): Tran
       return s.phase === 'injecting' ? toPick(s, 'INJECTION_IGNORED', ctx) : none(s);
     case 'inject-unconfirmed':
       // AM28: as inject-ignored, but the file may be in the composer: leaving it is C9 (engaged()).
-      return s.phase === 'injecting' ? toPick({ ...s, insertDispatched: true }, 'INJECTION_IGNORED', ctx) : none(s);
+      // An insert on home that never opened the composer (P5) put nothing anywhere.
+      if (s.phase !== 'injecting') return none(s);
+      return toPick({ ...s, insertDispatched: s.injectAt === 'composer' }, 'INJECTION_IGNORED', ctx);
     case 'composer-left':
       // AM18: only an engaged composer can be left; before that the watch keeps running (H0 from home).
       return engaged(s) ? finish(s, ctx) : none(s);
-    case 'sw-controller-change':
-      return fail(s, 'SW_TOOK_CONTROL', ctx);
     case 'input-appeared':
       return none(s);
   }
@@ -1036,10 +1519,10 @@ function onEffectFailed(s: Windowed, e: Extract<HandoffEvent, { type: 'effectFai
       live = s.phase === 'scoping';
       break;
     case 'measureTab':
-      live = (s.phase === 'fitting' && s.frameDelta === null) || step === 'refitMeasure';
+      live = (s.phase === 'fitting' && s.fitStep === 'measure') || step === 'refitMeasure';
       break;
     case 'updateWindow':
-      live = (s.phase === 'fitting' && s.frameDelta !== null) || step === 'refitUpdate';
+      live = (s.phase === 'fitting' && (s.fitStep === 'update' || s.fitStep === 'retry')) || step === 'refitUpdate';
       break;
     case 'navigate':
       live = s.phase === 'navigating';
@@ -1052,7 +1535,11 @@ function onEffectFailed(s: Windowed, e: Extract<HandoffEvent, { type: 'effectFai
       break;
     case 'sendAgent':
       live =
-        step === 'awaitReport' || s.phase === 'injecting' || s.phase === 'awaitingPick' || s.phase === 'awaitingShare';
+        step === 'awaitReport' ||
+        step === 'awaitInput' ||
+        s.phase === 'injecting' ||
+        s.phase === 'awaitingPick' ||
+        s.phase === 'awaitingShare';
       break;
     case 'serveFile':
       // The file is still in Downloads: H0 in the same window, no second inject.

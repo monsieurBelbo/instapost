@@ -4,6 +4,7 @@
  * variant has only the UA op. Plus chromeMajorFromUa, which must parse HeadlessChrome (S5).
  */
 import { describe, expect, it } from 'vitest';
+import { browserFlavourOf, isBrandedFlavour } from './browser-flavour.ts';
 import {
   ALL_RESOURCE_TYPES,
   CH_REMOVE,
@@ -175,6 +176,32 @@ describe('U7 isBrandedBrowser (AM23)', () => {
     expect(isBrandedBrowser([])).toBe(false);
     expect(isBrandedBrowser(['Google Chrome', 'Chromium', 'Not A(Brand'])).toBe(true);
     expect(isBrandedBrowser(['Chromium', 'Microsoft Edge'])).toBe(true);
+  });
+});
+
+describe('P6 browserFlavourOf (2026-10-12)', () => {
+  it('Arc 155 has Playwright’s brands; only its --arc-palette-* properties tell it apart', () => {
+    const arcBrands = ['Chromium', 'Not(A:Brand'];
+    expect(browserFlavourOf(arcBrands, false)).toBe('chromium');
+    expect(browserFlavourOf(arcBrands, true)).toBe('arc');
+    expect(browserFlavourOf(['Not:A-Brand', 'Chromium'], false)).toBe('chromium');
+  });
+
+  it('brands name Chrome and Edge first; no userAgentData is unknown', () => {
+    expect(browserFlavourOf(['Google Chrome', 'Chromium', 'Not A(Brand'], false)).toBe('chrome');
+    expect(browserFlavourOf(['Google Chrome', 'Chromium'], true)).toBe('chrome');
+    expect(browserFlavourOf([' Microsoft Edge ', 'Chromium'], false)).toBe('edge');
+    expect(browserFlavourOf(null, false)).toBe('unknown');
+    expect(browserFlavourOf(null, true)).toBe('arc');
+    expect(browserFlavourOf(['Brave'], false)).toBe('unknown');
+  });
+
+  it('guarded builds refuse Chrome, Edge and Arc', () => {
+    expect(isBrandedFlavour('arc')).toBe(true);
+    expect(isBrandedFlavour('chrome')).toBe(true);
+    expect(isBrandedFlavour('edge')).toBe(true);
+    expect(isBrandedFlavour('chromium')).toBe(false);
+    expect(isBrandedFlavour('unknown')).toBe(false);
   });
 });
 

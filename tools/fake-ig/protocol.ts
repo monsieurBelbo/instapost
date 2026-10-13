@@ -13,6 +13,14 @@ export const IG_HOSTS: readonly string[] = [WWW_HOST, I_HOST];
 
 export const FAKE_PATHS = {
   clientJs: '/fake-static/client.js',
+  /**
+   * GET, 204: the request a page makes when a service worker takes control of it, as Instagram's
+   * pages keep sending requests. The P3 tripwire reads its timing (workerStart > 0 only when a worker
+   * with a fetch handler handled it).
+   */
+  beacon: '/fake-static/beacon',
+  /** `sw=claimOnRegister` (F2), registered with `?enableAddToHomeScreen=<is_mobile>&zenon_device_id=<id>`. */
+  swClaimOnRegister: '/fake-sw/claim-on-register.js',
   swDesktopShell: '/fake-sw/desktop-shell.js',
   swClaimLate: '/fake-sw/claim-late.js',
   health: '/__fake__/health',
@@ -30,6 +38,8 @@ export const FAKE_PATHS = {
   elsewhere: '/consent/',
   /** POST {control, isTrusted} for every fake control the human clicks (FID-2). */
   control: '/__fake__/control',
+  /** POST FakeComposerView whenever the composer page mounts with a photo or its landscape gate flips (AM37). */
+  composerView: '/__fake__/composer-view',
 } as const;
 
 /** The fake's clickable controls that report their click's isTrusted to /__fake__/control. */
@@ -117,4 +127,34 @@ export interface FakeShareMeta {
   path: string;
   /** The page's own navigator.userAgent (the JS realm still says desktop under dNR, §2.3). */
   navigatorUa: string;
+  /**
+   * AM37: msite's story session was started by + → Story (startStoryCreationSession: the viewport check
+   * passed, a session id was issued) before the file arrived. false when the file came without it: the
+   * H1 insert, or a spec that set the input's files directly (Instagram's sessionId stays null).
+   */
+  sessionStarted: boolean;
+  /** The session id + → Story issued (a uuid), or null. */
+  sessionId: string | null;
+  /** `screen.orientation.type` as the page read it at Share (after the extension's portrait shim). */
+  screenOrientation: string | null;
+}
+
+/**
+ * AM37: what the composer page showed, as its landscape gate decided it (PolarisStoryCreationPage
+ * `isLandscape`): reported when it mounts with a photo and whenever the gate flips on a resize.
+ */
+export interface FakeComposerView {
+  /** The gate's verdict: the rotate snackbar is shown and the header and Share footer are hidden. */
+  landscape: boolean;
+  /** Share is rendered (the inverse of `landscape`, recorded so a spec reads what the page did). */
+  share: boolean;
+  /** Which reading decided it (knob `landscapeCheck`; `screen` falls back to the viewport without a type). */
+  via: 'screen' | 'viewport';
+  /** `screen.orientation.type` as the page read it (after the portrait shim), or null. */
+  screenOrientation: string | null;
+  inner: Size;
+  /** + → Story started the story session that brought the photo (see FakeShareMeta.sessionStarted). */
+  sessionStarted: boolean;
+  /** location.pathname. */
+  path: string;
 }

@@ -212,12 +212,12 @@ describe('msite hand-off client', () => {
 
   test('start, cancel and outcome post v:1 messages on one port', () => {
     const { client, ports } = harness();
-    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: true, screen });
+    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: true, screen, browser: 'chromium' });
     client.cancel();
     client.outcome('hof_1', true);
     expect(ports).toHaveLength(1);
     expect(ports[0]?.sent).toEqual([
-      { v: 1, type: 'handoff/start', exportId: 'exp_1', mode: 'post', rehearsal: true, screen },
+      { v: 1, type: 'handoff/start', exportId: 'exp_1', mode: 'post', rehearsal: true, screen, browser: 'chromium' },
       { v: 1, type: 'handoff/cancel' },
       { v: 1, type: 'handoff/outcome', handoffId: 'hof_1', posted: true },
     ]);
@@ -225,7 +225,7 @@ describe('msite hand-off client', () => {
 
   test('probe mode sends exportId null', () => {
     const { client, ports } = harness();
-    client.start({ exportId: null, mode: 'probe', rehearsal: true, screen });
+    client.start({ exportId: null, mode: 'probe', rehearsal: true, screen, browser: 'chromium' });
     expect(ports[0]?.sent[0]).toMatchObject({ type: 'handoff/start', exportId: null, mode: 'probe' });
   });
 
@@ -260,7 +260,7 @@ describe('msite hand-off client', () => {
     client.onConnection((c) => conn.push(c));
     const seen: string[] = [];
     client.onStatus((s) => seen.push(s.phase));
-    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: true, screen });
+    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: true, screen, browser: 'chromium' });
     ports[0]?.emit(status('probing'));
     ports[0]?.drop();
     expect(ports).toHaveLength(1);
@@ -292,7 +292,7 @@ describe('msite hand-off client', () => {
     ports[0]?.drop();
     vi.advanceTimersByTime(10_000);
     expect(ports).toHaveLength(1);
-    client.start({ exportId: null, mode: 'probe', rehearsal: true, screen });
+    client.start({ exportId: null, mode: 'probe', rehearsal: true, screen, browser: 'chromium' });
     expect(ports).toHaveLength(2);
     expect(ports[1]?.sent).toHaveLength(1);
   });
@@ -309,7 +309,7 @@ describe('msite hand-off client', () => {
   test('close disconnects and stops reconnecting', () => {
     vi.useFakeTimers();
     const { client, ports } = harness();
-    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: false, screen });
+    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: false, screen, browser: 'chromium' });
     client.close();
     expect(ports[0]?.disconnected).toBe(true);
     ports[0]?.drop();

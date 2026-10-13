@@ -9,33 +9,35 @@ This file has two parts:
 
 ## Contract C1-C9
 
-**Status, 2026-10-11:** every item is verified against the fake only. Nothing has been checked on real Instagram yet; that starts with L2 and L4 (`docs/live-checklist.md`). `src/core/ig-contract/baseline.json` still holds the pre-L4 assumptions, and the fake's default knobs are derived from it (U16).
+**Status, 2026-10-12:** the first live hand-off ran (Arc 155, live build, new secondary account; § "First live run" below). It confirmed C1 and C2 live; C3, C4 and C5 failed there for reasons now understood (Arc ignored the window size; msite has no story input above 767 CSS px; `/create/story/` lands on `/` by design), and its facts, with those of a logged-out reading of Instagram's production code the same day (F2, F3), are in `src/core/ig-contract/baseline.json` with their `provenance`. L4 has not passed yet: `capturedAt` stays `pre-L4`. The fake's default knobs are derived from the baseline (U16) and have the production shape since strategy §11 AM35. A second run the same day (§ "Second live run" below) found that msite makes two different orientation checks, so C3 is split since AM37: **C3a** (the viewport, at + → Story) and **C3b** (the screen orientation, in the composer page), which a landscape monitor fails in any window; the portrait shim answers it.
 
 **Rules that apply to every probe:**
 
 - No probe matches visible text or ARIA labels. The owner may use a Spanish UI, and the fake runs `en` and `es` (E12 l) with randomised class names and ids (E12 m).
-- The agent reads the DOM of the composer tab from the isolated world and nothing else: no page scripts, no network, no extension storage, no clicks (T3).
-- C1–C5 and the service-worker state are judged from the probe that decided the flow. C8 is taken from a second probe once the composer is ready (§11 AM13). All of them are stored on every Handoff record as `preflight`. The settings list of the last 20 preflights (§3.9 item 1) is not built yet; the records are in IndexedDB `handoffs`.
+- The agent reads the DOM of the composer tab from the isolated world and nothing else: no page scripts, no network, no extension storage, no clicks (T3). The one script in the page's own world is the background's portrait shim (AM37, C3b), which changes two values and reports what the page then reads; it is not a probe of the DOM.
+- C1–C5 (C3b too, since AM37) and the service-worker state are judged from the probe that decided the flow. C8 is taken from a second probe once the composer is ready (§11 AM13). All of them are stored on every Handoff record as `preflight`. The settings list of the last 20 preflights (§3.9 item 1) is not built yet; the records are in IndexedDB `handoffs`.
 
 | Id | Item | Decides | Last verified |
 |---|---|---|---|
-| C1 | `InstagramUserAgent.is_mobile === true` | Yes | fake, 2026-10-11 |
-| C2 | Logged in | Yes | fake, 2026-10-11 |
-| C3 | Portrait | Yes | fake, 2026-10-11 |
-| C4 | Story input | Yes | fake, 2026-10-11 |
-| C5 | `/create/story/` reachable directly | Yes | fake, 2026-10-11 |
-| C6 | Composer ready | Yes | fake, 2026-10-11 |
+| C1 | `InstagramUserAgent.is_mobile === true` | Yes | **live, 2026-10-12** (pass); fake, 2026-10-12 |
+| C2 | Logged in | Yes | **live, 2026-10-12** (pass); fake, 2026-10-12 |
+| C3a (`C3`) | Portrait viewport at + → Story, and at most 767 CSS px wide (AM31) | Yes | fake, 2026-10-12; live 2026-10-12: failed in the first run (1512x902 window, AM29), **passed in the second** (503x894 fitted window: + → Story opened the chooser) |
+| C3b | The composer page reads a portrait screen orientation (AM37) | Yes (`SCREEN_LANDSCAPE` on the composer) | **live, 2026-10-12: failed** (`landscape-primary` on a landscape monitor, before the shim); fake, 2026-10-12 (with and without the shim) |
+| C4 | Story input | Yes | fake, 2026-10-12; live 2026-10-12: failed in the first run (no file input at 1512 CSS px, F3); in the second the H1 insert went into the header's input |
+| C5 | `/create/story/` reachable directly (a fact; `homeOnly` is the norm, AM32) | Only the H0 text | fake, 2026-10-12; live 2026-10-12: `homeOnly` |
+| C6 | Composer ready | Yes | fake, 2026-10-12 |
 | C7 | Error toasts | No (diagnostics only) | not probed |
-| C8 | Canvas geometry | The owner's (OD4); the code only records it | fake, 2026-10-11 |
-| C9 | Composer left | Yes | fake, 2026-10-11 |
+| C8 | Canvas geometry | The owner's (OD4); the code only records it | fake, 2026-10-12 |
+| C9 | Composer left | Yes | fake, 2026-10-12 |
 
 ### C1: `is_mobile`
 
 - **Probe (agent, `src/agent/probes.ts` `readIsMobile`).** The first `script[type="application/json"]` whose text contains `InstagramUserAgent`, parsed by `parseIsMobile` in `src/core/ig-contract/ua-json.ts` (`"is_mobile"\s*:\s*(true|false)`). Missing gives `unknown`. `contract:check` uses the same parser.
 - **Decision.** `false` gives `DESKTOP_SHELL`. `unknown` passes on the first probe, but fails a re-probe after a later full-document load (AM2). A same-document load (pushState, replaceState) is not re-probed (AM16), unless it comes after a new document was detected and before that document's probe answered: it is then probed strictly too (AM28).
 - **Evidence.** Research §5.1: the initial HTML embeds `InstagramUserAgent`, and curl tests showed that only the User-Agent header decides `is_mobile`. Spike S5: rule 1001 puts the Android reduced UA on the document request.
-- **Verified on the fake by:** U15, B6; E4 and E5 (the composer document carried the Android profile and the page said `is_mobile: true`); E7 (a normal tab stays desktop); E12 a (service-worker-served first load), E12 k (`classifier=client-hints`).
-- **Live:** L2 (logged-out GET per UA), then L4.
+- **Verified on the fake by:** U15, B6; E4 and E5 (the composer document carried the Android profile and the page said `is_mobile: true`); E7 (a normal tab stays desktop); E12 a (service-worker-served first load), E12 k (`classifier=client-hints`), E12 s (`classifier=client-hints` with `chMode=uaOnly`: the desktop site, `DESKTOP_SHELL`); E12 w (a later full-document load served desktop, on home in H0 and after the H1 insert on the composer: the strict re-probe gives `DESKTOP_SHELL`, AM2).
+- **Decision since 2026-10-12 (AM30).** `is_mobile` alone decides `DESKTOP_SHELL`; a controlled page no longer does.
+- **Live:** **pass on 2026-10-12** (Arc, secondary account: `is_mobile: true` in the hard-reloaded composer). L2 (logged-out GET per UA), then L4.
 
 ### C2: logged in
 
@@ -43,32 +45,49 @@ This file has two parts:
 - **Decision.** A login URL gives `NOT_LOGGED_IN`: the window closes at once, so nobody logs in inside the spoofed tab, and there is no lock. Every other `/accounts…` path, `/auth_platform…`, `/challenge…` and `/checkpoint…` kill and lock (AM17); that holds from the first navigation on (AM20).
 - **Evidence.** Research §5.4; strategy §3.6 kill-switch table.
 - **Verified on the fake by:** U14, U9; E12 c (`auth=out`: closed, no lock).
-- **Live:** L4 (the secondary account is logged in, so C2 should pass).
+- **Live:** **pass on 2026-10-12** (the secondary account, logged in on desktop instagram.com in Arc). L4.
 
-### C3: portrait
+### C3a: portrait viewport (and narrow enough)
 
-- **Probe (agent).** `innerHeight >= innerWidth` in the composer document.
-- **Decision.** Not portrait: the window is refitted once and probed again. Still landscape gives `LANDSCAPE`.
-- **Evidence.** Research §1 item 2: the composer shows "Rotate your device to add to your story." in a landscape viewport. The fake has the same guard and toast.
-- **Verified on the fake by:** U9, U13; E13 (a popup forced to 960x600 is refitted exactly once, back to 511x941 outer, and the second probe is portrait).
-- **Live:** L4, L5.
+Stored as `C3` on the preflight (the id predates the split).
+
+- **What Instagram checks.** `startStoryCreationSession`, run by the Story tap before the file chooser opens: `innerHeight < innerWidth` gives the toast "Rotate your device to add to your story." and no chooser; otherwise a story session starts with a uuid `sessionId` (research §5.1, corrected 2026-10-12). A file put straight into the story input (the H1 insert) never runs this check, so its `sessionId` stays null.
+- **Probe (agent).** `innerHeight >= innerWidth` in the composer document; since AM31 row 5 also needs `innerWidth <= 767` (`MSITE_MAX_CSS_WIDTH`).
+- **Decision.** Not portrait, or wider than 767 CSS px: the window is refitted once (to at most 767 × zoom) and probed again. Still too wide gives `LAYOUT_TOO_WIDE`, still landscape `LANDSCAPE`. Before any of this, the window is fitted while it is still `about:blank` (AM29: settle, measure, update with `state:'normal'`, re-applied at 0/150/300/500/1000 ms while not fitted, verified, held 1.1 s, one retry), or the owner resizes it by hand (`resizing`, else `WINDOW_NOT_FITTED`).
+- **Evidence.** Research §1 item 2: the composer shows "Rotate your device to add to your story." in a landscape viewport. The fake has the same guard and toast. F3 (2026-10-12): msite has no + → Story above 767 CSS px. F1 (2026-10-12, owner's console in Arc): `windows.create` ignored a popup's bounds (1512x949 at (1831,13), tab 1512x902); `windows.update` with `state:'normal'` 500 ms later was honoured (524x1012, tab 524x965, frame 0x47); the product's update without a state ~280 ms after the create was not.
+- **Verified on the fake by:** U9, U11, U13; E13 (a popup forced to 960x600 is refitted exactly once, back to 511x941 outer, and the second probe is portrait); E20 (Arc-like windows, fitted before Instagram loads), E21/E22 (guided resize, `WINDOW_NOT_FITTED`), E24 (900 px wide portrait: refit, or `LAYOUT_TOO_WIDE`), E26 (the owner's two displays).
+- **Fake (AM37).** + → Story checks `innerHeight < innerWidth` and shows the rotate toast without a chooser (E28 d); a file in the header input has no orientation check; the story records `sessionStarted` and `sessionId`.
+- **Live:** **failed on 2026-10-12** in the first run (Arc: 1512x902, landscape, the create's bounds ignored; the fix is AM29); **passed** in the second run the same day (503x894 fitted portrait window: + → Story opened the chooser). L4, L5, L14.
+
+### C3b: the composer page reads a portrait screen (AM37)
+
+- **What Instagram checks.** `PolarisStoryCreationPage` takes `isLandscape` from `usePolarisDisplayProperties`: `screen.orientation.type` (or the `moz`/`ms` variants), else `window.orientation` (±90 → landscape), else the viewport (`width > height`); read when the composer page mounts with the photo and again on every `resize`. Landscape renders a snackbar with "Rotate your device to add to your story." instead of the composer's header and its Share footer (research §5.2). A desktop with a landscape monitor reads `landscape-primary` whatever the window, so this check fails in every fitted window without help.
+- **The portrait shim** (`src/agent/portrait-shim.ts`, strategy §11 AM37). The background runs it with `scripting.executeScript({target:{tabId: composerTab, frameIds:[0]}, world:'MAIN', injectImmediately:true, func, args:[install]})` just before the agent, on every document of the composer tab after the hard reload (so before the composer page can mount), and nowhere else. When `screen.orientation` exists and its type does not start with `portrait`, it defines own getters on that ScreenOrientation instance: `type` → `portrait-primary`, `angle` → 0. It dispatches nothing and leaves the prototype, `screen.width/height`, `matchMedia`, `window.orientation` and everything else alone; a second injection into the same document finds its marker and changes nothing.
+- **Probe (background).** The shim's own result, the type the page reads afterwards and the shim's state (`installed`, `present`, `portrait`, `absent`, `failed`, or `off` with a guarded build's E2E flag), validated as untrusted page data and stamped on the agent's report as `orientation` (the isolated world cannot see the page's getters, and anything the agent sends there is dropped). Pass when the type is not `landscape-…`; with `absent` (no `screen.orientation`, type null) Instagram falls back to `window.orientation`, absent on desktop, and then to the portrait viewport, so that passes too. **Fail** when the type is `landscape-…`, or (AM38, SH-1) when the shim installed itself only at the injection after a commit had reached the composer (`afterComposerMount`, set by the background: the composer mounted and read the landscape screen first, and re-reads it only on `resize`). **`unknown`** without a reading, or (AM38, SH-2) with an unreadable one, `{type: null, shim: 'failed'}`: the shim threw in the page or its result was malformed, and the page's own type, landscape on the owner's monitors, still exists.
+- **Decision.** Once the composer is reached (`/create/story…`, by a probe there or by the same-document load of the pick's or the insert's SPA navigation) and the page may still read a landscape screen there: `SCREEN_LANDSCAPE` (close, no lock). "May" is a landscape type (detail `screen <type>, portrait shim <state>`), an unreadable reading (`screen unknown, portrait shim failed`, SH-2), or a shim that came after the composer mounted (`screen portrait-primary, portrait shim installed after the composer mounted`, SH-1: the pick's SPA navigation when home read a portrait screen and the screen turned landscape, or a pick made before the reloaded home's first `complete`; the reload's own commit to `/create/story/` never counts). On home it is recorded only (the composer is not mounted there). The panel's Screen row shows the reading.
+- **Blind spot (AM38, SH-3).** C3b observes the page's own `screen.orientation.type` and nothing else. If Instagram read the screen another way (the ScreenOrientation prototype getter, `screen.width > screen.height`, a device-aspect media query), the composer would show its snackbar again while C3b records `pass`; there is no `SCREEN_LANDSCAPE` then, and the panel waits for a Share that cannot come until Cancel or the 15-minute `TIMEOUT`. The owner's eyes and L16/L17 catch it.
+- **What remains detectable.** Own `type`/`angle` descriptors on the instance (the native ones live on the prototype), getters that are not native code, a type that disagrees with `screen.width > screen.height` and with the prototype's getter, and the marker on the getter. One more JS-visible inconsistency of the spoofed session, scoped to the composer tab (strategy §2.3).
+- **Verified by:** the browser test of the shim (installs once, only on a landscape screen, prototype and the rest untouched, no event; SH-2: a throwing page global or getter reads `failed`, never an exception); check-bundle T3 (SH-2: the shim cut out of the built `background.js` gives every expected reading in a bare `node:vm` realm, so it is self-contained); U9 (row 5b and the reducer, H0 and H1; SH-1 (a) and (b), SH-2); U11 (the injection: MAIN world, the composer tab's frame 0, before the agent, on every new document, read only with the E2E flag in guarded builds only, or only off the composer with `"home"`); E28 (a) (H1 on the emulated landscape screen: the page reads `portrait-primary`, Share, posted), E28 (b) (mock with the shim off: snackbar, no Share, `SCREEN_LANDSCAPE`; live ignores the flag), E28 (c) (H0 by + → Story: session started, posted), E28 (e) (mock, the shim only on the composer: snackbar, `SCREEN_LANDSCAPE` "after the composer mounted", C3b fail); every E2E that reaches the composer (the fixtures' invariant: no composer showed its snackbar).
+- **Live:** **failed on 2026-10-12** before the shim (Arc, owner, test account: window fitted 503x894 @2x portrait, `matchMedia('(orientation: landscape)')` false, `screen.orientation.type` `landscape-primary`; snackbar instead of Share after the H1 insert and after + → Story → pick by hand). With the shim: L16, L17.
 
 ### C4: story input
 
 - **Probe (agent, `findStoryInput`).** An `input[type=file]` whose `accept` list, split on commas and trimmed, set-equals `{image/avif, image/jpeg, image/png}`. An input whose list names only image types is a candidate; the post input also accepts video, so it never counts.
 - **Decision.** No candidate gives `INPUT_MISSING`, and a candidate with another list gives `ACCEPT_DRIFT`. Both degrade to H0 in the same window; nothing is inserted.
 - **Evidence.** Research §5.5 and §2 fn 5: a hidden `<input type=file accept="image/avif,image/jpeg,image/png">`. Spike S7: inserting through `DataTransfer` plus a synthetic `change` fires React 19's `onChange` (AM3).
-- **Verified on the fake by:** B6 (the story input is chosen and the post input ignored); E5 (H1 insert); E12 h (`input=afterTap`), E12 j (`accept=changed`); E12 f and g (an ignored insert degrades to H0 with exactly one inject).
-- **Live:** L4 (presence before tapping), L6 (whether an `isTrusted:false` insert is accepted).
+- **Where (F3, 2026-10-12, AM32).** The story input is the hidden `<input type=file accept="image/avif,image/jpeg,image/png">` of PolarisImageFileForm beside the header's + / Story entry, on `/` too, present whenever that entry is rendered: only at ≤ 767 CSS px. It may mount after hydration, so the first probe that reaches C4 and finds none waits once, up to 6 s, for the agent's `input-appeared`, then probes again: in a post (H1 or H0) and in probe mode alike (AM36), so C4 is never read from a snapshot taken before hydration; a session that ends during the wait records C4 `unknown`. Inserting into it (or picking a file) starts msite's story session and SPA-navigates to `/create/story/` with the composer.
+- **Recorded as.** `unknown` when the decision stopped before C4 (guard, login, desktop site, interception, layout rows), with the panel's "(not checked: stopped before this step)"; the panel's Story input row is `storyInputText()` (AM33).
+- **Verified on the fake by:** B6 (the story input is chosen and the post input ignored); E5 (H1 insert into the header input, then the SPA navigation); E25 (the input mounts 1.5 s after the page: the wait catches it); E4 (b) (probe mode, the header mounting 2.5 s late: `present`, C4 pass); E6 (H0 from home); E12 h (`input=afterTap`, after the wait), E12 j (`accept=changed`); E12 f and g (an ignored insert degrades to H0 with exactly one inject); E24 (no file input at all in the wide layout).
+- **Live:** **failed on 2026-10-12** at 1512 CSS px (no file input on the page, `acceptSeen: []`), which F3 explains; the panel's "absent (accept list changed)" was wrong (AM33). L4/L14 (presence beside + at ≤ 767 px), L15 (the H0 pick), L6 (whether an `isTrusted:false` insert is accepted). A `none …` there after the 6 s wait is inconclusive until L15 shows by hand whether + → Story has the input.
 
 ### C5: `/create/story/` reachable directly
 
 - **Probe (background).** The tab's URL at the first `complete` after the hard reload. `/create/story…` is `direct`; anywhere else on www is `homeOnly`.
-- **Decision.** `homeOnly` is H0, and the instructions say "tap + → Story". Leaving for `/` is not C9 until the composer is engaged (AM18): a client-side redirect home after the reload's `complete` also makes C5 `homeOnly` (fail). Any other www page is `UNEXPECTED_PAGE` (AM17).
-- **Evidence.** Research §5.2: the route is `/create/story/`; whether it works directly is (unverified, A8).
-- **Verified on the fake by:** U9; E4 and E5 (`direct`); E12 i (`route=homeOnly`: H0 with the "tap + → Story" text, then posted from home).
-- **Caveat found by E12 a.** When a service worker answers the first composer load with a desktop-UA fetch and the server redirects that request to `/`, the redirect commits before the hard reload runs. The reload then reloads `/`, and C5 reads `homeOnly` although the route itself works. On the fake this happens on every run; E12 a pins it, and E12 a2 runs a post through it (H0 from home). If L4 sees `homeOnly` together with a "(ServiceWorker)" first document in DevTools, read C5 with that in mind. Whether a desktop `/create/story/` 302s home at all is the fake's `desktopComposer` knob (unverified, L4).
-- **Live:** L4.
+- **Decision (since 2026-10-12, AM32).** C5 records a fact and decides nothing: `/create/story/` without media lands on `/` (`homeOnly`, `fail`), which is **Instagram's normal outcome, not drift** (F3). On `/` the header's story input is used: H1 inserts into it, H0's text says "Instagram opened its home page, as it usually does. In the Instagram window tap + → Story, then pick …". Leaving for `/` is not C9 until the composer is engaged (AM18), and an insert made on home engages it only once the tab shows `/create/story`. Any other www page is `UNEXPECTED_PAGE` (AM17).
+- **Evidence.** Research §5.2: the route is `/create/story/`. F3 (logged-out code reading, 2026-10-12) and the first live run (route `homeOnly`): it lands on `/` without media.
+- **Verified on the fake by:** U9; E4, E5, E6, E25 (`homeOnly`, the default since AM35); E12 i (`route=direct`, the old assumption: C5 passes, "tap + → Story and pick").
+- **Caveat found by E12 a.** When a service worker answers the first composer load with a desktop-UA fetch and the server redirects that request to `/`, the redirect commits before the hard reload runs. The reload then reloads `/`. Since F3 that is where the route lands anyway; E12 a pins it with the hypothetical worker. Whether a desktop `/create/story/` 302s home at all is the fake's `desktopComposer` knob (unverified, L4).
+- **Live:** **`homeOnly` on 2026-10-12** (as F3 says). L4.
 
 ### C6: composer ready
 
@@ -105,8 +124,9 @@ This file has two parts:
 
 These are not C items, but the same probe reports them:
 
+- **Screen orientation (AM37).** The portrait shim's reading for the current document (C3b), on every report as `orientation` and in the panel's Screen row.
 - **Fake marker (SG4).** `<meta name="instapost-fake-instagram">`. In a guarded build, a missing marker gives `GUARD_NOT_FAKE` (E10). In live, a present marker shows the FAKE INSTAGRAM banner (E5, E10).
-- **Service-worker control.** `navigator.serviceWorker.controller !== null` from the isolated world. Controlled after the hard reload gives `DESKTOP_SHELL`; a `controllerchange` later gives `SW_TOOK_CONTROL` (E12 a, b).
+- **Service worker (since 2026-10-12, AM30).** `navigator.serviceWorker.controller !== null` from the isolated world is **diagnostics only**: Instagram re-registers its root worker on every logged-in load at `/www-service-worker.js?s=push&__d=www&enableAddToHomeScreen=<is_mobile>&zenon_device_id=<id>`, the new worker calls `skipWaiting()` and `clients.claim()`, and so it controls the composer within about a second on every hand-off (F2; the live run saw `swControlled: true`). A `controllerchange` is counted on the record (`swControllerChanges`); `SW_TOOK_CONTROL` is no longer emitted. The worker has **no fetch handler**, so the page's requests stay tab-attributed and rule 1001 applies. What is fatal is **interception**: a www/i.instagram.com `PerformanceResourceTiming` with `workerStart > 0`, or the navigation entry's when it was not a `reload`, gives `SW_INTERCEPTS` (close, no lock), from the probe (`swIntercepted`, `navType`) or from the agent's watch (a scan every 250 ms plus a `PerformanceObserver`, because a page's resource-timing buffer stops at 250 entries). Blind spot: a cross-origin entry without `Timing-Allow-Origin` reports `workerStart` 0. Verified in Chromium (browser test: 0 without a fetch handler, > 0 with one) and on the fake: E23 (the default claim-on-register worker: controlled, `workerStart` 0 on every www request, counted, posted), E12 a/a2 (the hypothetical `desktopShell` worker with a fetch handler: `SW_INTERCEPTS`), E12 b (`claimLate`: counted, posted). Rule 1001 stays tab-only (`uaRule` throws for tab −1); the rehearsal rules keep `[tab, -1]`.
 
 ---
 
@@ -456,3 +476,27 @@ Measured in Playwright's Chromium 156 (headless, sealed, mock build) with a `tab
 - **Brands.** The extension service worker's `navigator.userAgentData.brands` is `["Not:A-Brand", "Chromium"]` in Playwright's Chromium 156 headless; E2 asserts no branded brand on both E2E browsers (AM23).
 - **Extension requests are visible to Playwright.** `context.on('request')` reports the extension service worker's fetches (`request.serviceWorker()` is `background.js`) and the editor page's (frame URL `chrome-extension://…`), so the tripwire can flag them (AM26).
 
+---
+
+## First live run (Arc, 2026-10-12)
+
+The owner's first live hand-off. Arc (Chromium 155) on macOS: the MacBook (1512x982 pt at 2x, primary, at 0,0) and a 3440x1440 ultrawide at 1x placed at (1512,−428); the editor was on the ultrawide (`screen.avail*`: 1512, −428, 3440x1410). Live build, a new secondary account, rehearsal off, assisted insert off.
+
+- **Record.** Phases `opening(0) → scoping(+246 ms) → fitting(+280) → navigating(+298) → reloading(+848) → probing(+3541) → closing`; outcome `failed:DESKTOP_SHELL`; probe `{marker:false, isMobile:true, inner:1512x902, dpr:1, portrait:false, swControlled:true, storyInput:'absent', acceptOk:false, acceptSeen:[], lang:'en'}`; route `homeOnly`; preflight C1 pass, C2 pass, C3 fail, C4 fail, C5 fail. The panel said "Story input: absent (accept list changed)".
+- **Why.** `DESKTOP_SHELL` came from `swControlled` (the rule at the time), not from `is_mobile`, which was `true`. The window was never fitted: Arc ignored the create's bounds and the product's update. At 1512 CSS px msite renders its wide layout, which has no file input at all. `/create/story/` landed on `/`, as it does.
+- **Facts established that day** (they are the basis of strategy §11 AM29–AM35; `baseline.json` records each with its source):
+  - **F1, Arc's windows** (owner's console experiment from the editor): `chrome.windows.create({type:'popup', url:'about:blank', focused:true, left:2970, top:-328, width:524, height:1012})` ignored the bounds: the window came out 1512x949 at (1831,13), its tab 1512x902. `chrome.windows.update(id, {state:'normal', left:2970, top:-328, width:524, height:1012})` 500 ms later was honoured: 524x1012, tab 524x965 (frame 0x47). A `type:'normal'` create with `state:'normal'` honoured its bounds (±30 px). The owner can resize both windows by hand (e.g. a tab of 379x866). Arc's `navigator.userAgentData.brands` = `[Chromium 155, Not(A:Brand 24]`, the same as Playwright's Chromium; Arc injects `--arc-palette-*` CSS custom properties on page roots (a detection heuristic, AM34).
+  - **F2, Instagram's service worker** (logged-out reading of production code): the registration URL and lifecycle above (§ "Also probed on every hand-off"); no fetch handler in the 2024 copy (the 2026 worker is behind login).
+  - **F3, msite's shape** (same reading): `/create/story/` without media lands on `/`; the story input sits beside + / Story and exists whenever that entry does; the mobile header renders only at ≤ 767 CSS px (IGDS `nav-bottom-screen-max`); picking a file runs the portrait check and SPA-navigates to `/create/story/`; HEIC is desktop-only.
+- **Arc research (same day).** Arc often ignores the first `windows.update`; an Arc-aware extension re-applies a window's bounds at 0/50/150/300/500/1000 ms; popups created with a `chrome-extension://` URL honour their bounds where `about:blank` ones do not (not adopted: instapost keeps `about:blank` and re-applies, AM29).
+- **Spike S11 (sealed, headless, CfT 155.0.8059.39 and Chromium 156.0.8078.4).** `--screen-info={0,0 3024x1964 devicePixelRatio=2 workAreaTop=66}{1512,-428 3440x1440 devicePixelRatio=1 workAreaBottom=30}` emulates both displays: a window moved onto the ultrawide reads `screen.avail*` = 1512, −428, 3440x1410 and DPR 1, exactly the owner's numbers, and a popup created there at (2970,−328) 524x1012 keeps those bounds (tab 524x980, headless frame 0x32). A `label=…` needs quotes, which the seal forbids, and an unquoted one crashes the browser. `HEADLESS_DUAL_SCREEN_ARGS` (flags.ts) and E26 use it.
+
+---
+
+## Second live run (Arc, 2026-10-12)
+
+The owner, a test account, the live build with AM29–AM36, in Arc on the MacBook display (landscape). The composer window was fitted before Instagram loaded: 503x894 CSS px at 2x, portrait (`matchMedia('(orientation: landscape)')` false), while `screen.orientation.type` was `landscape-primary`.
+
+- **What happened.** On home + → Story opened the file chooser (C3a passed). After a photo was picked, `/create/story/` showed a bottom snackbar "Rotate your device to add to your story." instead of the share footer. The same after the H1 insert into the header input (H1) and after the owner's own + → Story → pick (H0).
+- **Why** (Instagram's public bundles, read the same day). Two different checks (research §5.1, §5.2): the session start at + → Story reads the viewport (`innerHeight < innerWidth`), but the composer page's `isLandscape` reads `screen.orientation.type` first, at mount and on `resize`. A landscape monitor is therefore "landscape" to the composer in any window. The H1 insert also bypasses the session start (`onFileChange` → `storyCreationSelectMedia`), so its `sessionId` stays null.
+- **Consequences** (strategy §11 AM37). C3 split into C3a and C3b; the portrait shim in the composer tab; new error `SCREEN_LANDSCAPE`; assisted insert stays off by default in the live build; `baseline.json` `composerLandscapeCheck: "screen"` with its provenance; the fake models both checks (knob `landscapeCheck`); live checklist L16, L17.

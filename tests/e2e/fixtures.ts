@@ -22,7 +22,9 @@
  *   `Origin: chrome-extension://` header (SG11); in the mock project, no write reached the fake. A
  *   test that provokes a violation on purpose (E11) opts out of that one check with
  *   `invariants.allowViolations()`; `invariants.check()` runs the same checks on demand and throws
- *   (E11's meta-test).
+ *   (E11's meta-test). AM37: every composer the fake showed a photo in showed Share, never the rotate
+ *   snackbar (the emulated screen is landscape, so this proves the portrait shim in every spec that
+ *   reaches the composer); E28 (b) and (e) opt out with `invariants.allowLandscapeComposer()`.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -32,7 +34,7 @@ import type { WxtBrowser } from 'wxt/browser';
 import type { HandoffRecord, HandoffState, Settings } from '../../src/core/handoff/state.ts';
 import type { DnrRule } from '../../src/core/ig-contract/rules.ts';
 import { extIdForMode } from '../../tools/chrome/ext-id.ts';
-import { assertSealed, readSpki, sealedPlaywrightArgs } from '../../tools/chrome/flags.ts';
+import { assertSealed, type HeadlessScreens, readSpki, sealedPlaywrightArgs } from '../../tools/chrome/flags.ts';
 import { DEFAULT_KNOBS } from '../../tools/fake-ig/knobs.ts';
 import { type ArtifactMode, artifactMode, MANIFEST_NAMES } from './helpers/artifacts.ts';
 import { createFakeClient, type FakeClient } from './helpers/fake-client.ts';
@@ -53,9 +55,15 @@ export interface E2eTestOptions {
    * Install the fake's `desktopShell` service worker before the test, as everyday browsing installs
    * Instagram's own in the owner's profile (FID-1). On by default exactly when the baseline says the
    * first composer load is SW-served (DEFAULT_KNOBS.sw), so a baseline update changes the E2E
-   * conditions, not only the knob.
+   * conditions, not only the knob. Since F2 (2026-10-12) the default worker (`claimOnRegister`) is
+   * registered by every fake page itself, so this is off by default.
    */
   preinstallFakeSw: boolean;
+  /**
+   * The emulated screens of a headless run: the owner's MacBook (`owner`, S8) or, as on the first live
+   * run, the MacBook plus the ultrawide at (1512,-428) (`ownerDual`, S11, AM29).
+   */
+  screens: HeadlessScreens;
 }
 
 export const IG_ORIGIN = 'https://www.instagram.com';
@@ -98,6 +106,11 @@ export interface Tripwire {
 export interface Invariants {
   /** This test provokes a fake violation on purpose (E11): skip that check from now on. */
   allowViolations(): void;
+  /**
+   * AM37: this test makes the composer show its landscape gate on purpose (the portrait shim switched
+   * off, E28 b): skip the "every composer showed Share" check from now on.
+   */
+  allowLandscapeComposer(): void;
   /** Runs every invariant now; rejects with the list of problems (the teardown runs it too). */
   check(): Promise<void>;
 }
@@ -155,9 +168,28 @@ export async function checkInvariants(o: {
   tripwire: Tripwire;
   mode: ArtifactMode;
   violationsAllowed: boolean;
+  /** AM37: this test shows the composer's landscape gate on purpose (E28 b, the shim switched off). */
+  landscapeAllowed?: boolean;
 }): Promise<void> {
   const { fake, tripwire } = o;
   const problems: string[] = [];
+  // AM37: the E2E screen is landscape (HEADLESS_SCREEN_ARGS), so every composer that showed a photo
+  // proves the portrait shim worked: it showed Share, not the rotate snackbar.
+  if (!o.landscapeAllowed) {
+    const blocked = (await fake.composerViews()).filter((v) => v.landscape);
+    if (blocked.length > 0) {
+      problems.push(
+        `the composer showed its rotate snackbar and no Share (the portrait shim did not take effect): ${JSON.stringify(blocked)}`,
+      );
+    }
+    // And every story was shared from a page that read a portrait screen (the shim's, here).
+    const landscapeShares = (await fake.stories()).filter((s) => s.meta?.screenOrientation?.startsWith('landscape'));
+    if (landscapeShares.length > 0) {
+      problems.push(
+        `stories shared while the page read a landscape screen: ${landscapeShares.map((s) => s.id).join(', ')}`,
+      );
+    }
+  }
   const leaks = tripwire.leaks();
   if (leaks.length > 0)
     problems.push(`undeclared requests outside the seal or from the extension: ${leaks.join(', ')}`);
@@ -199,6 +231,7 @@ export const test = base.extend<
   artifact: ['.output/chrome-mv3-mock', { option: true, scope: 'worker' }],
   executablePath: [undefined, { option: true, scope: 'worker' }],
   preinstallFakeSw: [DEFAULT_KNOBS.sw === 'desktopShell', { option: true }],
+  screens: ['owner', { option: true }],
 
   // biome-ignore lint/correctness/noEmptyPattern: Playwright fixtures take a destructured first argument
   spki: async ({}, use) => {
@@ -214,10 +247,10 @@ export const test = base.extend<
     await use(fake);
   },
 
-  context: async ({ artifact, executablePath, headless, spki, fake }, use) => {
+  context: async ({ artifact, executablePath, headless, spki, fake, screens }, use) => {
     void fake; // reset before the browser starts
     const extDir = resolve(artifact);
-    const args = sealedPlaywrightArgs(spki, extDir, { headless });
+    const args = sealedPlaywrightArgs(spki, extDir, { headless, screens });
     assertSealed(args);
     const userDataDir = await mkdtemp(join(tmpdir(), 'instapost-e2e-'));
     const context = await chromium.launchPersistentContext(userDataDir, {
@@ -463,10 +496,14 @@ export const test = base.extend<
 
   invariants: async ({ fake, tripwire, extension }, use) => {
     let violationsAllowed = false;
-    const check = () => checkInvariants({ fake, tripwire, mode: extension.mode, violationsAllowed });
+    let landscapeAllowed = false;
+    const check = () => checkInvariants({ fake, tripwire, mode: extension.mode, violationsAllowed, landscapeAllowed });
     await use({
       allowViolations: () => {
         violationsAllowed = true;
+      },
+      allowLandscapeComposer: () => {
+        landscapeAllowed = true;
       },
       check,
     });

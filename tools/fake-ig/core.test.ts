@@ -3,7 +3,7 @@
  * geometry. Never depends on src/core's parseIsMobile (U15 owns that); the UA JSON is read here
  * with JSON.parse.
  */
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,8 +11,17 @@ import baselineJson from '../../src/core/ig-contract/baseline.json' with { type:
 import type { Baseline } from '../../src/core/ig-contract/contract.ts';
 import { androidReducedUa, CH_REMOVE } from '../../src/core/ig-contract/device-profile.ts';
 import { WRITE_URL_FILTERS } from '../../src/core/ig-contract/write-endpoints.ts';
+import { SW_FILES } from './bundle.ts';
 import { computeGeometry, coverCrop, fitAspect } from './client/geometry.ts';
-import { ACCEPT_CH, createCore, type FakeResponse, matchWriteFilter, normalizeHost } from './core.ts';
+import { claimOnRegisterUrl } from './client/sw.ts';
+import {
+  ACCEPT_CH,
+  createCore,
+  type FakeResponse,
+  matchWriteFilter,
+  normalizeHost,
+  parseComposerView,
+} from './core.ts';
 import {
   BASELINE,
   DEFAULT_KNOBS,
@@ -93,6 +102,9 @@ function meta(isTrusted: boolean): FakeShareMeta {
     geometry,
     path: '/create/story/',
     navigatorUa: MAC,
+    sessionStarted: true,
+    sessionId: '0b4f8e1c-2d5a-4c11-9a0e-6f3b7c2d1e90',
+    screenOrientation: 'portrait-primary',
   };
 }
 
@@ -101,7 +113,14 @@ function setup(dir: string | null = null) {
   let n = 0;
   const core = createCore({
     store,
-    assets: { clientJs: '/* client */', sw: { desktopShell: '/* desktop-shell */', claimLate: '/* claim-late */' } },
+    assets: {
+      clientJs: '/* client */',
+      sw: {
+        claimOnRegister: '/* claim-on-register */',
+        desktopShell: '/* desktop-shell */',
+        claimLate: '/* claim-late */',
+      },
+    },
     certValidTo: CERT_VALID_TO,
     sourceHash: SOURCE_HASH,
     token: () => `tok${++n}`,
@@ -200,10 +219,19 @@ describe('U16 fake core: routes and shells', () => {
   });
 
   it('GET /create/story/ renders the composer route on msite with route=direct', () => {
-    const { get } = setup();
+    const { get, store } = setup();
+    store.setKnobs({ route: 'direct' });
     const r = get('/create/story/');
     expect(r.status).toBe(200);
     expect(bootOf(text(r))).toMatchObject({ shell: 'msite', route: 'composer' });
+  });
+
+  it('AM35: by default (route=homeOnly, production F3) /create/story/ without media lands on /', () => {
+    const { get } = setup();
+    const r = get('/create/story/');
+    expect(r.status).toBe(302);
+    expect(r.headers.location).toBe('/');
+    expect(bootOf(text(get('/')))).toMatchObject({ shell: 'msite', route: 'home' });
   });
 
   it('desktop UA on /create/story/ redirects to /', () => {
@@ -280,13 +308,18 @@ describe('U16 fake core: routes and shells', () => {
     }
   });
 
-  it('serves the client bundle and the service workers (scope / allowed)', () => {
-    const { get } = setup();
+  it('serves the client bundle, the beacon and the service workers (scope / allowed)', () => {
+    const { get, api } = setup();
     const client = get('/fake-static/client.js');
     expect(client.status).toBe(200);
     expect(client.headers['content-type']).toMatch(/^text\/javascript/);
     expect(text(client)).toBe('/* client */');
+    // The request a page sends when a worker takes control of it (the P3 tripwire reads its timing).
+    const beacon = get('/fake-static/beacon?controller=1');
+    expect(beacon.status).toBe(204);
+    expect(api<Array<{ path: string }>>('requests').map((r) => r.path)).toContain('/fake-static/beacon?controller=1');
     for (const [path, body] of [
+      ['/fake-sw/claim-on-register.js?enableAddToHomeScreen=true&zenon_device_id=abc', '/* claim-on-register */'],
       ['/fake-sw/desktop-shell.js', '/* desktop-shell */'],
       ['/fake-sw/claim-late.js', '/* claim-late */'],
     ] as const) {
@@ -342,7 +375,7 @@ describe('U16 fake core: knobs in the shell', () => {
   it('locale=es sets html[lang] and passes the locale to the client', () => {
     const { get, store } = setup();
     store.setKnobs({ locale: 'es' });
-    const html = text(get('/create/story/'));
+    const html = text(get('/'));
     expect(html).toContain('<html lang="es">');
     expect(bootOf(html).knobs.locale).toBe('es');
   });
@@ -376,10 +409,12 @@ describe('U16 fake core: knobs in the shell', () => {
   it('every knob reaches the client unchanged', () => {
     const { get, store } = setup();
     const knobs = store.setKnobs({
+      route: 'direct',
       input: 'afterTap',
       accept: 'changed',
       listen: 'drop',
       geometry: 'cssFixed:360x640',
+      hydrateMs: 800,
     });
     expect(bootOf(text(get('/create/story/'))).knobs).toEqual(knobs);
   });
@@ -387,7 +422,8 @@ describe('U16 fake core: knobs in the shell', () => {
 
 describe('U16 fake core: request log', () => {
   it('logs every non-/__fake__ request with its headers and classification', () => {
-    const { get, api } = setup();
+    const { get, api, store } = setup();
+    store.setKnobs({ route: 'direct' });
     get('/create/story/?a=1', ANDROID, {
       'sec-ch-ua': '"Chromium";v="155"',
       'sec-ch-ua-mobile': '?1',
@@ -697,15 +733,89 @@ describe('U16 fake core: control clicks report isTrusted (FID-2)', () => {
   });
 });
 
+describe('U16 fake core: composer views and the story session (AM37)', () => {
+  const view = (over: Record<string, unknown> = {}) => ({
+    landscape: true,
+    share: false,
+    via: 'screen',
+    screenOrientation: 'landscape-primary',
+    inner: { w: 511, h: 909 },
+    sessionStarted: true,
+    path: '/create/story/',
+    ...over,
+  });
+
+  it('records what the composer page showed, in order; reset clears it; the dashboard lists it', () => {
+    const { postJson, api, get, store } = setup();
+    expect(postJson('/__fake__/composer-view', view()).status).toBe(200);
+    expect(
+      postJson('/__fake__/composer-view', view({ landscape: false, share: true, sessionStarted: false })).status,
+    ).toBe(200);
+    const views = api<(ReturnType<typeof view> & { seq: number; t: number })[]>('composer-views');
+    expect(views.map((v) => [v.landscape, v.share, v.sessionStarted])).toEqual([
+      [true, false, true],
+      [false, true, false],
+    ]);
+    expect(views[0]).toMatchObject({
+      via: 'screen',
+      screenOrientation: 'landscape-primary',
+      inner: { w: 511, h: 909 },
+    });
+    expect(views[1]?.seq).toBeGreaterThan(views[0]?.seq ?? Infinity);
+    const html = text(get('/__fake__/'));
+    expect(html).toContain('Composer views (landscape gate)');
+    expect(html).toContain('rotate snackbar, no Share');
+    store.reset();
+    expect(api<unknown[]>('composer-views')).toEqual([]);
+  });
+
+  it('refuses malformed reports and other methods; nothing is recorded', () => {
+    const { postJson, api, get } = setup();
+    for (const bad of [
+      {},
+      view({ landscape: 'yes' }),
+      view({ via: 'css' }),
+      view({ inner: { w: 'x', h: 1 } }),
+      view({ screenOrientation: 'x'.repeat(65) }),
+      view({ path: 7 }),
+    ]) {
+      expect(postJson('/__fake__/composer-view', bad).status).toBe(400);
+    }
+    expect(get('/__fake__/composer-view').status).toBe(405);
+    expect(api<unknown[]>('composer-views')).toEqual([]);
+    // It is never part of the site request log.
+    expect(api<unknown[]>('requests')).toEqual([]);
+  });
+
+  it('parseComposerView keeps only the known fields', () => {
+    expect(parseComposerView({ ...view({ screenOrientation: null }), extra: 'x' })).toEqual(
+      view({ screenOrientation: null }),
+    );
+    expect(parseComposerView(null)).toBeNull();
+  });
+
+  it('a story keeps whether + → Story started the session (the insert never does)', () => {
+    const { share, api } = setup();
+    share(meta(true));
+    share({ ...meta(true), sessionStarted: false, sessionId: null });
+    const stories = api<{ meta: FakeShareMeta }[]>('stories');
+    expect(stories.map((s) => [s.meta.sessionStarted, s.meta.sessionId === null])).toEqual([
+      [true, false],
+      [false, true],
+    ]);
+    expect(stories[0]?.meta.screenOrientation).toBe('portrait-primary');
+  });
+});
+
 describe('U16 knobs: defaults and baseline', () => {
   it('default knobs equal deriveKnobs(baseline.json)', () => {
-    expect(deriveKnobs(baselineJson as Baseline)).toEqual(DEFAULT_KNOBS);
+    expect(deriveKnobs(baselineJson as unknown as Baseline)).toEqual(DEFAULT_KNOBS);
     expect(deriveKnobs(BASELINE)).toEqual(DEFAULT_KNOBS);
   });
 
-  it('the pre-L4 baseline gives the §7.6 knob list', () => {
+  it('AM35: the 2026-10-12 baseline gives the production-shaped knob list', () => {
     expect(DEFAULT_KNOBS).toMatchObject({
-      route: 'direct',
+      route: 'homeOnly',
       input: 'present',
       accept: 'default',
       listen: 'change',
@@ -713,24 +823,51 @@ describe('U16 knobs: defaults and baseline', () => {
       geometry: 'viewportDpr',
       insets: [0, 0],
       save: 'on',
-      sw: 'none',
+      sw: 'claimOnRegister',
+      hydrateMs: 0,
     });
+    // The facts that make it so, each with where it comes from (the first live run or a code reading).
+    expect(BASELINE).toMatchObject({
+      route: 'homeOnly',
+      storyInputBeforeTap: true,
+      swClaimsOnLoad: true,
+      swFetchHandler: false,
+      firstLoadServedBySw: false,
+      swControlledAfterHardReload: true,
+      msiteMaxCssWidth: 767,
+    });
+    for (const fact of ['route', 'storyInputBeforeTap', 'swClaimsOnLoad', 'swFetchHandler', 'msiteMaxCssWidth']) {
+      expect(BASELINE.provenance?.[fact], fact).toMatch(/2026-10-12/);
+    }
+    expect(BASELINE.provenance?.route).toMatch(/live run 2026-10-12/);
+    expect(BASELINE.provenance?.swControlledAfterHardReload).toMatch(/live run 2026-10-12/);
+  });
+
+  it('AM37: the composer reads the screen orientation (live 2026-10-12), so the fake does too', () => {
+    expect(BASELINE.composerLandscapeCheck).toBe('screen');
+    expect(BASELINE.provenance?.composerLandscapeCheck).toMatch(/^live 2026-10-12/);
+    expect(DEFAULT_KNOBS.landscapeCheck).toBe('screen');
+    expect(deriveKnobs({ ...BASELINE, composerLandscapeCheck: 'viewport' }).landscapeCheck).toBe('viewport');
+    // Unknown keeps the viewport check research described before the live finding.
+    expect(deriveKnobs({ ...BASELINE, composerLandscapeCheck: 'unknown' }).landscapeCheck).toBe('viewport');
+    expect(parseKnobPatch({ landscapeCheck: 'viewport' })).toEqual({ ok: true, patch: { landscapeCheck: 'viewport' } });
+    expect(parseKnobPatch({ landscapeCheck: 'css' }).ok).toBe(false);
   });
 
   it('maps every modelled baseline fact', () => {
     const b: Baseline = {
       ...BASELINE,
-      route: 'homeOnly',
+      route: 'direct',
       storyInputBeforeTap: false,
       accept: STORY_ACCEPT_LISTS.changed.split(','),
       untrustedInsertAccepted: false,
       fileEvent: 'drop',
-      firstLoadServedBySw: true,
+      swFetchHandler: true,
       geometry: { model: 'fixed:1080x1920', insets: [44, 52], saveExposed: false },
     };
     expect(deriveKnobs(b)).toEqual({
       ...DEFAULT_KNOBS,
-      route: 'homeOnly',
+      route: 'direct',
       input: 'afterTap',
       accept: 'changed',
       listen: 'drop',
@@ -741,6 +878,24 @@ describe('U16 knobs: defaults and baseline', () => {
       save: 'off',
     });
     expect(deriveKnobs({ ...BASELINE, accept: ['image/png', 'image/jpeg', 'image/avif'] }).accept).toBe('default');
+  });
+
+  it('F2: the service-worker facts pick the sw knob', () => {
+    const noSw: Baseline = {
+      ...BASELINE,
+      swClaimsOnLoad: false,
+      swFetchHandler: false,
+      firstLoadServedBySw: false,
+      swControlledAfterHardReload: false,
+    };
+    expect(deriveKnobs(noSw).sw).toBe('none');
+    expect(deriveKnobs({ ...noSw, swClaimsOnLoad: true }).sw).toBe('claimOnRegister');
+    // A worker with a fetch handler is the hypothetical intercepting one (SW_INTERCEPTS), claiming or not.
+    expect(deriveKnobs({ ...noSw, swFetchHandler: true }).sw).toBe('desktopShell');
+    expect(deriveKnobs({ ...BASELINE, swFetchHandler: true }).sw).toBe('desktopShell');
+    // The pre-F2 hypothesis: a worker served the first load.
+    expect(deriveKnobs({ ...noSw, firstLoadServedBySw: true }).sw).toBe('desktopShell');
+    expect(deriveKnobs({ ...noSw, swClaimsOnLoad: 'unknown', swFetchHandler: 'unknown' }).sw).toBe('none');
   });
 
   it('FID-5: L6 reaches the fake; unknown facts keep the research defaults', () => {
@@ -758,23 +913,26 @@ describe('U16 knobs: defaults and baseline', () => {
       fileEvent: 'unknown',
     };
     expect(deriveKnobs(unknown)).toMatchObject({
-      route: 'direct',
+      route: 'homeOnly',
       input: 'present',
       trusted: 'ignore',
       listen: 'change',
     });
-    // The pre-L4 baseline marks what L4/L6 have not verified yet.
+    // The baseline still marks what L4/L6 have not verified yet.
     expect(BASELINE).toMatchObject({
-      route: 'unknown',
-      storyInputBeforeTap: 'unknown',
       untrustedInsertAccepted: 'unknown',
+      fileEvent: 'unknown',
     });
   });
 
   it.each([
     ['isMobileKeyFound=false', { isMobileKeyFound: false }],
     ['an accept list the fake cannot serve', { accept: ['image/webp'] }],
-    ['swControlledAfterHardReload=true', { swControlledAfterHardReload: true }],
+    [
+      'swControlledAfterHardReload=true without a worker that claims on load',
+      { swControlledAfterHardReload: true, swClaimsOnLoad: false },
+    ],
+    ['a breakpoint other than the contract’s 767 CSS px', { msiteMaxCssWidth: 800 }],
   ] as Array<[string, Partial<Baseline>]>)('throws for %s, forcing the fake to be extended', (_name, patch) => {
     expect(() => deriveKnobs({ ...BASELINE, ...patch })).toThrow(/not modelled/);
   });
@@ -792,6 +950,8 @@ describe('U16 knobs: defaults and baseline', () => {
     }
     expect(parseKnobPatch({ insets: '1,2,3' }).ok).toBe(false);
     expect(parseKnobPatch({ slowMs: -1 }).ok).toBe(false);
+    expect(parseKnobPatch({ hydrateMs: '1500' })).toEqual({ ok: true, patch: { hydrateMs: 1500 } });
+    expect(parseKnobPatch({ hydrateMs: 60_001 }).ok).toBe(false);
     expect(parseKnobPatch([]).ok).toBe(false);
   });
 
@@ -858,6 +1018,38 @@ describe('U16 fake client geometry', () => {
       sh: (1000 * 1920) / 1080,
     });
     expect(coverCrop({ w: 1080, h: 1920 }, { w: 1080, h: 1920 })).toEqual({ sx: 0, sy: 0, sw: 1080, sh: 1920 });
+  });
+});
+
+describe('U16 fake service workers (F2, AM30)', () => {
+  it('claim-on-register.js, the default: skipWaiting and clients.claim, and NO fetch handler', () => {
+    const src = readFileSync(SW_FILES.claimOnRegister, 'utf8');
+    expect(src).toContain('self.skipWaiting()');
+    expect(src).toContain('self.clients.claim()');
+    expect(src).toContain('navigationPreload.disable()');
+    expect(src).not.toMatch(/addEventListener\(\s*['"]fetch['"]/);
+  });
+
+  it('desktop-shell.js, hypothetical: a fetch handler that answers navigations and passes requests through', () => {
+    const src = readFileSync(SW_FILES.desktopShell, 'utf8');
+    expect(src).toMatch(/addEventListener\(\s*['"]fetch['"]/);
+    expect(src).toContain('event.respondWith(fetch(event.request))');
+    expect(src).toContain("'x-fake-via-sw': '1'");
+    expect(src).toContain('self.clients.claim()');
+  });
+
+  it('claim-late.js: claims, no fetch handler', () => {
+    const src = readFileSync(SW_FILES.claimLate, 'utf8');
+    expect(src).toContain('self.clients.claim()');
+    expect(src).not.toMatch(/addEventListener\(\s*['"]fetch['"]/);
+  });
+
+  it('every load registers a new claim-on-register URL (enableAddToHomeScreen from is_mobile, per-load id)', () => {
+    expect(claimOnRegisterUrl(true, 'x1')).toBe(
+      '/fake-sw/claim-on-register.js?enableAddToHomeScreen=true&zenon_device_id=x1',
+    );
+    expect(claimOnRegisterUrl(false, 'x2')).toContain('enableAddToHomeScreen=false');
+    expect(claimOnRegisterUrl(true)).not.toBe(claimOnRegisterUrl(true));
   });
 });
 

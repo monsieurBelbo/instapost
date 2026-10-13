@@ -3,11 +3,16 @@
  *
  * Target inner height = min(profile?.innerH ?? 932, availHeight − frameDelta.h − 8);
  * inner width = round(h × 9/16), or h × the profile's ratio when a composerProfile exists;
+ * W4 (2026-10-12): the inner width never exceeds MSITE_MAX_CSS_WIDTH (767 CSS px, × the tab zoom in
+ * window pixels), lowering the height to keep the ratio, because msite has no story entry above it;
  * below 640 px of inner height → SCREEN_TOO_SMALL; the window is centred in the available area.
  *
  * Measured on the owner's 1512x982@2 screen (docs/contract.md S8): avail 1512x949 at top 33,
- * frame delta 0x32, fitted inner 511x909, reached with one windows.update.
+ * frame delta 0x32, fitted inner 511x909, reached with one windows.update. Arc (2026-10-12 live run,
+ * F1) ignores the bounds of windows.create and has a 0x47 frame; windows.update with
+ * `state:'normal'` is honoured there.
  */
+import { MSITE_MAX_CSS_WIDTH } from '../ig-contract/contract.ts';
 import type { Size } from './fit.ts';
 
 /** `screen.avail*` from the editor, sent in handoff/start. */
@@ -47,6 +52,8 @@ export const MIN_INNER_H = 640;
 export const SCREEN_MARGIN = 8;
 /** First guess for the frame height before it is measured. */
 export const FIRST_GUESS_EXTRA_H = 80;
+/** W2: the tab counts as fitted when each side is within this many px of the target inner size. */
+export const FIT_TOLERANCE_PX = 2;
 
 /** `inner` is the content size the popup will have; `outer` is what windows.create/update take. */
 export type WindowFitResult =
@@ -63,16 +70,28 @@ export function innerRatio(profile?: ComposerProfile | null): number {
   return Number.isFinite(r) && r > 0 && r < 1 ? r : DEFAULT_RATIO;
 }
 
-/** Inner size under an inner-height ceiling, also kept inside the available width. */
+/** A usable tab zoom factor (tabs.getZoom), else 1. */
+export function zoomOf(zoom: number | null | undefined): number {
+  return typeof zoom === 'number' && Number.isFinite(zoom) && zoom >= 0.25 && zoom <= 5 ? zoom : 1;
+}
+
+/** W4: the widest inner size (window px) that is still at most MSITE_MAX_CSS_WIDTH CSS px at `zoom`. */
+export function maxMsiteInnerW(zoom?: number | null): number {
+  return Math.floor(MSITE_MAX_CSS_WIDTH * zoomOf(zoom));
+}
+
+/** Inner size under an inner-height ceiling, also kept inside the available width and the msite width. */
 function innerFor(
   screen: ScreenAvail,
   delta: FrameDelta,
   maxInnerH: number,
   profile: ComposerProfile | null | undefined,
+  zoom?: number | null,
 ): Size {
   const ratio = innerRatio(profile);
   let h = Math.floor(Math.min(profile?.innerH ?? DEFAULT_INNER_H, maxInnerH));
-  const maxInnerW = screen.availWidth - delta.w - SCREEN_MARGIN;
+  const maxInnerW = Math.min(screen.availWidth - delta.w - SCREEN_MARGIN, maxMsiteInnerW(zoom));
+  // `round(h × ratio) <= maxInnerW` once h <= (maxInnerW + 0.5) / ratio; floor keeps it below.
   if (Math.round(h * ratio) > maxInnerW) h = Math.floor(maxInnerW / ratio);
   // Strictly portrait even for a near-square profile ratio.
   return { w: Math.min(Math.round(h * ratio), h - 1), h };
@@ -111,8 +130,34 @@ export function firstGuess(screen: ScreenAvail, profile?: ComposerProfile | null
  * `maxInnerH` in the error is the inner height the fit reached: the screen's limit, unless a
  * profile asked for less.
  */
-export function windowFit(screen: ScreenAvail, delta: FrameDelta, profile?: ComposerProfile | null): WindowFitResult {
-  const inner = innerFor(screen, delta, screen.availHeight - delta.h - SCREEN_MARGIN, profile);
+export function windowFit(
+  screen: ScreenAvail,
+  delta: FrameDelta,
+  profile?: ComposerProfile | null,
+  zoom?: number | null,
+): WindowFitResult {
+  const inner = innerFor(screen, delta, screen.availHeight - delta.h - SCREEN_MARGIN, profile, zoom);
   if (inner.h < MIN_INNER_H) return { ok: false, code: 'SCREEN_TOO_SMALL', maxInnerH: inner.h };
   return { ok: true, inner, outer: centred(screen, inner, delta) };
+}
+
+/** Outer minus inner size, never negative; null when either size is not a finite number. */
+export function frameDeltaOf(inner: Size, outer: Pick<WindowBox, 'width' | 'height'>): FrameDelta | null {
+  const w = outer.width - inner.w;
+  const h = outer.height - inner.h;
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+  return { w: Math.max(0, w), h: Math.max(0, h) };
+}
+
+/** W2: the tab reached the target inner size, within FIT_TOLERANCE_PX on each side. */
+export function isFitted(tab: Size, target: Size): boolean {
+  return Math.abs(tab.w - target.w) <= FIT_TOLERANCE_PX && Math.abs(tab.h - target.h) <= FIT_TOLERANCE_PX;
+}
+
+/**
+ * W3: a tab size the composer can work in, whatever windowFit asked for: at most the msite width
+ * (MSITE_MAX_CSS_WIDTH at `zoom`), portrait (height >= width, C3) and at least MIN_INNER_H tall.
+ */
+export function isUsableInner(tab: Size, zoom?: number | null): boolean {
+  return tab.w > 0 && tab.w <= maxMsiteInnerW(zoom) && tab.h >= tab.w && tab.h >= MIN_INNER_H;
 }

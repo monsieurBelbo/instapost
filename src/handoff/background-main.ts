@@ -8,12 +8,14 @@
  * - runtime.onConnect `handoff`: the editor port (our own extension pages only);
  * - runtime.onMessage: composer-agent messages (`agent/*`), each answered (protocol AgentReply);
  * - tabs.onUpdated: the composer tab's updates (hard reload, kill switch, AM2 re-probes);
+ * - windows.onBoundsChanged: the composer window being resized by hand (W3, guided resize);
  * - windows.onRemoved, tabs.onRemoved, runtime.onStartup, runtime.onInstalled: cleanup, which
  *   removes session rules 1001–1019 idempotently. A popup left open by a reload, update or
  *   disable/enable of the extension is closed first, when the runner starts (runner.ts, AM22).
  */
 import { browser } from 'wxt/browser';
 import { dnr } from '../platform/dnr.ts';
+import { e2eRunnerHooks } from '../platform/e2e-hooks.ts';
 import { scripting } from '../platform/scripting.ts';
 import { session } from '../platform/storage.ts';
 import { tabs } from '../platform/tabs.ts';
@@ -83,6 +85,8 @@ export function createBackgroundRunner(log: Logger = consoleLogger): Runner {
       clock: realClock,
       // Any extension API call resets the worker's idle timer (Chrome 110+).
       keepAlive: () => void session.get('timers').catch(() => undefined),
+      // F2: test flags exist in guarded builds only (compiled out of live, check-bundle T3).
+      ...(GUARDED ? { e2e: e2eRunnerHooks } : {}),
       log,
     },
   );
@@ -113,6 +117,7 @@ export function startBackground(runner: Runner = createBackgroundRunner(), log: 
   });
 
   tabs.onUpdated((tabId, update) => void runner.tabUpdated(tabId, update));
+  windows.onBoundsChanged((windowId) => void runner.windowBoundsChanged(windowId));
   tabs.onRemoved((tabId) => void runner.dispatch({ type: 'tabRemoved', tabId }));
   windows.onRemoved((windowId) => void runner.dispatch({ type: 'windowRemoved', windowId }));
   browser.runtime.onStartup.addListener(() => void runner.dispatch({ type: 'startup' }));

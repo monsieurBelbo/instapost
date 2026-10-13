@@ -1,11 +1,17 @@
 /**
  * U11 (strategy §7.11): the runner executes reducer effects through the platform wrappers.
  * - Effect order for the H1 happy path, from `handoff/start` to the cleanup after the popup closed.
+ * - W2/W3 (2026-10-12): the window settles before it is measured, every update passes
+ *   `state:'normal'` and is verified against the tab size, one retry 300 ms later, and the guided
+ *   resize driven by windows.onBoundsChanged and the poll.
  * - A runner re-created from storage.session mid-flow resumes it (a stopped service worker),
  *   including its persisted timers.
  * - onStartup, onInstalled, windows.onRemoved (and tabs.onRemoved) remove ids 1001–1019.
  * Plus the agent sender check at processing time, the get-file answer, the kill switch's lock,
- * the rate log and the editor port.
+ * the rate log and the editor port. AM37: the MAIN-world portrait shim goes into the composer tab
+ * only, before the agent, on every document after the hard reload; a guarded E2E flag makes it read
+ * only, a live runner never reads that flag; its reading reaches the reducer (SCREEN_LANDSCAPE).
+ * The executeScript call itself (MAIN world, frame 0, injectImmediately) is src/platform/scripting.test.ts.
  *
  * The dnr, tabs, windows, scripting and idb wrappers are vi.mock'ed with one recording fake;
  * storage (session and local) is WXT's fakeBrowser behind the real src/platform/storage.ts.
@@ -13,9 +19,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import {
+  FIT_REAPPLY_MS,
+  FIT_RETRY_DELAY_MS,
   type HandoffRecord,
   INACTIVITY_TIMEOUT_MS,
+  INPUT_WAIT_MS,
   NAVIGATION_TIMEOUT_MS,
+  RESIZE_POLL_MS,
+  RESIZE_TIMEOUT_MS,
   type Settings,
 } from '../core/handoff/state.ts';
 import type { ProbeReport } from '../core/ig-contract/contract.ts';
@@ -45,18 +56,37 @@ const fx = vi.hoisted(() => {
     tabUpdated: [] as Listener<[number, { status: 'loading' | 'complete' | undefined; url: string | undefined }]>[],
     tabRemoved: [] as Listener<[number]>[],
     windowRemoved: [] as Listener<[number]>[],
+    windowBounds: [] as Listener<[number]>[],
   };
+  type Box = { left: number; top: number; width: number; height: number };
   const conf = {
     windowId: 7,
     tabId: 42,
-    inner: { w: 500, h: 900 } as { w: number; h: number } | null,
-    outer: { left: 500, top: 33, width: 500, height: 932 },
+    /** The popup's outer box; tabs.get reports it minus `frame` (null = no size, as for a hidden tab). */
+    box: { left: 500, top: 33, width: 500, height: 932 } as Box,
+    frame: { w: 0, h: 32 },
+    sizeless: false,
+    /** W2: windows.update moves the window (true) or is ignored (Arc's early updates, F1). */
+    honourUpdates: true,
+    /** W2 hardening: this many windows.update calls are ignored first (Arc often ignores the first). */
+    dropUpdates: 0,
+    /** W2 hardening: Arc re-places the popup at this tabs.get read (counted from the first update). */
+    replaceAt: null as { read: number; box: Box } | null,
+    /** tabs.get reads since the last windows.update was issued for the first time. */
+    readsSinceUpdate: -1,
+    /** windows.getBox reads that come before the box settles (consumed one per read). */
+    settling: [] as Box[],
+    zoom: 1,
     agentAck: { ok: true } as unknown,
     exports: new Map<string, { bytes: Uint8Array; mime: string }>(),
     /** executeScript's result for the agent: true = installed (a new document), false = already there. */
     agentFresh: true,
+    /** AM37: the portrait shim's result (the page's screen orientation after it, and its state). */
+    orientation: { type: 'portrait-primary', shim: 'installed' } as { type: string | null; shim: string },
     /** windows.get(id, {populate}) per window id: type and tab URLs; absent = no such window. */
     existing: new Map<number, { type: string; tabUrls: (string | undefined)[] }>(),
+    /** tabs.get's url (SH-1: the shim-off flag `'home'` reads it). */
+    tabUrl: 'about:blank' as string | undefined,
   };
   const call = async (fn: string, ...args: unknown[]) => {
     calls.push({ fn, args });
@@ -79,11 +109,22 @@ const fx = vi.hoisted(() => {
       listeners.tabUpdated.length = 0;
       listeners.tabRemoved.length = 0;
       listeners.windowRemoved.length = 0;
-      conf.inner = { w: 500, h: 900 };
+      listeners.windowBounds.length = 0;
+      conf.box = { left: 500, top: 33, width: 500, height: 932 };
+      conf.frame = { w: 0, h: 32 };
+      conf.sizeless = false;
+      conf.honourUpdates = true;
+      conf.dropUpdates = 0;
+      conf.replaceAt = null;
+      conf.readsSinceUpdate = -1;
+      conf.settling = [];
+      conf.zoom = 1;
       conf.agentAck = { ok: true };
       conf.exports.clear();
       conf.agentFresh = true;
+      conf.orientation = { type: 'portrait-primary', shim: 'installed' };
       conf.existing.clear();
+      conf.tabUrl = 'about:blank';
     },
     dnr: {
       updateSessionRules: (u: unknown) => call('dnr.updateSessionRules', u),
@@ -94,10 +135,20 @@ const fx = vi.hoisted(() => {
         await call('windows.createPopup', box);
         return { windowId: conf.windowId, tabId: conf.tabId };
       },
-      update: (id: number, u: unknown) => call('windows.update', id, u),
+      update: async (id: number, u: Partial<Box> & { state?: string }) => {
+        await call('windows.update', id, u);
+        if (conf.readsSinceUpdate < 0) conf.readsSinceUpdate = 0;
+        if (conf.dropUpdates > 0) {
+          conf.dropUpdates--;
+          return;
+        }
+        if (conf.honourUpdates && u.width !== undefined) {
+          conf.box = { left: u.left ?? 0, top: u.top ?? 0, width: u.width, height: u.height ?? 0 };
+        }
+      },
       getBox: async (id: number) => {
         await call('windows.getBox', id);
-        return conf.outer;
+        return { ...(conf.settling.shift() ?? conf.box) };
       },
       remove: (id: number) => call('windows.remove', id),
       describe: async (id: number) => {
@@ -105,11 +156,20 @@ const fx = vi.hoisted(() => {
         return conf.existing.get(id) ?? null;
       },
       onRemoved: sub(listeners.windowRemoved),
+      onBoundsChanged: sub(listeners.windowBounds),
     },
     tabs: {
       get: async (id: number) => {
         await call('tabs.get', id);
-        return { id, windowId: conf.windowId, url: 'about:blank', width: conf.inner?.w, height: conf.inner?.h };
+        if (conf.readsSinceUpdate >= 0) conf.readsSinceUpdate++;
+        if (conf.replaceAt && conf.readsSinceUpdate === conf.replaceAt.read) conf.box = { ...conf.replaceAt.box };
+        const w = conf.sizeless ? undefined : conf.box.width - conf.frame.w;
+        const h = conf.sizeless ? undefined : conf.box.height - conf.frame.h;
+        return { id, windowId: conf.windowId, url: conf.tabUrl, width: w, height: h };
+      },
+      getZoom: async (id: number) => {
+        await call('tabs.getZoom', id);
+        return conf.zoom;
       },
       create: async (url: string) => {
         await call('tabs.create', url);
@@ -129,6 +189,10 @@ const fx = vi.hoisted(() => {
       injectComposerAgent: async (id: number) => {
         await call('scripting.injectComposerAgent', id);
         return { fresh: conf.agentFresh };
+      },
+      injectPortraitShim: async (id: number, install: boolean) => {
+        await call('scripting.injectPortraitShim', id, install);
+        return { ...conf.orientation };
       },
     },
     getExport: async (id: string) => {
@@ -219,6 +283,8 @@ const goodProbe = (over: Partial<ProbeReport> = {}): ProbeReport => ({
   dpr: 2,
   portrait: true,
   swControlled: false,
+  swIntercepted: false,
+  navType: 'reload',
   storyInput: 'present',
   acceptOk: true,
   lang: 'en',
@@ -246,6 +312,7 @@ const startMsg = (mode: 'post' | 'probe' = 'post') => ({
   mode,
   rehearsal: true,
   screen: SCREEN,
+  browser: 'chromium',
 });
 
 function memoryRecords() {
@@ -279,6 +346,11 @@ async function boot(
     records?: ReturnType<typeof memoryRecords>;
     keepAlive?: () => void;
     brands?: string[];
+    e2e?: { resizeTimeoutMs(): Promise<number | undefined>; portraitShimOff(): Promise<boolean | 'home'> };
+    /** A live build's runner (no E2E hooks are passed to it in production). */
+    guarded?: boolean;
+    /** The waits inside effects; by default they resolve at once (and are counted in `sleeps`). */
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<Harness> {
   const clock = opts.clock ?? manualClock();
@@ -296,13 +368,20 @@ async function boot(
       exports: async (id) => fx.conf.exports.get(id),
     },
     {
-      guarded: true,
+      guarded: opts.guarded ?? true,
       runtimeId: RUNTIME_ID,
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/155.0.0.0 Safari/537.36',
       uuid: () => `u${++n}`,
       clock,
+      // The settle and verify waits resolve at once: their loops are bounded by read counts.
+      sleep:
+        opts.sleep ??
+        (async () => {
+          sleeps++;
+        }),
       brands: opts.brands ?? ['Not:A-Brand', 'Chromium'],
       keepAlive: opts.keepAlive,
+      ...(opts.e2e ? { e2e: opts.e2e } : {}),
       log: { info: () => undefined, warn: () => undefined, error: () => undefined },
     },
   );
@@ -314,6 +393,9 @@ async function boot(
   const settle = () => runner.settled();
   return { runner, clock, records, statuses, settle, advance: (ms) => clock.advance(ms, settle) };
 }
+
+/** Waits taken inside effects (settle and verify). */
+let sleeps = 0;
 
 /** The platform calls since the last mark, as `fn` names. */
 let mark = 0;
@@ -339,6 +421,7 @@ async function toReloading(h: Harness): Promise<void> {
 beforeEach(() => {
   fx.reset();
   mark = 0;
+  sleeps = 0;
   fx.conf.exports.set('exp_1', { bytes: PNG, mime: 'image/png' });
 });
 
@@ -358,11 +441,20 @@ describe('U11 happy path: effect order (H1)', () => {
     expect(names(opening)).toEqual([
       'windows.createPopup',
       'dnr.updateSessionRules',
-      'tabs.get',
+      // W2: the window settles (two equal reads), then its tab and zoom are read.
       'windows.getBox',
+      'windows.getBox',
+      'tabs.get',
+      'tabs.getZoom',
+      // One update with state normal, verified against the tab size at once; it fits, so nothing is
+      // re-applied, but it must still hold FIT_HOLD_MS (1.1 s): one read every 100 ms plus the 150 ms
+      // re-apply check (W2 hardening: Arc re-places new popups up to about 1 s late).
       'windows.update',
+      ...Array<string>(13).fill('tabs.get'),
+      'windows.getBox',
       'tabs.navigate',
     ]);
+    expect(opening[6]?.args).toEqual([WIN, { state: 'normal', left: 501, top: 37, width: 511, height: 941 }]);
     // Rule 1001 and the rehearsal rules are installed while the tab is still about:blank.
     const install = opening[1]?.args[0] as { removeRuleIds: number[]; addRules: { id: number }[] };
     expect(install.removeRuleIds).toEqual(SESSION_IDS);
@@ -375,7 +467,7 @@ describe('U11 happy path: effect order (H1)', () => {
       },
     });
     expect(JSON.stringify(install.addRules[0])).toContain('Chrome/155.0.0.0 Mobile');
-    expect(opening[5]?.args).toEqual([TAB, COMPOSER_URL]);
+    expect(opening.at(-1)?.args).toEqual([TAB, COMPOSER_URL]);
     expect(runner.state().phase).toBe('navigating');
     // The rate log noted the open.
     expect(await local.get('rateLog')).toEqual([T0]);
@@ -389,8 +481,15 @@ describe('U11 happy path: effect order (H1)', () => {
     await runner.tabUpdated(TAB, { status: 'complete', url: COMPOSER_URL });
     await h.settle();
     const probing = since();
-    expect(names(probing)).toEqual(['scripting.injectComposerAgent', 'tabs.sendMessage']);
-    expect(probing[1]?.args).toEqual([TAB, { v: 1, type: 'agent/probe', handoffId: HID, nonce: NONCE }]);
+    // AM37: the portrait shim (MAIN world, installing) into the composer tab first, then the agent.
+    expect(names(probing)).toEqual([
+      'scripting.injectPortraitShim',
+      'scripting.injectComposerAgent',
+      'tabs.sendMessage',
+    ]);
+    expect(probing[0]?.args).toEqual([TAB, true]);
+    expect(probing[1]?.args).toEqual([TAB]);
+    expect(probing[2]?.args).toEqual([TAB, { v: 1, type: 'agent/probe', handoffId: HID, nonce: NONCE }]);
 
     // Report → H1: watch with the 10 s deadline, then inject.
     expect(await runner.agentMessage(agentMsg('agent/report', { probe: goodProbe() }), agentSender())).toEqual({
@@ -498,8 +597,8 @@ describe('U11 service-worker restart resumes from storage.session', () => {
     await second.runner.tabUpdated(fx.conf.tabId, { status: 'complete', url: COMPOSER_URL });
     await second.settle();
     const calls = since();
-    expect(names(calls)).toEqual(['scripting.injectComposerAgent', 'tabs.sendMessage']);
-    expect(calls[1]?.args[1]).toEqual({ v: 1, type: 'agent/probe', handoffId: HID, nonce: NONCE });
+    expect(names(calls)).toEqual(['scripting.injectPortraitShim', 'scripting.injectComposerAgent', 'tabs.sendMessage']);
+    expect(calls[2]?.args[1]).toEqual({ v: 1, type: 'agent/probe', handoffId: HID, nonce: NONCE });
     // No second hard reload after the restart.
     expect(names(fx.calls).filter((n) => n === 'tabs.hardReload')).toHaveLength(1);
     // The agent's messages are accepted by the new instance.
@@ -537,17 +636,19 @@ describe('U11 service-worker restart resumes from storage.session', () => {
       agentMsg('agent/report', { probe: goodProbe({ storyInput: 'absent' }) }),
       agentSender(),
     );
+    // P5: the one wait for a late story input runs out (6 s).
+    await first.advance(INPUT_WAIT_MS);
     await first.runner.tabUpdated(fx.conf.tabId, { status: undefined, url: `${HOME}create/story/` });
     await first.runner.agentMessage(agentMsg('agent/event', { event: 'composer-ready' }), agentSender());
     await first.runner.tabUpdated(fx.conf.tabId, { status: undefined, url: HOME });
     await first.settle();
     expect(first.runner.state().phase).toBe('finished');
-    expect((await session.get('timers'))?.closeDelay).toBe(T0 + 3000);
+    expect((await session.get('timers'))?.closeDelay).toBe(T0 + INPUT_WAIT_MS + 3000);
     first.clock.kill();
     since();
 
     // Ten seconds later the worker wakes for an unrelated tab update.
-    const second = await boot({ clock: manualClock(T0 + 10_000) });
+    const second = await boot({ clock: manualClock(T0 + INPUT_WAIT_MS + 10_000) });
     expect(names(since())).toEqual(['windows.remove']);
     expect(second.runner.state().phase).toBe('closing');
   });
@@ -905,7 +1006,7 @@ describe('U11 AM16 and AM23 through the runner', () => {
       agentMsg('agent/report', { probe: goodProbe({ storyInput: 'absent' }) }),
       agentSender(),
     );
-    await h.settle();
+    await h.advance(INPUT_WAIT_MS);
     expect(h.runner.state().phase).toBe('awaitingPick');
     since();
     fx.conf.agentFresh = false;
@@ -932,6 +1033,181 @@ describe('U11 AM16 and AM23 through the runner', () => {
     expect(since()).toEqual([]);
     expect(h.statuses.at(-1)).toMatchObject({ handoffId: null, error: 'BRANDED_BROWSER' });
     expect(await local.get('rateLog')).toBeUndefined();
+  });
+});
+
+describe('U11 AM37: the MAIN-world portrait shim', () => {
+  /** The shim and agent injections since the last mark: [fn, tabId, install?]. */
+  const injections = () =>
+    since()
+      .filter((c) => c.fn.startsWith('scripting.'))
+      .map((c) => [c.fn, ...c.args]);
+  const SHIM = 'scripting.injectPortraitShim';
+  const AGENT = 'scripting.injectComposerAgent';
+
+  /** The reload's commit and complete on `/`: the first document Instagram gives the composer tab. */
+  async function firstDocument(h: Harness): Promise<void> {
+    await toReloading(h);
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'loading', url: HOME });
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'complete', url: HOME });
+    await h.settle();
+  }
+
+  it('goes into the composer tab only, before the agent, on every document after the hard reload', async () => {
+    const h = await boot();
+    const TAB = fx.conf.tabId;
+    await h.runner.editorMessage(startMsg());
+    await h.settle();
+    // Nothing is injected before the hard reload: not into about:blank, not into the first (SW) load.
+    await h.runner.tabUpdated(TAB, { status: 'loading', url: COMPOSER_URL });
+    await h.settle();
+    expect(injections()).toEqual([]);
+    await h.runner.tabUpdated(TAB, { status: 'loading', url: HOME });
+    await h.runner.tabUpdated(TAB, { status: 'complete', url: HOME });
+    await h.settle();
+    expect(injections()).toEqual([
+      [SHIM, TAB, true],
+      [AGENT, TAB],
+    ]);
+    // Another tab's loads (a normal Instagram tab of the profile) never get either script.
+    await h.runner.tabUpdated(99, { status: 'loading', url: HOME });
+    await h.runner.tabUpdated(99, { status: 'complete', url: HOME });
+    await h.settle();
+    expect(injections()).toEqual([]);
+    await h.runner.agentMessage(
+      agentMsg('agent/report', { probe: goodProbe({ inner: { w: 511, h: 909 } }) }),
+      agentSender({ url: HOME }),
+    );
+    await h.settle();
+    expect(h.runner.state().phase).toBe('injecting');
+    // A new document (a full reload of the composer tab): the shim again, before the fresh agent.
+    await h.runner.tabUpdated(TAB, { status: 'loading', url: HOME });
+    await h.runner.tabUpdated(TAB, { status: 'complete', url: HOME });
+    await h.settle();
+    expect(injections()).toEqual([
+      [SHIM, TAB, true],
+      [AGENT, TAB],
+    ]);
+    // A same-document load (the insert's SPA navigation) re-injects both; the shim finds itself there.
+    fx.conf.agentFresh = false;
+    fx.conf.orientation = { type: 'portrait-primary', shim: 'present' };
+    await h.runner.agentMessage(agentMsg('agent/report', { probe: goodProbe() }), agentSender({ url: HOME }));
+    await h.runner.tabUpdated(TAB, { status: 'loading', url: COMPOSER_URL });
+    await h.runner.tabUpdated(TAB, { status: 'complete', url: COMPOSER_URL });
+    await h.settle();
+    expect(injections()).toEqual([
+      [SHIM, TAB, true],
+      [AGENT, TAB],
+    ]);
+    expect(h.runner.state()).toMatchObject({ pageOrientation: { type: 'portrait-primary', shim: 'present' } });
+  });
+
+  it('its reading is stamped on the agent’s report and shown to the editor', async () => {
+    const h = await boot();
+    fx.conf.orientation = { type: 'portrait-primary', shim: 'installed' };
+    await firstDocument(h);
+    // An agent cannot forge the reading: whatever it sends there is dropped and replaced.
+    const forged = { ...goodProbe(), orientation: { type: 'landscape-primary', shim: 'off' } };
+    await h.runner.agentMessage(agentMsg('agent/report', { probe: forged }), agentSender({ url: HOME }));
+    await h.settle();
+    const probe = h.statuses.find((s) => s.probe)?.probe;
+    expect(probe?.orientation).toEqual({ type: 'portrait-primary', shim: 'installed' });
+  });
+
+  it('a guarded build’s E2E flag makes it read only', async () => {
+    const off = { resizeTimeoutMs: async () => undefined, portraitShimOff: vi.fn(async () => true) };
+    const h = await boot({ e2e: off });
+    await firstDocument(h);
+    expect(h.runner.state()).toMatchObject({ phase: 'probing' });
+    expect(injections()).toEqual([
+      [SHIM, fx.conf.tabId, false],
+      [AGENT, fx.conf.tabId],
+    ]);
+    expect(off.portraitShimOff).toHaveBeenCalledTimes(1);
+  });
+
+  it('SH-1: the flag `home` makes it read only off the composer, so it installs first after the pick reached the composer', async () => {
+    const late = { resizeTimeoutMs: async () => undefined, portraitShimOff: vi.fn(async () => 'home' as const) };
+    const h = await boot({ e2e: late });
+    const TAB = fx.conf.tabId;
+    fx.conf.tabUrl = HOME;
+    fx.conf.orientation = { type: 'landscape-primary', shim: 'off' };
+    await firstDocument(h);
+    expect(injections()).toEqual([
+      [SHIM, TAB, false],
+      [AGENT, TAB],
+    ]);
+    await h.runner.agentMessage(
+      agentMsg('agent/report', { probe: goodProbe({ inner: { w: 511, h: 909 } }) }),
+      agentSender({ url: HOME }),
+    );
+    await h.settle();
+    // The pick's SPA navigation: the shim installs only now, on the composer.
+    fx.conf.tabUrl = COMPOSER_URL;
+    fx.conf.agentFresh = false;
+    fx.conf.orientation = { type: 'portrait-primary', shim: 'installed' };
+    await h.runner.tabUpdated(TAB, { status: 'loading', url: COMPOSER_URL });
+    await h.runner.tabUpdated(TAB, { status: 'complete', url: COMPOSER_URL });
+    await h.settle();
+    expect(injections()).toEqual([
+      [SHIM, TAB, true],
+      [AGENT, TAB],
+    ]);
+    expect(h.statuses.at(-1)).toMatchObject({
+      error: 'SCREEN_LANDSCAPE',
+      detail: 'screen portrait-primary, portrait shim installed after the composer mounted',
+    });
+    expect(late.portraitShimOff).toHaveBeenCalledTimes(2);
+  });
+
+  it('a live runner installs it whatever a test flag says (live builds get no test hooks at all)', async () => {
+    const off = { resizeTimeoutMs: async () => undefined, portraitShimOff: vi.fn(async () => true) };
+    const h = await boot({ guarded: false, e2e: off });
+    await firstDocument(h);
+    expect(h.runner.state()).toMatchObject({ phase: 'probing' });
+    expect(injections()).toEqual([
+      [SHIM, fx.conf.tabId, true],
+      [AGENT, fx.conf.tabId],
+    ]);
+    expect(off.portraitShimOff).not.toHaveBeenCalled();
+  });
+
+  it('a landscape reading on the composer ends the session with SCREEN_LANDSCAPE (close, no lock)', async () => {
+    const h = await boot();
+    fx.conf.orientation = { type: 'landscape-primary', shim: 'failed' };
+    await firstDocument(h);
+    await h.runner.agentMessage(
+      agentMsg('agent/report', { probe: goodProbe({ storyInput: 'absent' }) }),
+      agentSender({ url: HOME }),
+    );
+    await h.advance(INPUT_WAIT_MS);
+    expect(h.runner.state().phase).toBe('awaitingPick');
+    since();
+    // The owner's pick: msite's SPA navigation to the composer (same document).
+    fx.conf.agentFresh = false;
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'loading', url: COMPOSER_URL });
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'complete', url: COMPOSER_URL });
+    await h.settle();
+    expect(names(since())).toEqual([SHIM, AGENT, 'windows.remove']);
+    expect(h.statuses.at(-1)).toMatchObject({
+      phase: 'closing',
+      error: 'SCREEN_LANDSCAPE',
+      detail: 'screen landscape-primary, portrait shim failed',
+    });
+    expect(h.records.rows.get(HID)).toMatchObject({
+      outcome: 'failed:SCREEN_LANDSCAPE',
+      preflight: { C3b: 'fail' },
+    });
+    expect(await local.get('msiteLock')).toBeUndefined();
+  });
+
+  it('a failed shim injection fails the injection: AGENT_UNREACHABLE, no agent', async () => {
+    const h = await boot();
+    fx.failing.add('scripting.injectPortraitShim');
+    await firstDocument(h);
+    expect(names(fx.calls)).not.toContain(AGENT);
+    expect(h.runner.state()).toMatchObject({ phase: 'closing', outcome: 'failed:AGENT_UNREACHABLE' });
+    expect(h.records.rows.get(HID)?.detail).toMatch(/^injectAgent: scripting.injectPortraitShim failed/);
   });
 });
 
@@ -970,7 +1246,7 @@ describe('U11 AM19, AM21 and AM28: an editor that connects mid-session gets the 
       agentMsg('agent/report', { probe: goodProbe({ storyInput: 'absent' }) }),
       agentSender(),
     );
-    await h.settle();
+    await h.advance(INPUT_WAIT_MS);
     expect(h.runner.state().phase).toBe('awaitingPick');
     // The owner edits the settings while the popup is open; they apply to the next hand-off only.
     await local.set('settings', { rehearsal: false, assistedInsert: false } as Settings);
@@ -1032,6 +1308,290 @@ describe('U11 AM20: the navigation deadline survives a service-worker restart', 
     await second.advance(1);
     expect(names(since())).toEqual(['windows.remove']);
     expect(second.runner.state()).toMatchObject({ phase: 'closing', outcome: 'failed:NAVIGATION_TIMEOUT' });
+  });
+});
+
+describe('U11 W2/W3: the popup is fitted while it is still about:blank (Arc, 2026-10-12)', () => {
+  /** Arc's popup: 1512x949 at (1831,13) whatever windows.create asked for, with a 0x47 frame (F1). */
+  const ARC = { left: 1831, top: 13, width: 1512, height: 949 };
+  const UW = { availLeft: 1512, availTop: -428, availWidth: 3440, availHeight: 1410 };
+  const ultrawideStart = () => ({ ...startMsg(), screen: UW });
+  const arc = () => {
+    fx.conf.box = { ...ARC };
+    fx.conf.frame = { w: 0, h: 47 };
+  };
+  const updates = () => fx.calls.filter((c) => c.fn === 'windows.update').map((c) => c.args[1]);
+  /** 524x932 inner + 47 frame, centred on the ultrawide. */
+  const BOX = { left: 2970, top: -212, width: 524, height: 979 };
+
+  it('waits for the window to settle (two equal reads 100 ms apart) before measuring it', async () => {
+    arc();
+    // Arc moves the new popup twice before it stays put.
+    fx.conf.settling = [
+      { left: 2970, top: -328, width: 524, height: 1012 },
+      { left: 1800, top: 0, width: 1400, height: 900 },
+    ];
+    const h = await boot();
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    const calls = names(since());
+    const measure = calls.slice(2, calls.indexOf('tabs.get'));
+    expect(measure).toEqual(['windows.getBox', 'windows.getBox', 'windows.getBox', 'windows.getBox']);
+    // One FIT_SETTLE_POLL_MS wait between reads; the honoured update verifies at once and then holds
+    // until FIT_HOLD_MS (12 waits: every 100 ms to 1.1 s, plus the 150 ms re-apply check).
+    expect(sleeps).toBe(3 + 12);
+    // The update asks for the fit computed from the settled window's real frame (0x47), with state normal.
+    expect(updates()).toEqual([{ state: 'normal', ...BOX }]);
+    expect(h.runner.state()).toMatchObject({
+      phase: 'navigating',
+      win: { created: ARC, createdTab: { w: 1512, h: 902 }, frameDelta: { w: 0, h: 47 }, attempts: 1, zoom: 1 },
+    });
+  });
+
+  it('gives up settling after 1 s and measures the latest read', async () => {
+    arc();
+    fx.conf.settling = Array.from({ length: 12 }, (_, i) => ({ left: i, top: 0, width: 1512, height: 949 }));
+    const h = await boot();
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    const calls = names(since());
+    expect(calls.slice(2, calls.indexOf('tabs.get')).length).toBe(11);
+    expect(h.runner.state()).toMatchObject({ win: { created: { left: 10 } } });
+  });
+
+  it('an ignored update is re-applied at 150/300/500/1000 ms, verified for 1.5 s, retried once 300 ms later, and the retry fits', async () => {
+    arc();
+    fx.conf.honourUpdates = false;
+    const h = await boot();
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    // 1 read right after the update, one every 100 ms for 1.5 s and one at the 150 ms re-apply: 17 tab
+    // reads; the box is applied 5 times (FIT_REAPPLY_MS), all while the tab is still about:blank.
+    const first = names(since());
+    const fromUpdate = first.slice(first.indexOf('windows.update'));
+    expect(fromUpdate.filter((n) => n === 'tabs.get')).toHaveLength(17);
+    expect(fromUpdate.filter((n) => n === 'windows.update')).toHaveLength(FIT_REAPPLY_MS.length);
+    expect(sleeps).toBe(1 + 16);
+    expect(h.runner.state()).toMatchObject({ phase: 'fitting', fitStep: 'retryWait' });
+    if (h.runner.state().phase === 'idle') throw new Error('unreachable');
+    expect((h.runner.state() as { win: { updates: unknown[] } }).win.updates).toEqual([
+      expect.objectContaining({ step: 'fit', fitted: false, applied: 5 }),
+    ]);
+    expect((await session.get('timers'))?.fitRetry).toBe(T0 + FIT_RETRY_DELAY_MS);
+    // Arc honours a later update with state normal (F1).
+    fx.conf.honourUpdates = true;
+    await h.advance(FIT_RETRY_DELAY_MS);
+    expect(updates()).toEqual(Array(FIT_REAPPLY_MS.length + 1).fill({ state: 'normal', ...BOX }));
+    expect(names(since()).at(-1)).toBe('tabs.navigate');
+    expect(h.runner.state()).toMatchObject({ phase: 'navigating', win: { attempts: 2, finalTab: { w: 524, h: 932 } } });
+  });
+
+  it('W2 hardening: Arc drops the first updates; a re-apply within the same attempt fits (no retry)', async () => {
+    arc();
+    // The first two windows.update calls are ignored (Arc often ignores the first, F1 research).
+    fx.conf.dropUpdates = 2;
+    const h = await boot();
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    expect(updates()).toEqual(Array(3).fill({ state: 'normal', ...BOX }));
+    expect(h.runner.state()).toMatchObject({
+      phase: 'navigating',
+      win: { attempts: 1, finalTab: { w: 524, h: 932 }, created: ARC },
+    });
+    expect((h.runner.state() as { win: { updates: unknown[] } }).win.updates).toEqual([
+      expect.objectContaining({ step: 'fit', fitted: true, applied: 3 }),
+    ]);
+  });
+
+  it('W2 hardening: a fit that Arc undoes later (re-placed) is re-applied at the next offset and must hold', async () => {
+    arc();
+    const h = await boot();
+    // The update fits at once; 300 ms in (the 5th tab read of the verification), Arc re-places the popup.
+    fx.conf.replaceAt = { read: 5, box: { ...ARC } };
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    expect(updates()).toEqual(Array(2).fill({ state: 'normal', ...BOX }));
+    expect(h.runner.state()).toMatchObject({ phase: 'navigating', win: { attempts: 1, finalTab: { w: 524, h: 932 } } });
+    expect((h.runner.state() as { win: { updates: unknown[] } }).win.updates).toEqual([
+      expect.objectContaining({ step: 'fit', fitted: true, applied: 2 }),
+    ]);
+  });
+
+  it('the refit after the navigation is one windows.update: never re-applied, no hold', async () => {
+    const h = await boot();
+    await toReloading(h);
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'loading', url: HOME });
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'complete', url: HOME });
+    await h.settle();
+    // Instagram is loaded now and the window went wide; the refit's update is ignored, verified for
+    // 1.5 s, and not re-applied.
+    fx.conf.box = { left: 0, top: 33, width: 900, height: 1332 };
+    fx.conf.honourUpdates = false;
+    since();
+    sleeps = 0;
+    const wide = goodProbe({ inner: { w: 900, h: 1300 } });
+    expect(await h.runner.agentMessage(agentMsg('agent/report', { probe: wide }), agentSender())).toEqual({ ok: true });
+    await h.settle();
+    const calls = names(since());
+    expect(calls.filter((n) => n === 'windows.update')).toHaveLength(1);
+    // AL-3: no settling (one windows.get), then 15 polls of the verification, no 150 ms re-apply check.
+    expect(calls.slice(0, 3)).toEqual(['windows.getBox', 'tabs.get', 'tabs.getZoom']);
+    expect(sleeps).toBe(15);
+    expect(h.runner.state()).toMatchObject({ phase: 'probing', step: 'awaitReport' });
+    expect((h.runner.state() as { win: { updates: unknown[] } }).win.updates.at(-1)).toEqual(
+      expect.objectContaining({ step: 'refit', fitted: false, applied: 1 }),
+    );
+  });
+
+  it('AL-3: the refit never holds the queue: a challenge during its verification is killed within one poll tick', async () => {
+    // A gate the verification's waits hang on until the test releases it.
+    let gate: Promise<void> | null = null;
+    let release: () => void = () => undefined;
+    const h = await boot({
+      sleep: async () => {
+        sleeps++;
+        if (gate) await gate;
+      },
+    });
+    await toReloading(h);
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'loading', url: HOME });
+    await h.runner.tabUpdated(fx.conf.tabId, { status: 'complete', url: HOME });
+    await h.settle();
+    // Arc ignores the refit (as in E24): its verification would poll for the full 1.5 s.
+    fx.conf.box = { left: 0, top: 33, width: 900, height: 1332 };
+    fx.conf.honourUpdates = false;
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    since();
+    sleeps = 0;
+    void h.runner.agentMessage(
+      agentMsg('agent/report', { probe: goodProbe({ inner: { w: 900, h: 1300 } }) }),
+      agentSender(),
+    );
+    // The report is handled and the refit's one windows.update issued; its verification now waits.
+    const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 50 && !names(fx.calls).includes('windows.update'); i++) await turn();
+    for (let i = 0; i < 5; i++) await turn();
+    expect(sleeps).toBe(1);
+    expect(h.runner.state()).toMatchObject({ phase: 'probing', step: 'refitUpdate' });
+
+    // Instagram redirects the composer to a challenge while the verification is still waiting.
+    void h.runner.tabUpdated(fx.conf.tabId, { status: 'loading', url: 'https://www.instagram.com/challenge/x/' });
+    for (let i = 0; i < 50 && !names(fx.calls).includes('windows.remove'); i++) await turn();
+    // Within that one pending poll: closed and locked, before the verification has ended.
+    expect(sleeps).toBe(1);
+    expect(names(fx.calls)).toContain('windows.remove');
+    expect(h.runner.state()).toMatchObject({ phase: 'closing', outcome: 'killed:KILLED_CHALLENGE' });
+    await expect.poll(async () => (await local.get('msiteLock')) ?? null).toBeGreaterThan(T0);
+
+    // The late answer of the verification changes nothing: no probe, no second update.
+    gate = null;
+    release();
+    await h.settle();
+    const after = since();
+    expect(names(after).filter((n) => n === 'windows.update')).toHaveLength(1);
+    expect(after.some((c) => c.fn === 'tabs.sendMessage')).toBe(false);
+    expect(h.runner.state()).toMatchObject({ phase: 'closing', outcome: 'killed:KILLED_CHALLENGE' });
+  });
+
+  it('AM29/AL-4 budget: at most FIT_REAPPLY_MS.length windows.update per pre-navigation attempt, 1 for the refit', async () => {
+    arc();
+    fx.conf.honourUpdates = false;
+    const h = await boot();
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    await h.advance(FIT_RETRY_DELAY_MS);
+    // Both attempts ignored: the whole budget, all while the tab is about:blank, and no more.
+    expect(h.runner.state().phase).toBe('resizing');
+    expect(updates()).toHaveLength(2 * FIT_REAPPLY_MS.length);
+    expect(names(fx.calls)).not.toContain('tabs.navigate');
+  });
+
+  it('both ignored → resizing; windows.onBoundsChanged for the popup reads it; a usable size navigates', async () => {
+    arc();
+    fx.conf.honourUpdates = false;
+    const onConnect = { addListener: () => undefined, removeListener: () => undefined, hasListener: () => true };
+    (fakeBrowser.runtime as unknown as { onConnect: unknown }).onConnect = onConnect;
+    const h = await boot();
+    startBackground(h.runner, { info: () => undefined, warn: () => undefined, error: () => undefined });
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    await h.advance(FIT_RETRY_DELAY_MS);
+    expect(h.runner.state()).toMatchObject({ phase: 'resizing' });
+    expect(h.statuses.at(-1)).toMatchObject({
+      phase: 'resizing',
+      resize: { tab: { w: 1512, h: 902 }, ok: false, until: T0 + FIT_RETRY_DELAY_MS + RESIZE_TIMEOUT_MS },
+      window: { attempts: 2, manualResize: false },
+    });
+    since();
+    // Another window's bounds change is not read.
+    for (const l of fx.listeners.windowBounds) l(fx.conf.windowId + 1);
+    await h.settle();
+    expect(since()).toEqual([]);
+    // The owner drags the popup narrow and tall (the E2E does this with chrome.windows.update).
+    fx.conf.box = { left: 2970, top: 0, width: 493, height: 867 };
+    for (const l of fx.listeners.windowBounds) l(fx.conf.windowId);
+    await h.settle();
+    expect(names(since())).toEqual(['tabs.get', 'windows.getBox', 'tabs.navigate']);
+    expect(h.runner.state()).toMatchObject({
+      phase: 'navigating',
+      win: { manualResize: true, finalTab: { w: 493, h: 820 } },
+    });
+    expect(await session.get('timers')).not.toHaveProperty('resizeDeadline');
+    expect(await session.get('timers')).not.toHaveProperty('resizePoll');
+  });
+
+  it('the poll reads the size every second; no usable size within 3 min → WINDOW_NOT_FITTED', async () => {
+    arc();
+    fx.conf.honourUpdates = false;
+    const h = await boot();
+    await h.runner.editorMessage(ultrawideStart());
+    await h.settle();
+    await h.advance(FIT_RETRY_DELAY_MS);
+    since();
+    await h.advance(RESIZE_POLL_MS);
+    expect(names(since())).toEqual(['tabs.get', 'windows.getBox']);
+    // A reconnecting editor gets the guided resize as it is.
+    const got: BackgroundToEditor[] = [];
+    h.runner.connectEditor((m) => got.push(m));
+    await h.settle();
+    expect(got[0]).toMatchObject({ phase: 'resizing', resize: { tab: { w: 1512, h: 902 }, ok: false } });
+    await h.advance(RESIZE_TIMEOUT_MS);
+    expect(names(fx.calls)).toContain('windows.remove');
+    expect(names(fx.calls)).not.toContain('tabs.navigate');
+    expect(h.runner.state()).toMatchObject({ phase: 'closing', outcome: 'failed:WINDOW_NOT_FITTED' });
+    expect(h.records.rows.get(HID)?.window).toMatchObject({ attempts: 2, manualResize: false });
+  });
+
+  it('a guarded E2E flag shortens the deadline; a worker restart keeps it', async () => {
+    arc();
+    fx.conf.honourUpdates = false;
+    const e2e = { resizeTimeoutMs: async () => 2000, portraitShimOff: async () => false };
+    const first = await boot({ e2e });
+    await first.runner.editorMessage(ultrawideStart());
+    await first.settle();
+    await first.advance(FIT_RETRY_DELAY_MS);
+    expect(first.runner.state().phase).toBe('resizing');
+    first.clock.kill();
+    since();
+    const second = await boot({ clock: manualClock(first.clock.now() + 1000), records: first.records, e2e });
+    // The poll that fell due while the worker was stopped reads the size at once.
+    expect(names(since())).toEqual(['tabs.get', 'windows.getBox']);
+    await second.advance(1000);
+    expect(second.runner.state()).toMatchObject({ phase: 'closing', outcome: 'failed:WINDOW_NOT_FITTED' });
+  });
+
+  it('every update is verified and recorded; a tab with no size fails the measure (AGENT_UNREACHABLE)', async () => {
+    fx.conf.sizeless = true;
+    const h = await boot();
+    await h.runner.editorMessage(startMsg());
+    await h.settle();
+    expect(h.runner.state()).toMatchObject({ phase: 'closing', outcome: 'failed:AGENT_UNREACHABLE' });
+    expect(h.statuses.at(-1)).toMatchObject({
+      error: 'AGENT_UNREACHABLE',
+      detail: expect.stringContaining('measureTab'),
+    });
   });
 });
 

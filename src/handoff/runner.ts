@@ -21,13 +21,42 @@
  *   owns it, so no composer window stays open without rehearsal rules or kill switch.
  * - **ENABLE** (§11 AM25): the editor asks, the runner clears the lock in this same queue, so it
  *   is serialised with the kill switch's lockMsite.
+ * - **Fitting the popup** (W2, 2026-10-12): `measureTab` with `settle` first waits for the window to
+ *   settle (two equal windows.get reads FIT_SETTLE_POLL_MS apart, at most FIT_SETTLE_MAX_MS: Arc
+ *   places a new popup itself, F1), then reads the tab, the window and the tab zoom. `updateWindow`
+ *   passes `state:'normal'` and then polls tabs.get until the tab is within FIT_TOLERANCE_PX of the
+ *   target (at most FIT_VERIFY_MAX_MS). With `reapply` (the pre-navigation fit and its retry only) it
+ *   re-applies the same box at FIT_REAPPLY_MS while the tab is not fitted and counts a fit only once
+ *   it still holds FIT_HOLD_MS after the first update (Arc ignores early updates and re-places new
+ *   popups up to about 1 s late). Those pre-navigation waits run inside the effect, holding the queue
+ *   for a few seconds at most while the popup is still about:blank and the kill switch is not armed.
+ *   The single refit after the navigation (AL-3) never holds the queue: its measureTab reads the
+ *   window once, and its updateWindow issues one windows.update and verifies *beside* the queue (a
+ *   detached task that queues `windowFitted` when it ends; the reducer ignores it once stale), so a
+ *   tabs.onUpdated for a challenge or an off-host page is handled at once. The retry and the guided
+ *   resize are the reducer's, on its own timers. `windowBoundsChanged` forwards windows.onBoundsChanged
+ *   for the composer window only.
+ * - **The portrait shim** (§11 AM37): `injectAgent` runs the MAIN-world portrait shim
+ *   (src/agent/portrait-shim.ts) in the composer tab's top frame first, then the isolated agent, and
+ *   answers `agentInjected` with both results. The reducer emits `injectAgent` for the composer tab
+ *   only, on every document after the hard reload, so the shim follows the agent everywhere it goes
+ *   and nowhere else. A guarded build's E2E flag (`portraitShimOff`) makes it read only, everywhere or
+ *   (`'home'`, SH-1) off the composer; live builds have no test hooks, so there it always installs.
  */
 
+import type { Size } from '../core/geometry/fit.ts';
+import { isFitted, isUsableInner, maxMsiteInnerW, type WindowBox } from '../core/geometry/window-fit.ts';
 import { handoffReducer } from '../core/handoff/reducer.ts';
 import {
   type AgentCommand,
   ERROR_CODES,
   type ErrorCode,
+  FIT_HOLD_MS,
+  FIT_REAPPLY_MS,
+  FIT_SETTLE_MAX_MS,
+  FIT_SETTLE_POLL_MS,
+  FIT_VERIFY_MAX_MS,
+  FIT_VERIFY_POLL_MS,
   type HandoffCtx,
   type HandoffEffect,
   type HandoffEvent,
@@ -38,9 +67,10 @@ import {
   INACTIVITY_TIMEOUT_MS,
 } from '../core/handoff/state.ts';
 import { chromeMajorFromUa, isBrandedBrowser } from '../core/ig-contract/device-profile.ts';
-import { igPath } from '../core/ig-contract/urls.ts';
+import { igPath, isComposerUrl } from '../core/ig-contract/urls.ts';
 import type { HandoffId, Nonce } from '../core/model/ids.ts';
 import type { DnrPort } from '../platform/dnr.ts';
+import type { RunnerTestHooks } from '../platform/e2e-hooks.ts';
 import type { ScriptingPort } from '../platform/scripting.ts';
 import type { TabsPort, TabUpdate } from '../platform/tabs.ts';
 import type { WindowsPort } from '../platform/windows.ts';
@@ -64,7 +94,7 @@ import { type Clock, createTimers } from './timers.ts';
 
 export interface RunnerPorts {
   dnr: DnrPort;
-  tabs: Pick<TabsPort, 'get' | 'navigate' | 'hardReload' | 'sendMessage'>;
+  tabs: Pick<TabsPort, 'get' | 'getZoom' | 'navigate' | 'hardReload' | 'sendMessage'>;
   windows: Pick<WindowsPort, 'createPopup' | 'update' | 'getBox' | 'remove' | 'describe'>;
   scripting: ScriptingPort;
   store: SessionStore;
@@ -97,8 +127,15 @@ export interface RunnerEnv {
   /** crypto.randomUUID. */
   uuid: () => string;
   clock: Clock;
+  /**
+   * The waits inside measureTab (settle) and updateWindow (verify). Defaults to the clock's
+   * setTimeout; the loops are bounded by read counts, so a test may resolve it at once.
+   */
+  sleep?: (ms: number) => Promise<void>;
   /** Keeps the worker awake while timers are pending (timers.ts); omitted in tests. */
   keepAlive?: () => void;
+  /** Guarded builds only (e2e-hooks.ts): test flags such as a shorter guided-resize deadline. */
+  e2e?: RunnerTestHooks;
   log?: Logger;
 }
 
@@ -109,6 +146,8 @@ export interface Runner {
   dispatch(event: HandoffEvent): Promise<void>;
   /** tabs.onUpdated: only the composer tab's updates reach the reducer. */
   tabUpdated(tabId: number, update: TabUpdate): Promise<void>;
+  /** windows.onBoundsChanged: only the composer window's changes reach the reducer (W3). */
+  windowBoundsChanged(windowId: number): Promise<void>;
   /** runtime.onMessage from the agent: validated, then answered (AgentReply). */
   agentMessage(raw: unknown, sender: SenderLike): Promise<AgentReply>;
   /** A message on the editor's `handoff` port. */
@@ -171,6 +210,18 @@ export function currentStatus(s: HandoffState): HandoffStatus {
   }
   // AM21: the session's own switches, so a reconnected editor shows them too.
   const switches = { rehearsal: s.rehearsal, assistedInsert: s.assistedInsert };
+  // W3: a reconnected editor shows the guided resize with the size last read.
+  if (s.phase === 'resizing') {
+    const tab = s.win.finalTab ?? { w: 0, h: 0 };
+    return {
+      handoffId: s.handoffId,
+      phase: s.phase,
+      level: s.level,
+      ...switches,
+      window: s.win,
+      resize: { tab, ok: isUsableInner(tab, s.win.zoom), until: s.resizeUntil, maxW: maxMsiteInnerW(s.win.zoom) },
+    };
+  }
   if (s.phase === 'opening') return { handoffId: s.handoffId, phase: s.phase, level: null, ...switches };
   if (s.phase === 'closing') {
     const error = outcomeError(s.outcome);
@@ -183,6 +234,8 @@ export function currentStatus(s: HandoffState): HandoffStatus {
     ...switches,
     ...(s.fakeBanner ? { banner: 'FAKE_INSTAGRAM' as const } : {}),
     ...(s.route ? { route: s.route } : {}),
+    // W5: a reconnected editor shows how the popup was sized.
+    ...(s.win.attempts > 0 ? { window: s.win } : {}),
     ...(s.phase === 'finished' ? { detectedPosted: s.detectedPosted } : {}),
     ...(s.phase === 'finished' && s.holdOpen ? { holdOpen: true } : {}),
     // AM28: no pre-answer, and the unexpected page that ended it, survive an editor reload too.
@@ -193,9 +246,14 @@ export function currentStatus(s: HandoffState): HandoffStatus {
   };
 }
 
+/** Same outer box (windows.get). */
+const sameBox = (a: WindowBox, b: WindowBox): boolean =>
+  a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
+
 export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
   const log = env.log ?? consoleLogger;
   const { clock } = env;
+  const sleep = env.sleep ?? ((ms: number) => new Promise<void>((resolve) => void clock.setTimeout(resolve, ms)));
   const chromeMajor = chromeMajorFromUa(env.userAgent) ?? 0;
   const brandedBrowser = isBrandedBrowser(env.brands ?? []);
   const sinks = new Set<(msg: BackgroundToEditor) => void>();
@@ -226,6 +284,7 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
   async function sampleCtx(): Promise<HandoffCtx> {
     const now = clock.now();
     const settings = await ports.local.settings();
+    const resizeTimeoutMs = env.guarded && env.e2e ? await env.e2e.resizeTimeoutMs().catch(() => undefined) : undefined;
     return {
       now,
       guarded: env.guarded,
@@ -234,7 +293,82 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
       rate: await ports.local.rate(now, settings),
       uuid: env.uuid,
       brandedBrowser,
+      ...(resizeTimeoutMs !== undefined ? { resizeTimeoutMs } : {}),
     };
+  }
+
+  /** W2: windows.get until two reads FIT_SETTLE_POLL_MS apart agree, at most FIT_SETTLE_MAX_MS. */
+  async function settledBox(windowId: number): Promise<WindowBox> {
+    let box = await ports.windows.getBox(windowId);
+    for (let i = 0; i < Math.ceil(FIT_SETTLE_MAX_MS / FIT_SETTLE_POLL_MS); i++) {
+      await sleep(FIT_SETTLE_POLL_MS);
+      const next = await ports.windows.getBox(windowId);
+      if (sameBox(box, next)) return next;
+      box = next;
+    }
+    return box;
+  }
+
+  async function tabSize(tabId: number): Promise<Size> {
+    const tab = await ports.tabs.get(tabId);
+    if (tab.width === undefined || tab.height === undefined) throw new Error('tabs.get returned no size');
+    return { w: tab.width, h: tab.height };
+  }
+
+  type UpdateWindow = Extract<HandoffEffect, { type: 'updateWindow' }>;
+  const applyBox = (eff: UpdateWindow) => ports.windows.update(eff.windowId, { state: 'normal', ...eff.box });
+
+  /**
+   * W2: after the first windows.update({state:'normal', ...box}) (the caller's), tabs.get every
+   * FIT_VERIFY_POLL_MS until the tab is within FIT_TOLERANCE_PX of the target, at most
+   * FIT_VERIFY_MAX_MS. With `reapply` (pre-navigation only): at each FIT_REAPPLY_MS offset the tab is
+   * read and, if it is not fitted, the same box is applied again; and a fit ends the wait only from
+   * FIT_HOLD_MS on, so a late re-placement is seen and re-applied. Elapsed time is the sum of the
+   * waits (not a clock read), so the loop is bounded. `applied` counts the first update too.
+   */
+  async function verifyFit(eff: UpdateWindow): Promise<{ fitted: boolean; inner: Size; applied: number }> {
+    let applied = 1;
+    const reapplyAt = eff.reapply ? FIT_REAPPLY_MS.filter((ms) => ms > 0 && ms < FIT_VERIFY_MAX_MS) : [];
+    const holdUntil = eff.reapply ? Math.min(FIT_HOLD_MS, FIT_VERIFY_MAX_MS) : 0;
+    const polls = Array.from({ length: Math.ceil(FIT_VERIFY_MAX_MS / FIT_VERIFY_POLL_MS) }, (_, i) =>
+      Math.min((i + 1) * FIT_VERIFY_POLL_MS, FIT_VERIFY_MAX_MS),
+    );
+    const ticks = [...new Set([...polls, ...reapplyAt])].sort((a, b) => a - b);
+    let inner = await tabSize(eff.tabId);
+    let t = 0;
+    for (const at of ticks) {
+      if (isFitted(inner, eff.inner) && t >= holdUntil) break;
+      await sleep(at - t);
+      t = at;
+      inner = await tabSize(eff.tabId);
+      if (reapplyAt.includes(at) && !isFitted(inner, eff.inner)) {
+        await applyBox(eff);
+        applied++;
+      }
+    }
+    return { fitted: isFitted(inner, eff.inner) && t >= holdUntil, inner, applied };
+  }
+
+  /** The verification's answer: what it saw, and the window box now. */
+  async function fitAnswer(eff: UpdateWindow): Promise<HandoffEvent> {
+    const { fitted, inner, applied } = await verifyFit(eff);
+    const outer = await ports.windows.getBox(eff.windowId);
+    return { type: 'windowFitted', box: eff.box, target: eff.inner, fitted, inner, outer, applied };
+  }
+
+  /** AL-3: effect work that runs beside the queue; settled() waits for it too. */
+  const detached = new Set<Promise<void>>();
+  function detach(effect: HandoffEffect['type'], work: () => Promise<HandoffEvent>): void {
+    const task: Promise<void> = work().then(
+      (answer) => queueEvent(answer),
+      (err: unknown) => {
+        const message = errorMessage(err);
+        log.warn(`effect ${effect} failed`, message);
+        queueEvent({ type: 'effectFailed', effect, message });
+      },
+    );
+    detached.add(task);
+    void task.finally(() => detached.delete(task));
   }
 
   function broadcast(status: HandoffStatus): void {
@@ -247,6 +381,19 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
         sinks.delete(post);
       }
     }
+  }
+
+  /**
+   * AM37: whether this injection's portrait shim installs itself. Always in live builds (no test hooks);
+   * a guarded build's E2E flag makes it read only, everywhere (`true`) or (SH-1, `'home'`) while the tab
+   * is not on the composer, so it first installs after the composer has mounted.
+   */
+  async function shimInstalls(tabId: number): Promise<boolean> {
+    if (!env.guarded || !env.e2e) return true;
+    const off = await env.e2e.portraitShimOff().catch(() => false);
+    if (off !== 'home') return off !== true;
+    const tab = await ports.tabs.get(tabId).catch(() => null);
+    return isComposerUrl(tab?.url);
   }
 
   /** Runs one effect; returns the event that answers it, if any. Throws when the platform call fails. */
@@ -264,14 +411,25 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
         await ports.dnr.updateSessionRules({ removeRuleIds: eff.removeRuleIds, addRules: eff.addRules });
         return { type: 'rulesInstalled' };
       case 'measureTab': {
-        const tab = await ports.tabs.get(eff.tabId);
-        const outer = await ports.windows.getBox(eff.windowId);
-        if (tab.width === undefined || tab.height === undefined) throw new Error('tabs.get returned no size');
-        return { type: 'tabMeasured', inner: { w: tab.width, h: tab.height }, outer };
+        // AL-3: only the new popup settles; the refit's window is not new (one read, no wait).
+        const outer = eff.settle ? await settledBox(eff.windowId) : await ports.windows.getBox(eff.windowId);
+        const inner = await tabSize(eff.tabId);
+        const zoom = await ports.tabs.getZoom(eff.tabId).catch(() => null);
+        return { type: 'tabMeasured', inner, outer, zoom };
       }
-      case 'updateWindow':
-        await ports.windows.update(eff.windowId, eff.box);
-        return { type: 'windowFitted' };
+      case 'updateWindow': {
+        await applyBox(eff);
+        // Pre-navigation (about:blank, kill switch not armed): verified, re-applied and held here.
+        if (eff.reapply) return fitAnswer(eff);
+        // AL-3: the refit, kill switch armed: verified beside the queue, answered when it ends.
+        detach(eff.type, () => fitAnswer(eff));
+        return null;
+      }
+      case 'readSize': {
+        const inner = await tabSize(eff.tabId);
+        const outer = await ports.windows.getBox(eff.windowId);
+        return { type: 'windowSized', inner, outer };
+      }
       case 'navigate':
         await ports.tabs.navigate(eff.tabId, eff.url);
         return null;
@@ -279,8 +437,12 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
         await ports.tabs.hardReload(eff.tabId);
         return null;
       case 'injectAgent': {
+        // AM37: the portrait shim first, into the same tab and frame, so the page reads a portrait screen
+        // before the composer can mount; the agent after it. A guarded build's E2E flag makes it read only.
+        const install = await shimInstalls(eff.tabId);
+        const orientation = await ports.scripting.injectPortraitShim(eff.tabId, install);
         const { fresh } = await ports.scripting.injectComposerAgent(eff.tabId);
-        return { type: 'agentInjected', fresh };
+        return { type: 'agentInjected', fresh, orientation };
       }
       case 'sendAgent': {
         if (!address) throw new Error('sendAgent without a session');
@@ -428,6 +590,14 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
           await step(event);
         }),
       ),
+    windowBoundsChanged: (windowId) =>
+      quiet(
+        enqueue(async () => {
+          const owner = current.phase === 'idle' || current.phase === 'opening' ? null : current.windowId;
+          if (owner === null || owner !== windowId) return;
+          await step({ type: 'boundsChanged', windowId });
+        }),
+      ),
     agentMessage: (raw, sender) =>
       enqueue(async (): Promise<AgentReply> => {
         const verdict = acceptAgentMessage(raw, sender, agentSession(current));
@@ -466,6 +636,7 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
                 mode: raw.mode,
                 rehearsal: raw.rehearsal,
                 screen: raw.screen,
+                browser: raw.browser,
               });
             case 'handoff/cancel':
               return step({ type: 'cancel' });
@@ -494,11 +665,16 @@ export function createRunner(ports: RunnerPorts, env: RunnerEnv): Runner {
       };
     },
     async settled() {
-      let seen: Promise<void>;
-      do {
-        seen = chain;
+      for (;;) {
+        const seen = chain;
         await seen;
-      } while (seen !== chain);
+        // A detached verification (AL-3) queues its answer when it ends.
+        if (detached.size > 0) {
+          await Promise.allSettled([...detached]);
+          continue;
+        }
+        if (seen === chain) return;
+      }
     },
     state: () => current,
   };

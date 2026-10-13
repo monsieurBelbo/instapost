@@ -9,7 +9,7 @@
 import { strings } from './client/i18n.ts';
 import { KNOB_CHOICES, KNOB_NAMES, type KnobName, type Knobs } from './knobs.ts';
 import { FAKE_PATHS, type FakeBoot } from './protocol.ts';
-import type { RequestRecord, StoryRecord, ViolationRecord, WriteRecord } from './store.ts';
+import type { ComposerViewRecord, RequestRecord, StoryRecord, ViolationRecord, WriteRecord } from './store.ts';
 import type { UaClassification } from './ua.ts';
 
 export const MARKER_META = '<meta name="instapost-fake-instagram" content="1">';
@@ -101,8 +101,13 @@ export interface DashboardState {
   violations: ViolationRecord[];
   /** Oldest first; the dashboard shows the last 200, newest first. */
   requests: RequestRecord[];
+  /** AM37: what the composer page showed (landscape gate), oldest first. */
+  composerViews: ComposerViewRecord[];
   certValidTo: string | null;
 }
+
+/** AM37: composer views the dashboard shows, newest first. */
+export const DASHBOARD_COMPOSER_VIEWS = 20;
 
 export const DASHBOARD_REQUESTS = 200;
 
@@ -139,6 +144,7 @@ function storyCard(s: StoryRecord): string {
 ${esc(time(s.t))} · ${esc(uaLabel(s.ua))}<br>
 <span class="mono">mobile ${esc(s.ch['sec-ch-ua-mobile'] ?? '—')} · platform ${esc(s.ch['sec-ch-ua-platform'] ?? '—')}</span><br>
 ${g ? `<span class="mono">${esc(g.model)} · css ${g.css.w}×${g.css.h} @${g.dpr} · src ${g.source.w}×${g.source.h}</span><br>` : ''}
+${s.meta ? `<span class="mono">${s.meta.sessionStarted ? 'story session started by + → Story' : 'no story session (inserted file)'} · screen ${esc(s.meta.screenOrientation ?? '—')}</span><br>` : ''}
 <span class="ua" title="${esc(s.ua ?? '')}">${esc(s.ua ?? '')}</span></figcaption></figure>`;
 }
 
@@ -162,6 +168,23 @@ export function dashboardLiveHtml(s: DashboardState): string {
   }</p>
 <h2>Stories</h2>
 ${s.stories.length ? `<div class="stories">${[...s.stories].reverse().map(storyCard).join('')}</div>` : '<p class="muted">No story shared yet.</p>'}
+<h2>Composer views (landscape gate)</h2>
+${table(
+  ['time', 'shown', 'via', 'screen', 'viewport', 'session', 'path'],
+  s.composerViews
+    .slice(-DASHBOARD_COMPOSER_VIEWS)
+    .reverse()
+    .map((v) => [
+      td(time(v.t)),
+      td(v.landscape ? 'rotate snackbar, no Share' : 'Share', v.landscape ? 'bad' : 'ok'),
+      td(v.via),
+      td(v.screenOrientation ?? '—', 'mono'),
+      td(`${v.inner.w}×${v.inner.h}`),
+      td(v.sessionStarted ? 'started by + → Story' : 'none (inserted)'),
+      td(v.path, 'mono'),
+    ]),
+  'The composer has not shown a photo yet.',
+)}
 <h2>Violations</h2>
 ${table(
   ['time', 'kind', 'story', 'detail'],
@@ -226,7 +249,7 @@ function knobField(name: KnobName, knobs: Knobs, defaults: Readonly<Knobs>): str
   const value = knobText(knobs[name]);
   const cls = value !== knobText(defaults[name]) ? ' class="changed"' : '';
   const hint = `default ${knobText(defaults[name])}`;
-  if (name === 'geometry' || name === 'insets' || name === 'slowMs') {
+  if (name === 'geometry' || name === 'insets' || name === 'slowMs' || name === 'hydrateMs') {
     const ph =
       name === 'geometry' ? 'viewportDpr | source | fixed:WxH | cssFixed:WxH' : name === 'insets' ? 'top,bottom' : 'ms';
     return `<label${cls}><span>${name}</span><input name="${name}" value="${esc(value)}" placeholder="${esc(ph)}" title="${esc(hint)}"></label>`;

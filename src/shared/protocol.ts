@@ -16,19 +16,29 @@ import {
   type HandoffMode,
   type HandoffPhase,
   type HandoffStatus,
+  MAX_WINDOW_UPDATES,
+  type WindowDiagnostics,
 } from '../core/handoff/state.ts';
-import type { ProbeReport } from '../core/ig-contract/contract.ts';
+import { BROWSER_FLAVOURS, type BrowserFlavour } from '../core/ig-contract/browser-flavour.ts';
+import {
+  NAV_TYPES,
+  ORIENTATION_SHIM_STATES,
+  type PageOrientation,
+  type ProbeReport,
+} from '../core/ig-contract/contract.ts';
 import { IG_ORIGIN } from '../core/ig-contract/urls.ts';
 import type { ExportId, HandoffId, Nonce } from '../core/model/ids.ts';
 
 export { b64ToBytes, bytesToB64 } from './b64.ts';
 export type {
   AgentEventName,
+  BrowserFlavour,
   ErrorCode,
   HandoffLevel,
   HandoffMode,
   HandoffPhase,
   HandoffStatus,
+  PageOrientation,
   ProbeReport,
   ScreenAvail,
 };
@@ -47,6 +57,8 @@ export interface HandoffStartMsg {
   mode: HandoffMode;
   rehearsal: boolean;
   screen: ScreenAvail;
+  /** P6: the browser the editor detected (src/ui/browser-flavour.ts). */
+  browser: BrowserFlavour;
 }
 export interface HandoffCancelMsg {
   v: 1;
@@ -115,6 +127,7 @@ export const HANDOFF_PHASES = [
   'opening',
   'scoping',
   'fitting',
+  'resizing',
   'navigating',
   'reloading',
   'probing',
@@ -132,6 +145,7 @@ export const AGENT_EVENT_NAMES = [
   'inject-ignored',
   'inject-unconfirmed',
   'sw-controller-change',
+  'sw-intercepted',
 ] as const satisfies readonly AgentEventName[];
 
 /** Compile-time completeness: a phase or event added in src/core must be listed here too. */
@@ -141,7 +155,9 @@ const _eventsComplete: Complete<AgentEventName, (typeof AGENT_EVENT_NAMES)[numbe
 void [_phasesComplete, _eventsComplete];
 
 /** Caps on page-derived strings carried in a ProbeReport (they end up in IndexedDB records). */
-export const PROBE_LIMITS = { lang: 64, acceptEntries: 32, acceptLength: 512 } as const;
+export const PROBE_LIMITS = { lang: 64, acceptEntries: 32, acceptLength: 512, orientationType: 32 } as const;
+/** Cap on the composer path a status carries (U1). */
+export const MAX_PATH_LENGTH = 512;
 /** Ids and nonces are `<prefix>_<uuid>` or a uuid; anything longer is not ours. */
 const MAX_ID_LENGTH = 128;
 
@@ -153,10 +169,44 @@ const isId = (x: unknown): x is string => typeof x === 'string' && x !== '' && x
 const oneOf = <T extends string>(list: readonly T[], x: unknown): x is T => list.includes(x as T);
 const isSize = (x: unknown): x is { w: number; h: number } => isObj(x) && isNum(x.w) && isNum(x.h);
 const isRect = (x: unknown): boolean => isSize(x) && isNum((x as Obj).x) && isNum((x as Obj).y);
+const isBox = (x: unknown): boolean => isObj(x) && isNum(x.left) && isNum(x.top) && isNum(x.width) && isNum(x.height);
+const orNull = (ok: (y: unknown) => boolean) => (y: unknown) => y === null || ok(y);
 const v1 = (x: unknown): x is Obj => isObj(x) && x.v === PROTOCOL_VERSION && typeof x.type === 'string';
 
 const isScreen = (x: unknown): x is ScreenAvail =>
   isObj(x) && isNum(x.availLeft) && isNum(x.availTop) && isNum(x.availWidth) && isNum(x.availHeight);
+
+/** W5: the popup's sizing as statuses carry it (structural numbers only). */
+export function isWindowDiagnostics(x: unknown): x is WindowDiagnostics {
+  if (!isObj(x)) return false;
+  const updatesOk =
+    Array.isArray(x.updates) &&
+    x.updates.length <= MAX_WINDOW_UPDATES &&
+    x.updates.every(
+      (u) =>
+        isObj(u) &&
+        oneOf(['fit', 'retry', 'refit'], u.step) &&
+        isBox(u.box) &&
+        isSize(u.target) &&
+        isBox(u.outer) &&
+        isSize(u.tab) &&
+        isBool(u.fitted),
+    );
+  return (
+    isScreen(x.screen) &&
+    isBox(x.requested) &&
+    orNull(isBox)(x.created) &&
+    orNull(isSize)(x.createdTab) &&
+    orNull(isSize)(x.frameDelta) &&
+    updatesOk &&
+    isNum(x.attempts) &&
+    isBool(x.manualResize) &&
+    orNull(isSize)(x.finalTab) &&
+    orNull(isNum)(x.zoom)
+  );
+}
+
+const isResize = (x: unknown): boolean => isObj(x) && isSize(x.tab) && isBool(x.ok) && isNum(x.until) && isNum(x.maxW);
 
 export function isEditorToBackground(x: unknown): x is EditorToBackground {
   if (!v1(x)) return false;
@@ -166,7 +216,8 @@ export function isEditorToBackground(x: unknown): x is EditorToBackground {
         (x.exportId === null || isId(x.exportId)) &&
         oneOf(['post', 'probe'], x.mode) &&
         isBool(x.rehearsal) &&
-        isScreen(x.screen)
+        isScreen(x.screen) &&
+        oneOf(BROWSER_FLAVOURS, x.browser)
       );
     case 'handoff/cancel':
       return true;
@@ -196,7 +247,11 @@ export function isBackgroundToEditor(x: unknown): x is BackgroundToEditor {
     optional('detail', (y) => typeof y === 'string') &&
     optional('rehearsal', isBool) &&
     optional('assistedInsert', isBool) &&
-    optional('holdOpen', isBool)
+    optional('holdOpen', isBool) &&
+    optional('resize', isResize) &&
+    optional('window', isWindowDiagnostics) &&
+    optional('path', (y) => typeof y === 'string' && y.length <= MAX_PATH_LENGTH) &&
+    optional('c4', (y) => oneOf(['pass', 'fail', 'unknown'], y))
   );
 }
 
@@ -229,6 +284,31 @@ export function isAgentToBackground(x: unknown): x is AgentToBackground {
   }
 }
 
+/**
+ * AM37: a screen orientation reading, as statuses and records carry it. `type` is short, lower-case
+ * letters and dashes (`portrait-primary`), or null. `afterComposerMount` (SH-1) is absent or true.
+ */
+export function isPageOrientation(x: unknown): x is PageOrientation {
+  return (
+    isObj(x) &&
+    oneOf(ORIENTATION_SHIM_STATES, x.shim) &&
+    (x.type === null ||
+      (typeof x.type === 'string' && x.type.length <= PROBE_LIMITS.orientationType && /^[a-z-]+$/.test(x.type))) &&
+    (x.afterComposerMount === undefined || x.afterComposerMount === true)
+  );
+}
+
+/**
+ * AM37: the portrait shim's executeScript result as the background keeps it. The shim runs in the
+ * page's MAIN world, with the page's own globals, so its result is untrusted data: anything that is not
+ * a well-formed reading becomes `{type: null, shim: 'failed'}`, which records C3b `unknown` and, on the
+ * composer, ends the hand-off with SCREEN_LANDSCAPE (SH-2: never a pass). Only `type` and `shim` are
+ * kept: `afterComposerMount` is the background's own judgement (SH-1), never the page's.
+ */
+export function toPageOrientation(raw: unknown): PageOrientation {
+  return isPageOrientation(raw) ? { type: raw.type, shim: raw.shim } : { type: null, shim: 'failed' };
+}
+
 export function isProbeReport(x: unknown): x is ProbeReport {
   if (!isObj(x)) return false;
   const canvasOk =
@@ -246,12 +326,15 @@ export function isProbeReport(x: unknown): x is ProbeReport {
     x.dpr > 0 &&
     isBool(x.portrait) &&
     (isBool(x.swControlled) || x.swControlled === 'unknown') &&
+    (isBool(x.swIntercepted) || x.swIntercepted === 'unknown') &&
+    oneOf(NAV_TYPES, x.navType) &&
     oneOf(['present', 'absent'], x.storyInput) &&
     isBool(x.acceptOk) &&
     acceptSeenOk &&
     canvasOk &&
     typeof x.lang === 'string' &&
-    x.lang.length <= PROBE_LIMITS.lang
+    x.lang.length <= PROBE_LIMITS.lang &&
+    (x.orientation === undefined || isPageOrientation(x.orientation))
   );
 }
 
@@ -265,7 +348,10 @@ export function isGetFileReply(x: unknown): x is GetFileReply {
   return x.ok === true && typeof x.name === 'string' && typeof x.mime === 'string' && typeof x.b64 === 'string';
 }
 
-/** A copy of a valid report with only the known fields (nothing extra reaches storage). */
+/**
+ * A copy of a valid report with only the known fields (nothing extra reaches storage). The agent's
+ * report never carries `orientation` (AM37): the background stamps it from the shim's own result.
+ */
 export function normalizeProbeReport(p: ProbeReport): ProbeReport {
   return {
     marker: p.marker,
@@ -274,6 +360,8 @@ export function normalizeProbeReport(p: ProbeReport): ProbeReport {
     dpr: p.dpr,
     portrait: p.portrait,
     swControlled: p.swControlled,
+    swIntercepted: p.swIntercepted,
+    navType: p.navType,
     storyInput: p.storyInput,
     acceptOk: p.acceptOk,
     ...(p.acceptSeen ? { acceptSeen: [...p.acceptSeen] } : {}),

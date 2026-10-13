@@ -24,13 +24,14 @@ import {
   FAKE_META_HEADER,
   FAKE_PATHS,
   FAKE_VIA_SW_HEADER,
+  type FakeComposerView,
   type FakeShareMeta,
   I_HOST,
   IG_HOSTS,
   OFFHOST_URL,
   WWW_HOST,
 } from './protocol.ts';
-import type { SeenHeaders, Store, StoryRecord, ViolationRecord, WriteRecord } from './store.ts';
+import type { ComposerViewRecord, SeenHeaders, Store, StoryRecord, ViolationRecord, WriteRecord } from './store.ts';
 import { classify, type HeaderBag } from './ua.ts';
 
 export interface FakeRequest {
@@ -53,13 +54,14 @@ export interface FakeResponse {
 export interface CoreAssets {
   /** esbuild bundle of client/main.tsx. */
   clientJs: string;
-  sw: { desktopShell: string; claimLate: string };
+  sw: { claimOnRegister: string; desktopShell: string; claimLate: string };
 }
 
 export type CoreEvent =
   | { kind: 'write'; write: WriteRecord }
   | { kind: 'story'; story: StoryRecord }
-  | { kind: 'violation'; violation: ViolationRecord };
+  | { kind: 'violation'; violation: ViolationRecord }
+  | { kind: 'composerView'; view: ComposerViewRecord };
 
 export interface CoreOptions {
   store: Store;
@@ -157,6 +159,38 @@ function parseMeta(raw: string | undefined): { meta: FakeShareMeta | null; error
   }
 }
 
+const isFiniteNum = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x);
+const shortStringOrNull = (x: unknown): x is string | null => x === null || (typeof x === 'string' && x.length <= 64);
+
+/** AM37: a composer-view report from the fake's page; null unless well formed (the page is ours, the check cheap). */
+export function parseComposerView(v: unknown): FakeComposerView | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const o = v as Record<string, unknown>;
+  const inner = o.inner as Record<string, unknown> | null | undefined;
+  const ok =
+    typeof o.landscape === 'boolean' &&
+    typeof o.share === 'boolean' &&
+    (o.via === 'screen' || o.via === 'viewport') &&
+    shortStringOrNull(o.screenOrientation) &&
+    typeof inner === 'object' &&
+    inner !== null &&
+    isFiniteNum(inner.w) &&
+    isFiniteNum(inner.h) &&
+    typeof o.sessionStarted === 'boolean' &&
+    typeof o.path === 'string' &&
+    o.path.length <= 512;
+  if (!ok) return null;
+  return {
+    landscape: o.landscape as boolean,
+    share: o.share as boolean,
+    via: o.via as FakeComposerView['via'],
+    screenOrientation: o.screenOrientation as string | null,
+    inner: { w: inner.w as number, h: inner.h as number },
+    sessionStarted: o.sessionStarted as boolean,
+    path: o.path as string,
+  };
+}
+
 function bodyObject(req: FakeRequest): unknown {
   const raw = new TextDecoder().decode(req.body ?? new Uint8Array());
   if (raw.trim() === '') return {};
@@ -181,6 +215,7 @@ export function createCore(opts: CoreOptions): FakeCore {
       writes: store.writes(),
       violations: store.violations(),
       requests: store.requests(),
+      composerViews: store.composerViews(),
       certValidTo: opts.certValidTo,
     };
   }
@@ -251,6 +286,8 @@ export function createCore(opts: CoreOptions): FakeCore {
       p.startsWith('/auth_platform/') ||
       p.startsWith(FAKE_PATHS.elsewhere) ||
       p === FAKE_PATHS.clientJs ||
+      p === FAKE_PATHS.beacon ||
+      p === FAKE_PATHS.swClaimOnRegister ||
       p === FAKE_PATHS.swDesktopShell ||
       p === FAKE_PATHS.swClaimLate;
     if (!known) return site(text(404, 'not found'));
@@ -264,8 +301,11 @@ export function createCore(opts: CoreOptions): FakeCore {
     }
     if (p.startsWith(FAKE_PATHS.elsewhere)) return site(html(200, placeholderHtml('notice', store.knobs())));
     if (p === FAKE_PATHS.clientJs) return site(js(assets.clientJs));
-    // Scope `/` from a script under /fake-sw/ needs Service-Worker-Allowed.
+    if (p === FAKE_PATHS.beacon) return site({ status: 204, headers: { ...NO_STORE }, body: '' });
+    // Scope `/` from a script under /fake-sw/ needs Service-Worker-Allowed. The query of a
+    // claim-on-register URL (enableAddToHomeScreen, zenon_device_id) only makes each load a new worker.
     const swAllowed = { 'service-worker-allowed': '/' };
+    if (p === FAKE_PATHS.swClaimOnRegister) return site(js(assets.sw.claimOnRegister, swAllowed));
     if (p === FAKE_PATHS.swDesktopShell) return site(js(assets.sw.desktopShell, swAllowed));
     return site(js(assets.sw.claimLate, swAllowed));
   }
@@ -326,6 +366,19 @@ export function createCore(opts: CoreOptions): FakeCore {
       }
       return json(200, { ok: true });
     }
+    if (p === FAKE_PATHS.composerView) {
+      if (method !== 'POST') return text(405, 'method not allowed', { allow: 'POST' });
+      let body: unknown;
+      try {
+        body = bodyObject(req);
+      } catch {
+        body = null;
+      }
+      const parsed = parseComposerView(body);
+      if (!parsed) return json(400, { error: 'invalid composer view' });
+      emit({ kind: 'composerView', view: store.addComposerView(parsed) });
+      return json(200, { ok: true });
+    }
     const jpg = STORY_JPG_RE.exec(p);
     if (jpg && read) {
       const bytes = store.storyBytes(jpg[1] ?? '');
@@ -337,6 +390,7 @@ export function createCore(opts: CoreOptions): FakeCore {
     }
     if (p === `${FAKE_PATHS.api}writes` && read) return json(200, store.writes());
     if (p === `${FAKE_PATHS.api}violations` && read) return json(200, store.violations());
+    if (p === `${FAKE_PATHS.api}composer-views` && read) return json(200, store.composerViews());
     if (p === `${FAKE_PATHS.api}knobs`) {
       if (read) return json(200, store.knobs());
       if (method !== 'POST') return text(405, 'method not allowed', { allow: 'GET, POST' });

@@ -4,13 +4,14 @@
  * every command acked, the hand-off pinned, one insert per handoffId, the 10 s ready deadline,
  * the watch re-reporting on restart, C9 and controllerchange; AM24 (a canvas ready before the
  * watch, or before an H1 insert, never counts) and AM18 (the watch survives composer-left).
+ * P3 (2026-10-12): the service-worker interception tripwire, in the probe and in the watch.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { STORY_ACCEPT } from '../core/ig-contract/contract.ts';
 import { bytesToB64 } from '../shared/b64.ts';
 import type { AgentAck, AgentToBackground } from '../shared/protocol.ts';
 import { type AgentRuntime, startAgent } from './agent.ts';
-import type { AgentWindow } from './probes.ts';
+import { type AgentWindow, navigationIntercepted, resourceIntercepted, swInterception } from './probes.ts';
 import { WATCH_TICK_MS } from './watch.ts';
 
 interface FakeInput {
@@ -51,8 +52,26 @@ const canvas = (w: number, h: number, css: FakeCanvas['css']): FakeCanvas => ({
   checkVisibility: () => true,
 });
 
-function fakeWindow() {
+/** P3: a PerformanceObserver the test can feed entries to (null: the window has none). */
+type ObserverCallback = (list: { getEntries(): unknown[] }) => void;
+
+function fakeWindow(opts: { observer?: boolean } = {}) {
   let t = 0;
+  const observers: { cb: ObserverCallback; options: unknown; connected: boolean }[] = [];
+  class FakePerformanceObserver {
+    readonly slot: { cb: ObserverCallback; options: unknown; connected: boolean };
+    constructor(cb: ObserverCallback) {
+      this.slot = { cb, options: null, connected: false };
+      observers.push(this.slot);
+    }
+    observe(options: unknown) {
+      this.slot.options = options;
+      this.slot.connected = true;
+    }
+    disconnect() {
+      this.slot.connected = false;
+    }
+  }
   let seq = 0;
   const intervals = new Map<number, { fn: () => void; ms: number; next: number }>();
   const swListeners: (() => void)[] = [];
@@ -61,6 +80,11 @@ function fakeWindow() {
     canvases: [] as FakeCanvas[],
     scripts: [] as { textContent: string }[],
     marker: true,
+    /** P3: the performance timeline (the navigation entry, then resources); null = not readable. */
+    navigation: [{ name: 'https://www.instagram.com/', type: 'reload', workerStart: 0 }] as
+      | { name: string; type: string; workerStart: number }[]
+      | null,
+    resources: [] as { name: string; workerStart: number }[],
   };
   class FakeDataTransfer {
     readonly list: unknown[] = [];
@@ -77,7 +101,13 @@ function fakeWindow() {
     navigator: {
       serviceWorker: { controller: null, addEventListener: (_: string, l: () => void) => void swListeners.push(l) },
     },
-    performance: { now: () => t },
+    performance: {
+      now: () => t,
+      getEntriesByType(type: string) {
+        if (page.navigation === null) throw new Error('no timeline');
+        return type === 'navigation' ? page.navigation : type === 'resource' ? page.resources : [];
+      },
+    },
     setInterval: (fn: () => void, ms: number) => {
       intervals.set(++seq, { fn, ms, next: t + ms });
       return seq;
@@ -86,6 +116,7 @@ function fakeWindow() {
     File,
     Event,
     DataTransfer: FakeDataTransfer,
+    ...(opts.observer ? { PerformanceObserver: FakePerformanceObserver } : {}),
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
     document: {
       documentElement: { lang: 'es' },
@@ -117,6 +148,11 @@ function fakeWindow() {
     controllerChange: () => {
       for (const l of swListeners) l();
     },
+    /** Delivers resource entries to the connected observers (entries past a full timeline buffer). */
+    observe: (entries: { name: string; workerStart: number }[]) => {
+      for (const o of observers) if (o.connected) o.cb({ getEntries: () => entries });
+    },
+    observers,
   };
 }
 
@@ -125,8 +161,8 @@ const ADDR = { handoffId: 'hof_1', nonce: 'n-1' };
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-function harness() {
-  const w = fakeWindow();
+function harness(opts: { observer?: boolean } = {}) {
+  const w = fakeWindow(opts);
   const sent: AgentToBackground[] = [];
   let fileReply: unknown = { ok: true, name: 'story.png', mime: 'image/png', b64: bytesToB64(PNG) };
   let listener: Parameters<AgentRuntime['listen']>[0] | null = null;
@@ -187,6 +223,8 @@ describe('agent commands', () => {
           dpr: 2,
           portrait: true,
           swControlled: false,
+          swIntercepted: false,
+          navType: 'reload',
           storyInput: 'present',
           acceptOk: true,
           acceptSeen: ['image/jpeg,image/png,video/mp4,video/quicktime', 'image/avif,image/jpeg,image/png'],
@@ -379,5 +417,110 @@ describe('watch', () => {
     expect(h.events()).toEqual([]);
     h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
     expect(h.events()).toContain('sw-controller-change');
+  });
+
+  it('P2: each controllerchange is reported once, never again on a restart (the record counts them)', () => {
+    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.controllerChange();
+    h.command({ type: 'agent/watch', readyTimeoutMs: 10_000 });
+    h.controllerChange();
+    h.advance(1000);
+    expect(h.events().filter((e) => e === 'sw-controller-change')).toHaveLength(2);
+  });
+});
+
+describe('P3: the service-worker interception tripwire', () => {
+  it('a controlled page whose worker has no fetch handler (workerStart 0 everywhere) is not intercepted', () => {
+    h.page.resources.push(
+      { name: 'https://www.instagram.com/api/graphql', workerStart: 0 },
+      { name: 'https://scontent.cdninstagram.com/x.jpg', workerStart: 0 },
+    );
+    h.command({ type: 'agent/probe' });
+    expect(h.sent.at(-1)).toMatchObject({ probe: { swIntercepted: false, navType: 'reload' } });
+  });
+
+  it('a www or i.instagram.com resource a worker handled is intercepted; CDN hosts are not rule hosts', () => {
+    expect(resourceIntercepted({ name: 'https://www.instagram.com/api/graphql', workerStart: 12.5 })).toBe(true);
+    expect(resourceIntercepted({ name: 'https://i.instagram.com/api/v1/x', workerStart: 1 })).toBe(true);
+    expect(resourceIntercepted({ name: 'https://WWW.Instagram.com:443/x', workerStart: 1 })).toBe(true);
+    expect(resourceIntercepted({ name: 'https://scontent.cdninstagram.com/x.jpg', workerStart: 3 })).toBe(false);
+    expect(resourceIntercepted({ name: 'https://www.instagram.com.evil.test/x', workerStart: 3 })).toBe(false);
+    expect(resourceIntercepted({ name: 'https://www.instagram.com/x', workerStart: 0 })).toBe(false);
+    h.page.resources.push({ name: 'https://www.instagram.com/api/graphql', workerStart: 40 });
+    h.command({ type: 'agent/probe' });
+    expect(h.sent.at(-1)).toMatchObject({ probe: { swIntercepted: true } });
+  });
+
+  it('the navigation entry counts only when it was not a reload', () => {
+    expect(navigationIntercepted({ name: 'x', type: 'navigate', workerStart: 5 })).toBe(true);
+    expect(navigationIntercepted({ name: 'x', type: 'reload', workerStart: 5 })).toBe(false);
+    expect(navigationIntercepted({ name: 'x', type: 'navigate', workerStart: 0 })).toBe(false);
+    h.page.navigation = [{ name: 'https://www.instagram.com/', type: 'navigate', workerStart: 7 }];
+    expect(swInterception(h.win)).toEqual({ swIntercepted: true, navType: 'navigate' });
+  });
+
+  it('an unreadable timeline is unknown, never a pass', () => {
+    h.page.navigation = null;
+    h.command({ type: 'agent/probe' });
+    expect(h.sent.at(-1)).toMatchObject({ probe: { swIntercepted: 'unknown', navType: 'unknown' } });
+  });
+
+  it('the watch reports a request a worker handled after the probe (a late claim), once per run', () => {
+    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.page.resources.push({ name: 'https://www.instagram.com/api/graphql', workerStart: 0 });
+    h.advance(1000);
+    expect(h.events()).not.toContain('sw-intercepted');
+    h.page.resources.push({ name: 'https://www.instagram.com/ajax/bz', workerStart: 22 });
+    h.advance(WATCH_TICK_MS);
+    h.advance(1000);
+    expect(h.events().filter((e) => e === 'sw-intercepted')).toHaveLength(1);
+  });
+
+  it('past the 250-entry timeline buffer: the observer (from the agent’s start, buffered) still catches it', () => {
+    const o = harness({ observer: true });
+    expect(o.observers).toHaveLength(1);
+    expect(o.observers[0]?.options).toEqual({ type: 'resource', buffered: true });
+    // The page's buffer is full: getEntriesByType never shows the late request; the observer does.
+    for (let i = 0; i < 250; i++) o.page.resources.push({ name: `https://www.instagram.com/r${i}`, workerStart: 0 });
+    o.command({ type: 'agent/probe' });
+    expect(o.sent.at(-1)).toMatchObject({ probe: { swIntercepted: false } });
+    o.observe([
+      { name: 'https://scontent.cdninstagram.com/x.jpg', workerStart: 4 },
+      { name: 'https://www.instagram.com/ajax/bz', workerStart: 18 },
+    ]);
+    // The probe reports what the observer saw ...
+    o.command({ type: 'agent/probe' });
+    expect(o.sent.at(-1)).toMatchObject({ probe: { swIntercepted: true } });
+    // ... and so does the watch, once per run; the observer is done.
+    o.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    o.advance(WATCH_TICK_MS);
+    expect(o.events().filter((e) => e === 'sw-intercepted')).toHaveLength(1);
+    expect(o.observers[0]?.connected).toBe(false);
+  });
+
+  it('CDN entries and workerStart 0 seen by the observer are not interception', () => {
+    const o = harness({ observer: true });
+    o.observe([
+      { name: 'https://scontent.cdninstagram.com/x.jpg', workerStart: 4 },
+      { name: 'https://www.instagram.com/api/graphql', workerStart: 0 },
+    ]);
+    o.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    o.advance(1000);
+    expect(o.events()).not.toContain('sw-intercepted');
+    o.command({ type: 'agent/probe' });
+    expect(o.sent.at(-1)).toMatchObject({ probe: { swIntercepted: false } });
+  });
+
+  it('a page that clears its resource timings is scanned again from the start', () => {
+    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.page.resources.push(
+      { name: 'https://www.instagram.com/a', workerStart: 0 },
+      { name: 'https://www.instagram.com/b', workerStart: 0 },
+    );
+    h.advance(WATCH_TICK_MS);
+    h.page.resources.length = 0;
+    h.page.resources.push({ name: 'https://www.instagram.com/c', workerStart: 9 });
+    h.advance(WATCH_TICK_MS);
+    expect(h.events()).toContain('sw-intercepted');
   });
 });

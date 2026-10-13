@@ -25,7 +25,8 @@ export type ClassName =
   | 'barBtn'
   | 'share'
   | 'dtop'
-  | 'dlinks';
+  | 'dlinks'
+  | 'topEntry';
 
 export type Cx = (name: ClassName) => string;
 
@@ -70,5 +71,7 @@ ${s('barBtn')}{pointer-events:auto;border:0;border-radius:18px;background:rgba(0
 ${s('share')}{pointer-events:auto;border:0;border-radius:22px;background:#fff;color:#111;font:600 15px system-ui;padding:10px 18px}
 ${s('dtop')}{position:sticky;top:0;display:flex;align-items:center;gap:24px;height:60px;padding:0 24px;border-bottom:1px solid #dbdbdb;background:#fff;z-index:2}
 ${s('dlinks')}{display:flex;gap:8px;margin-left:auto;position:relative}
+${s('topEntry')}{margin-left:auto;display:flex;align-items:center}
+${s('top')} ~ ${s('menu')}{top:52px;bottom:auto;left:auto;right:8px;transform:none}
 `;
 }

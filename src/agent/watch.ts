@@ -15,7 +15,16 @@
  *   deadline (the file may still be in the composer, e.g. under 50% coverage or a stale canvas);
  * - `inject-ignored`: the insert could not be made at all (no input, no file, the assignment threw);
  * - `sw-controller-change`: a service worker took control of this document (reported from the
- *   `controllerchange` listener, which the agent installs once per document).
+ *   `controllerchange` listener, which the agent installs once per document). Diagnostics only since
+ *   P2: Instagram's worker claims every logged-in page (F2). Reported once per `controllerchange`
+ *   (not again on a restart), so the background's count is the real one;
+ * - `sw-intercepted` (P3): a www/i.instagram.com request of this document was handled by a service
+ *   worker (resource timing `workerStart > 0`, or the navigation's when it was not a reload). Scanned
+ *   incrementally every tick, so a worker that claims the page after the probe is still caught. The
+ *   page's resource-timing buffer stops growing at 250 entries (its default, which an Instagram page
+ *   can fill), so a PerformanceObserver created when the agent starts in the document (`buffered`)
+ *   sees every later entry too; the agent never resizes the page's buffer (that would change page
+ *   state). `intercepted()` lets the probe report what the observer saw.
  *
  * `restart` (every `agent/watch`) forgets what this run reported and re-reports the current
  * state at once, e.g. `composer-ready` straight away when the composer is already ready. What
@@ -25,7 +34,15 @@
 import type { AgentEventName } from '../core/handoff/state.ts';
 import { INJECT_READY_TIMEOUT_MS } from '../core/handoff/state.ts';
 import { C9_CANVAS_GONE_MS } from '../core/ig-contract/contract.ts';
-import { type AgentWindow, hasStoryCandidate, isComposerPath, readyCanvases } from './probes.ts';
+import {
+  type AgentWindow,
+  hasStoryCandidate,
+  isComposerPath,
+  navigationIntercepted,
+  readyCanvases,
+  resourceIntercepted,
+  type TimingLike,
+} from './probes.ts';
 
 export const WATCH_TICK_MS = 250;
 
@@ -38,6 +55,8 @@ export interface Watch {
   injectFailed(): void;
   /** From the `controllerchange` listener. */
   controllerChanged(): void;
+  /** P3: a worker handled a www/i.instagram.com request of this document (scan or observer), so far. */
+  intercepted(): boolean;
   stop(): void;
   running(): boolean;
 }
@@ -54,7 +73,14 @@ export function createWatch(win: AgentWindow, opts: WatchOptions): Watch {
   let composerSeen = false;
   let readySeen = false;
   let goneSince: number | null = null;
-  let controllerChange = false;
+  /** P2: `controllerchange` events in this document, and how many were reported. */
+  let controllerChanges = 0;
+  let controllerReported = 0;
+  /** P3: a worker handled one of this document's requests (a document fact, re-reported on restart). */
+  let intercepted = false;
+  /** Resource entries already scanned (the buffer only grows, unless the page clears it). */
+  let scanned = 0;
+  let navChecked = false;
   /** C6 canvases already ready when the watch first started in this document (AM24). */
   let stale: Set<HTMLCanvasElement> | null = null;
   // The current run.
@@ -70,6 +96,53 @@ export function createWatch(win: AgentWindow, opts: WatchOptions): Watch {
     reported.add(event);
     opts.emit(event);
   }
+
+  /** P3: scans the timeline entries added since the last tick (resources) and the navigation entry once. */
+  function scanInterception(): void {
+    if (intercepted) return;
+    const perf = win.performance as Partial<Performance> | undefined;
+    if (!perf || typeof perf.getEntriesByType !== 'function') return;
+    try {
+      if (!navChecked) {
+        const nav = perf.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+        if (nav && navigationIntercepted(nav)) intercepted = true;
+        navChecked = true;
+      }
+      const res = perf.getEntriesByType('resource') as PerformanceResourceTiming[];
+      // clearResourceTimings() by the page shrinks the buffer: start over.
+      if (res.length < scanned) scanned = 0;
+      for (let i = scanned; i < res.length && !intercepted; i++) {
+        const e = res[i];
+        if (e && resourceIntercepted(e)) intercepted = true;
+      }
+      scanned = res.length;
+    } catch {
+      // The timeline is unreadable here: the probes report `swIntercepted: 'unknown'`.
+    }
+  }
+
+  /**
+   * P3: every resource entry from the agent's start on (and the buffered ones before it), past the
+   * timeline buffer's 250-entry limit. Without PerformanceObserver (or if observing throws) the scan
+   * alone remains.
+   */
+  function observeInterception(): void {
+    const Observer = (win as { PerformanceObserver?: typeof PerformanceObserver }).PerformanceObserver;
+    if (typeof Observer !== 'function') return;
+    try {
+      const observer = new Observer((list) => {
+        if (intercepted) return;
+        if (list.getEntries().some((e) => resourceIntercepted(e as unknown as TimingLike))) {
+          intercepted = true;
+          observer.disconnect();
+        }
+      });
+      observer.observe({ type: 'resource', buffered: true });
+    } catch {
+      // The scan of getEntriesByType still runs every tick.
+    }
+  }
+  observeInterception();
 
   /** C6 on a canvas that was not ready before the watch began; stale ones that stop being ready count again later. */
   function readyNow(): boolean {
@@ -98,7 +171,9 @@ export function createWatch(win: AgentWindow, opts: WatchOptions): Watch {
       goneSince = t;
     }
     if (hasStoryCandidate(win.document)) once('input-appeared');
-    if (controllerChange) once('sw-controller-change');
+    reportControllerChanges();
+    scanInterception();
+    if (intercepted) once('sw-intercepted');
 
     const canvasGone = goneSince !== null && t - goneSince > C9_CANVAS_GONE_MS;
     if ((composerSeen && !onComposer) || canvasGone) {
@@ -112,6 +187,14 @@ export function createWatch(win: AgentWindow, opts: WatchOptions): Watch {
     if (deadline !== null && t >= deadline) {
       deadline = null;
       once('inject-unconfirmed');
+    }
+  }
+
+  function reportControllerChanges(): void {
+    if (interval === null) return;
+    while (controllerReported < controllerChanges) {
+      controllerReported++;
+      opts.emit('sw-controller-change');
     }
   }
 
@@ -144,8 +227,12 @@ export function createWatch(win: AgentWindow, opts: WatchOptions): Watch {
       once('inject-ignored');
     },
     controllerChanged() {
-      controllerChange = true;
-      if (interval !== null) once('sw-controller-change');
+      controllerChanges++;
+      reportControllerChanges();
+    },
+    intercepted() {
+      scanInterception();
+      return intercepted;
     },
     stop: halt,
     running: () => interval !== null,

@@ -9,12 +9,18 @@ import { request } from 'node:https';
 import { FAKE_PORT } from '../../../tools/chrome/flags.ts';
 import { CERT_PATHS } from '../../../tools/fake-ig/cert.ts';
 import type { Knobs } from '../../../tools/fake-ig/knobs.ts';
-import type { RequestRecord, StoryRecord, ViolationRecord, WriteRecord } from '../../../tools/fake-ig/store.ts';
+import type {
+  ComposerViewRecord,
+  RequestRecord,
+  StoryRecord,
+  ViolationRecord,
+  WriteRecord,
+} from '../../../tools/fake-ig/store.ts';
 
 /** server.ts listens here (not imported: it would pull esbuild into the test runner). */
 const FAKE_LISTEN_HOST = '127.0.0.1';
 
-export type { Knobs, RequestRecord, StoryRecord, ViolationRecord, WriteRecord };
+export type { ComposerViewRecord, Knobs, RequestRecord, StoryRecord, ViolationRecord, WriteRecord };
 
 /** A knob patch as the API accepts it (`insets` also as "top,bottom"). */
 export type KnobPatch = Partial<Omit<Knobs, 'insets'>> & { insets?: Knobs['insets'] | string };
@@ -30,6 +36,8 @@ export interface FakeClient {
   requests(since?: number): Promise<RequestRecord[]>;
   writes(): Promise<WriteRecord[]>;
   violations(): Promise<ViolationRecord[]>;
+  /** AM37: what the composer page showed (its landscape gate), oldest first. */
+  composerViews(): Promise<ComposerViewRecord[]>;
   /** `sourceHash`: fakeSourceHash() when the server started (FID-7). */
   health(): Promise<{ ok: boolean; fake: boolean; certValidTo: string | null; sourceHash?: string | null }>;
 }
@@ -91,6 +99,7 @@ export function createFakeClient(caPem: string = readFileSync(CERT_PATHS.cert, '
     requests: (since = 0) => json<RequestRecord[]>('GET', `/__fake__/api/requests?since=${since}`),
     writes: () => json<WriteRecord[]>('GET', '/__fake__/api/writes'),
     violations: () => json<ViolationRecord[]>('GET', '/__fake__/api/violations'),
+    composerViews: () => json<ComposerViewRecord[]>('GET', '/__fake__/api/composer-views'),
     health: () => json('GET', '/__fake__/health'),
   };
 }

@@ -15,6 +15,19 @@ export function Toast({ text, rotate = false }: { text: string; rotate?: boolean
   );
 }
 
+/**
+ * AM37: the composer page's landscape snackbar (PolarisSnackbar with the rotate text), shown for as long
+ * as its landscape gate holds; the page then renders no header and no Share footer.
+ */
+export function Snackbar({ text }: { text: string }) {
+  const c = useCx();
+  return (
+    <div role="status" data-testid="fake-landscape-snackbar" className={c('toast')}>
+      {text}
+    </div>
+  );
+}
+
 /** `[text, show]`: show(text) displays a toast for `ms`. */
 export function useToast(ms = 4000): [string | null, (text: string) => void] {
   const [text, setText] = useState<string | null>(null);

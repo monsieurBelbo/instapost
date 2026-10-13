@@ -12,6 +12,7 @@
 import { browser } from 'wxt/browser';
 import type { ScreenAvail } from '../core/geometry/window-fit.ts';
 import type { HandoffMode } from '../core/handoff/state.ts';
+import type { BrowserFlavour } from '../core/ig-contract/browser-flavour.ts';
 import type { ExportId, HandoffId } from '../core/model/ids.ts';
 import {
   type BackgroundToEditor,
@@ -37,6 +38,8 @@ export interface StartRequest {
   mode: HandoffMode;
   rehearsal: boolean;
   screen: ScreenAvail;
+  /** P6: the editor's detection (src/ui/browser-flavour.ts). */
+  browser: BrowserFlavour;
 }
 
 export interface HandoffClient {
@@ -163,6 +166,7 @@ export function createHandoffClient(opts: HandoffClientOptions = {}): HandoffCli
         mode: req.mode,
         rehearsal: req.rehearsal,
         screen: req.screen,
+        browser: req.browser,
       });
     },
     cancel() {

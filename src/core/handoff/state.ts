@@ -19,11 +19,29 @@
  * v4 (review fixes, additive, §11 AM28): errors BRANDED_BROWSER, NAVIGATION_TIMEOUT; agent event
  * `inject-unconfirmed`; WindowedSession `insertDispatched`; finished `postedUnknown`/`unexpectedPage`;
  * HandoffStatus `postedUnknown`.
+ * v5 (first live run in Arc, 2026-10-12: W1–W5, P1–P6, U1–U2): phase `resizing`; `fitting` gains
+ * `fitStep`; probing step `awaitInput`; errors SW_INTERCEPTS, WINDOW_NOT_FITTED, LAYOUT_TOO_WIDE
+ * (SW_TOOK_CONTROL is no longer emitted); agent event `sw-intercepted`; events `windowFitted`
+ * (now with the verification), `windowSized`, `boundsChanged`; `tabMeasured.zoom`; effects
+ * `updateWindow` (now with `tabId` and the target `inner`), `readSize`; timers `fitRetry`,
+ * `resizeDeadline`, `resizePoll`, `inputWait`; SessionBase `browser`/`win`; WindowedSession
+ * `inputWaitUsed`, `inputWaitUntil`, `swControllerChanges`, `c4Reached`, `injectAt`; HandoffStatus
+ * `resize`, `window`, `path`, `c4`; HandoffRecord `window`, `browser`, `swControllerChanges`; ctx
+ * `resizeTimeoutMs`; start `browser`.
+ * v5.1 (Arc hardening, additive): updateWindow `reapply`; windowFitted and WindowUpdateDiag `applied`.
+ * v5.2 (review of the Arc changes): measureTab `settle` (false for the refit: one read, AL-3); the
+ * `resize` status gains `maxW` (the zoom-aware width limit its ✓ uses, AF-8); probing `awaitInput`
+ * now also serves the probe mode and H0 with H1 off (AL-1/AF-1).
+ * v6 (AM37, second live run in Arc, 2026-10-12, additive): error SCREEN_LANDSCAPE; `injectAgent` first
+ * injects the MAIN-world portrait shim; `agentInjected.orientation`; WindowedSession `pageOrientation`.
+ * v6.1 (review of AM37, 2026-10-13, additive): WindowedSession `composerEntered` (SH-1);
+ * PageOrientation `afterComposerMount`.
  */
 
 import type { Size } from '../geometry/fit.ts';
-import type { ComposerProfile, ScreenAvail, WindowBox } from '../geometry/window-fit.ts';
-import type { Preflight, ProbeReport } from '../ig-contract/contract.ts';
+import type { ComposerProfile, FrameDelta, ScreenAvail, WindowBox } from '../geometry/window-fit.ts';
+import type { BrowserFlavour } from '../ig-contract/browser-flavour.ts';
+import type { CheckResult, PageOrientation, Preflight, ProbeReport } from '../ig-contract/contract.ts';
 import type { ChMode } from '../ig-contract/device-profile.ts';
 import type { DnrRule } from '../ig-contract/rules.ts';
 import type { ComposerRoute } from '../ig-contract/urls.ts';
@@ -46,6 +64,10 @@ export const ERROR_CODES = [
   'INPUT_MISSING',
   'ACCEPT_DRIFT',
   'INJECTION_IGNORED',
+  /**
+   * No longer emitted (P2, 2026-10-12): Instagram's worker claims every logged-in page (F2), so a
+   * `controllerchange` is counted on the record instead. Kept so records of earlier builds still parse.
+   */
   'SW_TOOK_CONTROL',
   'KILLED_CHALLENGE',
   'KILLED_OFFHOST',
@@ -60,6 +82,20 @@ export const ERROR_CODES = [
   'BRANDED_BROWSER',
   /** AM20/AM28: the first navigation never committed on www within NAVIGATION_TIMEOUT_MS. */
   'NAVIGATION_TIMEOUT',
+  /**
+   * P3: a service worker handled the composer page's requests (resource or navigation timing with
+   * `workerStart > 0`), so they left without the tab-scoped UA rule 1001.
+   */
+  'SW_INTERCEPTS',
+  /** W3: the popup never became narrow and tall enough (auto-fit, its retry and RESIZE_TIMEOUT_MS of guided resize). */
+  'WINDOW_NOT_FITTED',
+  /** P4: after the one refit the composer is still wider than MSITE_MAX_CSS_WIDTH (no + → Story entry there). */
+  'LAYOUT_TOO_WIDE',
+  /**
+   * AM37 (C3b): the composer was reached and the page still read a landscape screen orientation (the
+   * portrait shim off, failed or absent), so Instagram's composer hides Share there.
+   */
+  'SCREEN_LANDSCAPE',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -96,6 +132,10 @@ export const ERROR_EFFECT: Readonly<Record<ErrorCode, ErrorEffect>> = {
   UNEXPECTED_PAGE: 'close',
   BRANDED_BROWSER: 'no-window',
   NAVIGATION_TIMEOUT: 'close',
+  SW_INTERCEPTS: 'close',
+  WINDOW_NOT_FITTED: 'close',
+  LAYOUT_TOO_WIDE: 'close',
+  SCREEN_LANDSCAPE: 'close',
 };
 
 // ---------------------------------------------------------------------------------------
@@ -111,13 +151,48 @@ export const CLOSE_DELAY_MS = 3000;
 /** AM20: the first navigation must commit on www within this long, else the popup closes. */
 export const NAVIGATION_TIMEOUT_MS = 30_000;
 
+// W2/W3 (Arc, 2026-10-12): fitting the popup while its tab is still about:blank.
+/** The runner reads windows.get this often until two reads agree (the window has settled). */
+export const FIT_SETTLE_POLL_MS = 100;
+/** …for at most this long; then it measures what it has. */
+export const FIT_SETTLE_MAX_MS = 1000;
+/** After windows.update the runner polls tabs.get this often until the tab reaches the target… */
+export const FIT_VERIFY_POLL_MS = 100;
+/** …for at most this long (windowFitted.fitted false after it). */
+export const FIT_VERIFY_MAX_MS = 1500;
+/** The one retry of windows.update comes this long after the first attempt failed to verify. */
+export const FIT_RETRY_DELAY_MS = 300;
+/**
+ * W2 hardening (Arc research, 2026-10-12: Arc often ignores the first windows.update, and may re-place
+ * a new popup up to about 1 s after windows.create). While the tab is still about:blank, so Instagram
+ * sees none of it, an updateWindow re-applies the same box at these offsets (ms after its first
+ * windows.update) whenever the tab is not fitted at that moment. Never after the navigation.
+ */
+export const FIT_REAPPLY_MS: readonly number[] = [0, 150, 300, 500, 1000];
+/**
+ * …and its verification counts the tab as fitted only once it still is this long after the first
+ * windows.update, so a late re-placement lands inside it and is re-applied (at most FIT_VERIFY_MAX_MS).
+ */
+export const FIT_HOLD_MS = 1100;
+/** W3: how long the owner has to drag the popup narrow and tall before WINDOW_NOT_FITTED. */
+export const RESIZE_TIMEOUT_MS = 3 * 60 * 1000;
+/** W3: the tab size is also polled this often while resizing (besides windows.onBoundsChanged). */
+export const RESIZE_POLL_MS = 1000;
+/** P5: how long a probe that found no story input waits for the agent's `input-appeared` (hydration). */
+export const INPUT_WAIT_MS = 6000;
+/** W5: windows.update entries kept on the record (the fit, its one retry and the single refit). */
+export const MAX_WINDOW_UPDATES = 3;
+
 // ---------------------------------------------------------------------------------------
 // Settings (storage.local, §3.3). Rate caps can only be made stricter (rate-guard.ts).
 
 export interface Settings {
   /** "posts as …", typed by the owner; display only. */
   accountLabel: string;
-  /** H1. Default ON in guarded builds, OFF in live until OD3. */
+  /**
+   * H1. Default ON in guarded builds, OFF in live until OD3. AM37: the insert also skips msite's story
+   * session start (its session id stays null), a second reason to keep it off in live; Settings says so.
+   */
   assistedInsert: boolean;
   /** Rehearsal rules 1002–1019. Default ON in every build; the owner switches it off from L8. */
   rehearsal: boolean;
@@ -151,14 +226,17 @@ export type AgentEventName =
   | 'inject-ignored'
   /** AM28: the insert was dispatched but C6 did not hold within the ready deadline. */
   | 'inject-unconfirmed'
-  | 'sw-controller-change';
+  /** Diagnostics only since P2: counted on the record (Instagram's worker claims every page, F2). */
+  | 'sw-controller-change'
+  /** P3: the agent's watch saw a service worker handle a www/i.instagram.com request (SW_INTERCEPTS). */
+  | 'sw-intercepted';
 
 export type AgentCommand =
   | { type: 'agent/probe' }
   | { type: 'agent/inject' }
   /**
    * Starts (or restarts) the agent's watch for this document: input-appeared, composer-ready
-   * (C6), composer-left (C9), sw-controller-change. `readyTimeoutMs > 0` (H1): report
+   * (C6), composer-left (C9), sw-controller-change, sw-intercepted. `readyTimeoutMs > 0` (H1): report
    * `inject-unconfirmed` if C6 does not hold that long after the insert (AM28). `0` (H0): no deadline.
    */
   | { type: 'agent/watch'; readyTimeoutMs: number };
@@ -175,8 +253,16 @@ export type HandoffPhase =
   | 'opening'
   /** Rule 1001 (+ rehearsal rules) being installed while the tab is still about:blank. */
   | 'scoping'
-  /** tabs.get measured the frame; one windows.update to windowFit(). */
+  /**
+   * W2, still at about:blank: the settled window is measured, then windows.update({state:'normal'})
+   * to windowFit() is verified against the tab size; one retry 300 ms later (`fitStep`).
+   */
   | 'fitting'
+  /**
+   * W3: auto-fit failed; the owner drags the popup narrow and tall (live size in the editor). Goes
+   * on by itself once the tab is usable (isUsableInner), else WINDOW_NOT_FITTED after 3 min.
+   */
+  | 'resizing'
   /** tabs.update to COMPOSER_URL issued; waiting for the first `loading` on www. */
   | 'navigating'
   /** Hard reload issued once; kill switch armed from here on; waiting for `complete`. */
@@ -206,6 +292,50 @@ export type HandoffOutcome =
   | `failed:${ErrorCode}`
   | `killed:${ErrorCode}`;
 
+/** W2: one windows.update and what the verification saw. Structural numbers only. */
+export interface WindowUpdateDiag {
+  /** `fit` and `retry` (its one retry) in `fitting`; `refit` for the single P4/landscape refit while probing. */
+  step: 'fit' | 'retry' | 'refit';
+  /** The outer box asked for. */
+  box: WindowBox;
+  /** The inner size it should give. */
+  target: Size;
+  /** The window and its tab when the verification ended. */
+  outer: WindowBox;
+  tab: Size;
+  /** The tab reached the target within FIT_TOLERANCE_PX. */
+  fitted: boolean;
+  /**
+   * windows.update calls this step made: 1, or more when the pre-navigation verification re-applied
+   * the box (FIT_REAPPLY_MS). Absent on records of earlier builds.
+   */
+  applied?: number;
+}
+
+/** W5: how the popup was sized, for the record and the panel. Structural numbers only. */
+export interface WindowDiagnostics {
+  /** screen.avail* the editor sent. */
+  screen: ScreenAvail;
+  /** The box windows.create was asked for (firstGuess). */
+  requested: WindowBox;
+  /** The window once it settled after windows.create (Arc ignores the create bounds, F1); null before. */
+  created: WindowBox | null;
+  /** Its tab (inner) size then. */
+  createdTab: Size | null;
+  /** Outer minus tab size of the settled window. */
+  frameDelta: FrameDelta | null;
+  /** Every windows.update with its verification, in order (at most MAX_WINDOW_UPDATES). */
+  updates: WindowUpdateDiag[];
+  /** windows.update calls in `fitting` (1, or 2 with the one retry). */
+  attempts: number;
+  /** W3: the owner resized the popup by hand. */
+  manualResize: boolean;
+  /** The tab size when the navigation started (while resizing: the latest size read). */
+  finalTab: Size | null;
+  /** tabs.getZoom at the latest measurement (about:blank, then the composer page at a refit). */
+  zoom: number | null;
+}
+
 /** IndexedDB `handoffs` (§3.6). */
 export interface HandoffRecord {
   id: HandoffId;
@@ -230,6 +360,12 @@ export interface HandoffRecord {
    * (`UNEXPECTED_PAGE /x/`, query dropped); why a finished outcome was not pre-answered (AM28).
    */
   detail?: string;
+  /** W5: how the popup was sized (absent on records of earlier builds). */
+  window?: WindowDiagnostics;
+  /** P6: the browser the editor detected. */
+  browser?: BrowserFlavour;
+  /** P2: `controllerchange` events the agent saw (a worker claiming the page is normal on Instagram). */
+  swControllerChanges?: number;
   outcome: HandoffOutcome;
   startedAt: number;
   endedAt: number;
@@ -248,6 +384,10 @@ export interface SessionBase {
   chMode: ChMode;
   chromeMajor: number;
   screen: ScreenAvail;
+  /** P6: the browser the editor detected (record only; a guarded build refused the branded ones). */
+  browser: BrowserFlavour;
+  /** W5: the popup's sizing so far. */
+  win: WindowDiagnostics;
   startedAt: number;
   lastEventAt: number;
   phaseLog: PhaseLogEntry[];
@@ -302,7 +442,52 @@ export interface WindowedSession extends SessionBase {
   route: ComposerRoute | null;
   /** tab.url of the latest tabs.onUpdated (probe evaluation and the preflight). */
   url: string | null;
+  /** P5: the one wait for a story input that mounts after hydration was used. */
+  inputWaitUsed: boolean;
+  /**
+   * P5: while that wait runs, its deadline (epoch ms); null otherwise. A same-document load
+   * (hydration's replaceState) that interrupts it resumes the wait instead of ending it (AM16).
+   */
+  inputWaitUntil: number | null;
+  /** P2: `sw-controller-change` events seen (diagnostics). */
+  swControllerChanges: number;
+  /** The deciding probe's decision reached C4 (probe-eval.ts); else the preflight's C4 is `unknown`. */
+  c4Reached: boolean;
+  /**
+   * Where the one H1 insert was made: on the composer (`/create/story`), or on home (P5: msite's
+   * header input, whose insert starts the story session and SPA-navigates to the composer; it becomes
+   * `composer` once the tab shows /create/story). AM18's "the composer went away" applies only to
+   * `composer`. null before the insert.
+   */
+  injectAt: 'composer' | 'home' | null;
+  /**
+   * AM37: the portrait shim's reading in the current document (the screen orientation as the page reads
+   * it, and what the shim did), from the latest injection; null before the first. Each agent report is
+   * stamped with it (ProbeReport.orientation), and a load that reaches the composer with a landscape
+   * reading ends the session with SCREEN_LANDSCAPE.
+   */
+  pageOrientation: PageOrientation | null;
+  /**
+   * SH-1 (2026-10-13): since the previous injection, a commit moved the tab from another page onto
+   * /create/story (the pick's or the insert's SPA navigation; in `reloading`, only a commit after the
+   * reload's own one). The composer page then mounted before the next injection's shim could run, so
+   * a shim that installs itself there (`installed`) came too late: the reading gets
+   * `afterComposerMount`. Consumed (reset) by every agentInjected. Absent on stored sessions of earlier
+   * builds (read as false).
+   */
+  composerEntered: boolean;
 }
+
+/** W2: sub-steps of `fitting`. */
+export type FitStep =
+  /** measureTab issued: the runner lets the window settle, then reads it and its tab. */
+  | 'measure'
+  /** updateWindow (attempt 1) issued, with its verification. */
+  | 'update'
+  /** Attempt 1 did not verify: the `fitRetry` timer is pending. */
+  | 'retryWait'
+  /** updateWindow (attempt 2, the one retry) issued. */
+  | 'retry';
 
 /** Sub-steps of `probing`, so stale effect results can be told apart. */
 export type ProbeStep =
@@ -315,7 +500,13 @@ export type ProbeStep =
   /** Landscape refit: measureTab issued. */
   | 'refitMeasure'
   /** Landscape refit: updateWindow issued. */
-  | 'refitUpdate';
+  | 'refitUpdate'
+  /**
+   * P5: the first probe that reached C4 found no story input (on `/` the input may mount after
+   * hydration), in a post (H1 or H0) or in probe mode (AL-1/AF-1): agent/watch is running and
+   * `inputWait` is armed; `input-appeared` re-probes once, the deadline decides on the probe as it is.
+   */
+  | 'awaitInput';
 
 /** How a session ended; decides the record outcome and the cleanup. */
 export type SessionResult =
@@ -333,7 +524,13 @@ export interface IdleState {
 
 export type ActiveState =
   | (SessionBase & { phase: 'opening' })
-  | (WindowedSession & { phase: 'scoping' | 'fitting' | 'navigating' | 'reloading' })
+  | (WindowedSession & { phase: 'scoping' | 'navigating' | 'reloading' })
+  | (WindowedSession & { phase: 'fitting'; fitStep: FitStep })
+  | (WindowedSession & {
+      phase: 'resizing';
+      /** Epoch ms of the WINDOW_NOT_FITTED deadline (for the editor's countdown). */
+      resizeUntil: number;
+    })
   | (WindowedSession & {
       phase: 'probing';
       step: ProbeStep;
@@ -401,24 +598,76 @@ export const isArmed = (s: HandoffState): boolean => ARMED_PHASES.includes(s.pha
 // Events (inputs to the reducer). Agent events arrive only after acceptAgentMessage()
 // (src/shared/protocol.ts) validated sender, tab, frame, origin, ids and phase.
 
-export type HandoffTimer = 'closeDelay' | 'inactivity' | 'navigation';
+export type HandoffTimer =
+  | 'closeDelay'
+  | 'inactivity'
+  | 'navigation'
+  /** W2: the one windows.update retry, FIT_RETRY_DELAY_MS after the first attempt did not verify. */
+  | 'fitRetry'
+  /** W3: RESIZE_TIMEOUT_MS (shorter in guarded test runs) → WINDOW_NOT_FITTED. */
+  | 'resizeDeadline'
+  /** W3: read the tab size every RESIZE_POLL_MS, besides windows.onBoundsChanged. */
+  | 'resizePoll'
+  /** P5: INPUT_WAIT_MS for `input-appeared` before the probe's INPUT_MISSING stands. */
+  | 'inputWait';
+
+/** Every timer, so a session's end can clear them all. */
+export const HANDOFF_TIMERS: readonly HandoffTimer[] = [
+  'closeDelay',
+  'inactivity',
+  'navigation',
+  'fitRetry',
+  'resizeDeadline',
+  'resizePoll',
+  'inputWait',
+];
 
 export type HandoffEvent =
   // editor (runtime.connect port 'handoff')
-  | { type: 'start'; exportId: ExportId | null; mode: HandoffMode; rehearsal: boolean; screen: ScreenAvail }
+  | {
+      type: 'start';
+      exportId: ExportId | null;
+      mode: HandoffMode;
+      rehearsal: boolean;
+      screen: ScreenAvail;
+      /** P6: the editor's detection. */
+      browser: BrowserFlavour;
+    }
   | { type: 'cancel' }
   | { type: 'outcome'; handoffId: HandoffId; posted: boolean }
   // results of effects (runner → reducer)
   | { type: 'windowCreated'; windowId: number; tabId: number }
   | { type: 'rulesInstalled' }
-  /** tabs.get(tabId) width/height (inner) and the window's outer box. */
-  | { type: 'tabMeasured'; inner: Size; outer: WindowBox }
-  | { type: 'windowFitted' }
+  /**
+   * tabs.get(tabId) width/height (inner) and the window's outer box once it settled (two equal
+   * windows.get reads FIT_SETTLE_POLL_MS apart, at most FIT_SETTLE_MAX_MS); `zoom` = tabs.getZoom.
+   */
+  | { type: 'tabMeasured'; inner: Size; outer: WindowBox; zoom?: number | null }
+  /**
+   * W2: updateWindow's verification. `fitted`: the tab came within FIT_TOLERANCE_PX of `target`
+   * within FIT_VERIFY_MAX_MS (and, with `reapply`, still was FIT_HOLD_MS after the first update).
+   * `inner`/`outer`: the tab and window when it stopped. `box`/`target` echo the effect. `applied`:
+   * the windows.update calls made (re-applies included).
+   */
+  | {
+      type: 'windowFitted';
+      box: WindowBox;
+      target: Size;
+      fitted: boolean;
+      inner: Size;
+      outer: WindowBox;
+      applied?: number;
+    }
+  /** W3: readSize's answer: the tab and window right now. */
+  | { type: 'windowSized'; inner: Size; outer: WindowBox }
+  /** W3: windows.onBoundsChanged for the composer window. */
+  | { type: 'boundsChanged'; windowId: number }
   /**
    * `fresh` (AM16): the agent installed itself in this document; false when the sentinel was already
    * set (a same-document `loading`: pushState, replaceState, hash). Missing counts as fresh.
+   * `orientation` (AM37): the portrait shim's result in that document (injected just before the agent).
    */
-  | { type: 'agentInjected'; fresh?: boolean }
+  | { type: 'agentInjected'; fresh?: boolean; orientation?: PageOrientation }
   /** Any effect whose platform call rejected. */
   | { type: 'effectFailed'; effect: HandoffEffect['type']; message: string }
   // platform listeners
@@ -464,22 +713,54 @@ export interface HandoffStatus {
   assistedInsert?: boolean;
   /** `finished` only (AM19): the popup stays open until the owner answers "Posted?". */
   holdOpen?: boolean;
+  /**
+   * W3 (`resizing`, and the status that leaves it): the tab size now, whether it is usable
+   * (isUsableInner), the WINDOW_NOT_FITTED deadline, and `maxW`, the widest usable tab in window px
+   * (MSITE_MAX_CSS_WIDTH × the tab zoom: maxMsiteInnerW), which the instruction names (AF-8).
+   */
+  resize?: { tab: Size; ok: boolean; until: number; maxW: number };
+  /** W5: the popup's sizing, on the status that ends `fitting`/`resizing` and after a refit. */
+  window?: WindowDiagnostics;
+  /** U1: the composer tab's path (query dropped), with the deciding probe. */
+  path?: string;
+  /** U1: the preflight's C4 for the deciding probe (`unknown`: the decision never reached the input). */
+  c4?: CheckResult;
 }
 
 export type HandoffEffect =
-  /** windows.create({type:'popup', url:'about:blank', focused:true, ...box}) → windowCreated. */
+  /** windows.create({type:'popup', url:'about:blank', focused:true, state:'normal', ...box}) → windowCreated (W1). */
   | { type: 'openWindow'; box: WindowBox }
   /** updateSessionRules({removeRuleIds, addRules}) → rulesInstalled. */
   | { type: 'installRules'; removeRuleIds: number[]; addRules: DnrRule[] }
-  /** tabs.get(tabId) + windows.get(windowId) → tabMeasured. */
-  | { type: 'measureTab'; tabId: number; windowId: number }
-  /** windows.update(windowId, box) → windowFitted. */
-  | { type: 'updateWindow'; windowId: number; box: WindowBox }
+  /**
+   * W2: windows.get(windowId) until two reads FIT_SETTLE_POLL_MS apart agree (at most
+   * FIT_SETTLE_MAX_MS), then tabs.get(tabId) and tabs.getZoom(tabId) → tabMeasured. `settle` is true
+   * for the new popup in `fitting` only; the refit (kill switch armed, the window not new) reads the
+   * window once, so the event queue is never held up (AL-3).
+   */
+  | { type: 'measureTab'; tabId: number; windowId: number; settle: boolean }
+  /**
+   * windows.update(windowId, {state:'normal', ...box}), then tabs.get every FIT_VERIFY_POLL_MS until
+   * the tab is within FIT_TOLERANCE_PX of `inner`, for at most FIT_VERIFY_MAX_MS → windowFitted.
+   * `reapply` (W2, `fitting` only, the tab still about:blank): the box is re-applied at FIT_REAPPLY_MS
+   * while the tab is not fitted, and the fit must hold until FIT_HOLD_MS. false for the refit after
+   * the navigation: one windows.update, no hold, and the verification runs beside the event queue
+   * (its windowFitted is queued when it ends), so a kill-switch update is never held up (AL-3).
+   */
+  | { type: 'updateWindow'; windowId: number; tabId: number; box: WindowBox; inner: Size; reapply: boolean }
+  /** W3: tabs.get(tabId) + windows.get(windowId), no waiting → windowSized. */
+  | { type: 'readSize'; windowId: number; tabId: number }
   /** tabs.update(tabId, {url}). */
   | { type: 'navigate'; tabId: number; url: string }
   /** tabs.reload(tabId, {bypassCache:true}), exactly once per hand-off. */
   | { type: 'hardReload'; tabId: number }
-  /** scripting.executeScript({target:{tabId, frameIds:[0]}, files:['/composer-agent.js']}) → agentInjected. */
+  /**
+   * AM37: first the portrait shim, scripting.executeScript({target:{tabId, frameIds:[0]}, world:'MAIN',
+   * injectImmediately:true, func}) (src/agent/portrait-shim.ts; read-only when a guarded build's E2E flag
+   * switches it off), then scripting.executeScript({target:{tabId, frameIds:[0]}, files:['/composer-agent.js']})
+   * → agentInjected with the shim's `orientation`. Emitted for every document of the composer tab after
+   * the hard reload (AM2/AM16), and only for that tab.
+   */
   | { type: 'injectAgent'; tabId: number }
   /** tabs.sendMessage(tabId, {v:1, ...command, handoffId, nonce}, {frameId:0}). */
   | { type: 'sendAgent'; tabId: number; command: AgentCommand }
@@ -527,4 +808,9 @@ export interface HandoffCtx {
    * Edge). Sealed browsers (CfT, Playwright's Chromium) do not, so a guarded build refuses at once.
    */
   brandedBrowser: boolean;
+  /**
+   * W3: a shorter guided-resize deadline from a guarded build's E2E flag (storage.local
+   * `__e2eResizeTimeoutMs`). Ignored in live builds and when not below RESIZE_TIMEOUT_MS.
+   */
+  resizeTimeoutMs?: number;
 }

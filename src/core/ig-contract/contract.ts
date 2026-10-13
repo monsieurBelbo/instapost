@@ -10,7 +10,8 @@ import { type ComposerRoute, classifyComposerUrl } from './urls.ts';
 
 export const CONTRACT_VERSION = 1;
 
-export type ContractId = 'C1' | 'C2' | 'C3' | 'C4' | 'C5' | 'C6' | 'C7' | 'C8' | 'C9';
+/** `C3` is C3a since AM37 (2026-10-12): the viewport at the story session start; `C3b` the screen orientation. */
+export type ContractId = 'C1' | 'C2' | 'C3' | 'C3b' | 'C4' | 'C5' | 'C6' | 'C7' | 'C8' | 'C9';
 
 export interface ContractItem {
   id: ContractId;
@@ -42,7 +43,23 @@ export const CONTRACT: readonly ContractItem[] = [
     decides: true,
     preflight: true,
   },
-  { id: 'C3', item: 'Portrait', probe: 'innerHeight >= innerWidth', by: 'agent', decides: true, preflight: true },
+  {
+    id: 'C3',
+    item: 'C3a: portrait viewport, the check msite makes at + → Story (startStoryCreationSession)',
+    probe: 'innerHeight >= innerWidth',
+    by: 'agent',
+    decides: true,
+    preflight: true,
+  },
+  {
+    id: 'C3b',
+    item: 'C3b: the composer page reads a portrait screen (PolarisStoryCreationPage isLandscape, AM37)',
+    probe:
+      'screen.orientation.type as the page reads it after the MAIN-world portrait shim (its executeScript result); on /create/story a landscape type, an unreadable reading, or a shim installed only after the composer mounted → SCREEN_LANDSCAPE',
+    by: 'background',
+    decides: true,
+    preflight: true,
+  },
   {
     id: 'C4',
     item: 'Story input',
@@ -103,6 +120,100 @@ export const C9_CANVAS_GONE_MS = 2000;
 /** SG4: guarded builds hand off only when the agent sees `<meta name=FAKE_MARKER_META>`. A DOM read, never a network probe. */
 export const FAKE_MARKER_META = 'instapost-fake-instagram';
 
+/**
+ * F3 (2026-10-12, logged-out reading of production msite): msite renders the mobile header, with
+ * the + → Story entry and its hidden story input, only while the viewport is at most this many CSS
+ * px wide (IGDS `nav-bottom-screen-max`). At 768 px and more there is no create entry at all, so
+ * the composer window must stay at or below it (window-fit.ts, probe-eval.ts row 5).
+ */
+export const MSITE_MAX_CSS_WIDTH = 767;
+
+/**
+ * AM37 (2026-10-12, live in Arc and Instagram's public bundles): msite makes two different
+ * orientation checks. (1) `startStoryCreationSession`, at + → Story before the file chooser opens:
+ * `innerHeight < innerWidth` → a "Rotate your device" toast and no chooser (C3a, the viewport).
+ * (2) `PolarisStoryCreationPage`, once the composer is mounted with the photo: `isLandscape` from
+ * `screen.orientation.type` (else `window.orientation`, else the viewport), read at mount and on
+ * every `resize`; landscape shows the same text as a snackbar and hides the header and the Share
+ * footer (C3b, the screen). A desktop with a landscape monitor is therefore always "landscape" to
+ * the composer, whatever the window. The portrait shim (src/agent/portrait-shim.ts) makes the page
+ * read a portrait screen; these are what it reports from the page's MAIN world.
+ *
+ * - `installed`: the screen read landscape, and the shim installed its own `type`/`angle` getters on
+ *   this document's ScreenOrientation instance just now;
+ * - `present`: the shim's getters were already there (an earlier injection into the same document);
+ * - `portrait`: the screen already reads portrait: nothing to do, nothing installed;
+ * - `absent`: the page has no `screen.orientation` (Instagram then falls back further): not installed;
+ * - `failed`: the getters could not be defined, another own `type` was already on the instance, the
+ *   shim threw in the page (its type then null unless it could still be read: SH-2), or its result was
+ *   malformed (`{type: null}`, protocol.ts toPageOrientation);
+ * - `off`: a guarded build's E2E flag switched the shim off (it only read the type).
+ */
+export const ORIENTATION_SHIM_STATES = ['installed', 'present', 'portrait', 'absent', 'failed', 'off'] as const;
+export type OrientationShimState = (typeof ORIENTATION_SHIM_STATES)[number];
+
+/** AM37: the screen orientation as the composer page reads it, and what the portrait shim did there. */
+export interface PageOrientation {
+  /**
+   * `screen.orientation.type` as the page's own scripts read it, after the shim; null when the page has
+   * no `screen.orientation` (`absent`) or when the reading could not be had (`failed`: the shim threw, or
+   * its result was malformed).
+   */
+  type: string | null;
+  shim: OrientationShimState;
+  /**
+   * SH-1 (2026-10-13): set by the background, never by the page (toPageOrientation drops it). The shim
+   * installed itself (`installed`) on the composer, which a commit of the same document had reached
+   * since the previous injection (the pick's SPA navigation, or one after the reload's own commit): the
+   * composer page mounted, and read the landscape screen, before the shim was there. Instagram reads it
+   * again only on `resize`, so the composer keeps its rotate snackbar although the page now reads
+   * portrait. C3b fails and, on the composer, SCREEN_LANDSCAPE ends the hand-off.
+   */
+  afterComposerMount?: true;
+}
+
+/** What the shim's getter returns for `screen.orientation.type` (its `angle` returns 0). */
+export const PORTRAIT_ORIENTATION_TYPE = 'portrait-primary';
+
+/** C3b: an orientation type the composer treats as landscape (`landscape-primary`, `landscape-secondary`). */
+export function isLandscapeType(type: string | null): boolean {
+  return type?.startsWith('landscape') === true;
+}
+
+/**
+ * SH-2: a reading that says nothing about the screen: the shim failed (it threw in the page, or its
+ * result was malformed) before it could read a type. The page's real `screen.orientation.type` still
+ * exists, and on a landscape monitor it is landscape, so this never counts as portrait.
+ */
+export function isUnreadableOrientation(o: PageOrientation): boolean {
+  return o.shim === 'failed' && o.type === null;
+}
+
+/**
+ * C3b (AM37, SH-1, SH-2) from the shim's reading: `fail` when the page reads a landscape type, or the
+ * shim went in only after the composer had mounted; `unknown` without a reading or with an unreadable
+ * one; `pass` otherwise (a portrait type, or no `screen.orientation` at all: Instagram then falls back
+ * to `window.orientation`, absent on desktop, and to the viewport, portrait in the fitted window).
+ */
+export function c3bOf(o: PageOrientation | null | undefined): CheckResult {
+  if (!o) return 'unknown';
+  if (isLandscapeType(o.type) || o.afterComposerMount === true) return 'fail';
+  return isUnreadableOrientation(o) ? 'unknown' : 'pass';
+}
+
+/** C4 candidate rule: an accept list that names image types only (the post input also accepts video). */
+export function isImageOnlyAccept(accept: string): boolean {
+  const list = accept
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  return list.length > 0 && list.every((t) => /^image\//i.test(t));
+}
+
+/** PerformanceNavigationTiming.type of the probed document; `unknown` when it cannot be read. */
+export const NAV_TYPES = ['navigate', 'reload', 'back_forward', 'prerender', 'unknown'] as const;
+export type NavType = (typeof NAV_TYPES)[number];
+
 /** C4 set equality: split on commas, trim, ignore empties and order; case-sensitive. */
 export function acceptSetEquals(accept: string, expected: readonly string[] = STORY_ACCEPT): boolean {
   const seen = new Set(
@@ -125,8 +236,22 @@ export interface ProbeReport {
   dpr: number;
   /** C3. */
   portrait: boolean;
-  /** navigator.serviceWorker.controller !== null, as seen from the isolated world. */
+  /**
+   * navigator.serviceWorker.controller !== null, as seen from the isolated world. Diagnostics only
+   * (P1, 2026-10-12): Instagram re-registers its root worker on every logged-in load and the new
+   * worker claims the page within about 1 s (F2), so a controlled composer is normal. What matters is
+   * whether the worker intercepts requests (`swIntercepted`).
+   */
   swControlled: boolean | 'unknown';
+  /**
+   * P3 tripwire: a www/i.instagram.com PerformanceResourceTiming entry with `workerStart > 0`, or a
+   * navigation entry with `workerStart > 0` whose type is not `reload`: a service worker handled the
+   * page's requests, so they left without the tab-scoped rule 1001 (SW_INTERCEPTS). `unknown` when the
+   * performance timeline cannot be read.
+   */
+  swIntercepted: boolean | 'unknown';
+  /** The navigation entry's type (`reload` after the hard reload), for the record. */
+  navType: NavType;
   /**
    * C4: a candidate story input exists, i.e. an input[type=file] whose accept list names only
    * image types (the post input also accepts video, so it never counts). `absent` → INPUT_MISSING.
@@ -141,6 +266,13 @@ export interface ProbeReport {
   canvas?: { w: number; h: number; css: { x: number; y: number; w: number; h: number } };
   /** document language (html[lang]). */
   lang: string;
+  /**
+   * C3b (AM37): the screen orientation the page reads after the portrait shim, and the shim's state in
+   * that document. The background sets it from the shim injection's result when the report arrives;
+   * the agent cannot see it (an isolated world reads the native getter) and any value it sends is
+   * dropped (normalizeProbeReport). Absent on records of earlier builds.
+   */
+  orientation?: PageOrientation;
 }
 
 export type CheckResult = 'pass' | 'fail' | 'unknown';
@@ -155,25 +287,41 @@ export interface Preflight {
   C1: CheckResult;
   /** Logged in: the tab URL is not a login URL (unknown without a URL). */
   C2: CheckResult;
+  /** C3a (AM37): a portrait viewport, as msite's story session start requires. */
   C3: CheckResult;
-  /** A story input whose accept list set-equals STORY_ACCEPT. */
+  /**
+   * C3b (AM37): the page reads a portrait (not landscape) screen orientation after the portrait shim,
+   * and the shim was there before the composer mounted (SH-1); `unknown` when the probe carries no
+   * orientation or an unreadable one (SH-2). c3bOf. Absent on records of earlier builds.
+   */
+  C3b?: CheckResult;
+  /**
+   * A story input whose accept list set-equals STORY_ACCEPT. `unknown` when the decision never
+   * reached C4 (it stopped at the guard, login, desktop-shell, service-worker or layout rows, or a
+   * refit followed), since the page was not in the shape that has the input (U1, 2026-10-12).
+   */
   C4: CheckResult;
   /** /create/story/ was the final URL after the hard reload (route 'direct'). */
   C5: CheckResult;
   C8: { inner: { w: number; h: number }; dpr: number; canvas: ProbeReport['canvas'] | null };
+  /** Diagnostics only (P1). */
   swControlled: boolean | 'unknown';
+  /** P3: the tripwire's reading in the deciding probe. */
+  swIntercepted: boolean | 'unknown';
 }
 
 /**
  * Summarises a probe as C1–C5 and C8 (pure). `route` is C5's final-URL verdict, null if not known.
  * `ready` is the report taken once the composer was ready (C6, §11 AM13): when given, C8 comes
  * from it, because only then does a canvas exist; C1–C5 always come from the deciding `probe`.
+ * `c4Reached`: the decision got as far as C4 (probe-eval.ts `c4Reached`); otherwise C4 is `unknown`.
  */
 export function preflightOf(
   probe: ProbeReport,
   url: string | undefined,
   route: ComposerRoute | null,
   ready: ProbeReport | null = null,
+  c4Reached = true,
 ): Preflight {
   const pass = (b: boolean): CheckResult => (b ? 'pass' : 'fail');
   const geo = ready ?? probe;
@@ -182,7 +330,8 @@ export function preflightOf(
     C1: probe.isMobile === 'unknown' ? 'unknown' : pass(probe.isMobile),
     C2: url === undefined ? 'unknown' : pass(classifyComposerUrl(url).kind !== 'stop'),
     C3: pass(probe.portrait),
-    C4: pass(probe.storyInput === 'present' && probe.acceptOk),
+    C3b: c3bOf(probe.orientation),
+    C4: c4Reached ? pass(probe.storyInput === 'present' && probe.acceptOk) : 'unknown',
     C5: route === null ? 'unknown' : pass(route === 'direct'),
     C8: {
       inner: { ...geo.inner },
@@ -190,6 +339,7 @@ export function preflightOf(
       canvas: geo.canvas ? { w: geo.canvas.w, h: geo.canvas.h, css: { ...geo.canvas.css } } : null,
     },
     swControlled: probe.swControlled,
+    swIntercepted: probe.swIntercepted,
   };
 }
 
@@ -215,11 +365,37 @@ export interface Baseline {
   untrustedInsertAccepted: boolean | 'unknown';
   /** L6 (AM26): the event the composer reads the file from. */
   fileEvent: 'change' | 'drop' | 'unknown';
+  /**
+   * The composer page is controlled by a service worker once the hard reload settled. true since the
+   * 2026-10-12 live run (swControlled at the probe): Instagram's worker claims the page (F2).
+   */
   swControlledAfterHardReload: boolean | 'unknown';
+  /** A worker answered the first (pre-reload) load. false since F2: the worker has no fetch handler. */
   firstLoadServedBySw: boolean | 'unknown';
+  /**
+   * F2 (2026-10-12): every logged-in load re-registers the root worker at a URL that changes
+   * (enableAddToHomeScreen, zenon_device_id); the new worker calls skipWaiting() and clients.claim().
+   */
+  swClaimsOnLoad: boolean | 'unknown';
+  /** F2: whether that worker has a fetch handler (it would then handle the page's requests: SW_INTERCEPTS). */
+  swFetchHandler: boolean | 'unknown';
+  /** F3: msite renders its header (+ → Story and the story input) only up to this many CSS px wide. */
+  msiteMaxCssWidth: number;
+  /**
+   * AM37 (2026-10-12): what the composer page's landscape gate reads. `screen`: `screen.orientation.type`
+   * (else `window.orientation`, else the viewport), so a landscape monitor blocks Share in any window;
+   * `viewport`: `innerWidth > innerHeight` only (the earlier assumption). The + → Story session start
+   * checks the viewport either way (C3a).
+   */
+  composerLandscapeCheck: 'screen' | 'viewport' | 'unknown';
   geometry: {
     model: 'viewportDpr' | 'source' | `fixed:${number}x${number}` | `cssFixed:${number}x${number}`;
     insets: [number, number];
     saveExposed: boolean | 'unknown';
   };
+  /**
+   * Where each non-default fact comes from (a live run, a code reading, research), e.g.
+   * `"route": "live run 2026-10-12 …"`. Documentation only; nothing reads it.
+   */
+  provenance?: Record<string, string>;
 }

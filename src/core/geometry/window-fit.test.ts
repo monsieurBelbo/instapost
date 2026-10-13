@@ -1,16 +1,23 @@
 /**
  * U13 (strategy §7.11): availHeight 945 and frame delta 62 give a 9:16 inner size of at most
  * 875 tall; always portrait; SCREEN_TOO_SMALL; the profile overrides the default. Plus the
- * numbers measured in spike S8 (docs/contract.md) on the owner's 1512x982@2 screen.
+ * numbers measured in spike S8 (docs/contract.md) on the owner's 1512x982@2 screen, and the
+ * 2026-10-12 changes: the msite width cap (W4), the fit check and the usable-size check (W2/W3).
  */
 import { describe, expect, it } from 'vitest';
+import { MSITE_MAX_CSS_WIDTH } from '../ig-contract/contract.ts';
 import {
   type ComposerProfile,
   DEFAULT_INNER_H,
   FIRST_GUESS_EXTRA_H,
+  FIT_TOLERANCE_PX,
   firstGuess,
+  frameDeltaOf,
   innerRatio,
+  isFitted,
+  isUsableInner,
   MIN_INNER_H,
+  maxMsiteInnerW,
   type ScreenAvail,
   type WindowFitResult,
   windowFit,
@@ -131,6 +138,65 @@ describe('U13 window fit', () => {
 
     it('rejects a screen no popup could fit', () => {
       expect(firstGuess(screen(800, 600))).toEqual({ ok: false, code: 'SCREEN_TOO_SMALL', maxInnerH: 592 });
+    });
+  });
+
+  describe('W4: the msite width cap (767 CSS px)', () => {
+    it('a wide profile is capped at 767 inner px, lowering the height to keep its ratio', () => {
+      const wide: ComposerProfile = { innerW: 900, innerH: 1000, capturedAt: 1 };
+      const r = ok(windowFit(screen(3440, 1410), { w: 0, h: 47 }, wide));
+      expect(r.inner.w).toBeLessThanOrEqual(MSITE_MAX_CSS_WIDTH);
+      expect(r.inner.w).toBeGreaterThanOrEqual(MSITE_MAX_CSS_WIDTH - 1);
+      expect(r.inner.h).toBe(Math.floor(MSITE_MAX_CSS_WIDTH / 0.9));
+      expect(r.inner.w).toBeLessThan(r.inner.h);
+    });
+
+    it('the cap follows the tab zoom (window px = CSS px × zoom)', () => {
+      const wide: ComposerProfile = { innerW: 900, innerH: 1000, capturedAt: 1 };
+      expect(maxMsiteInnerW(0.9)).toBe(690);
+      expect(maxMsiteInnerW(1.25)).toBe(958);
+      expect(maxMsiteInnerW(null)).toBe(767);
+      expect(maxMsiteInnerW(Number.NaN)).toBe(767);
+      expect(ok(windowFit(screen(3440, 1410), { w: 0, h: 47 }, wide, 0.9)).inner.w).toBeLessThanOrEqual(690);
+    });
+
+    it('the default 9:16 fit never reaches the cap (524 wide on the owner’s ultrawide)', () => {
+      const uw: ScreenAvail = { availLeft: 1512, availTop: -428, availWidth: 3440, availHeight: 1410 };
+      expect(ok(windowFit(uw, { w: 0, h: 47 }))).toEqual({
+        ok: true,
+        inner: { w: 524, h: 932 },
+        outer: { left: 2970, top: -212, width: 524, height: 979 },
+      });
+      expect(ok(firstGuess(uw)).inner.w).toBeLessThanOrEqual(MSITE_MAX_CSS_WIDTH);
+    });
+  });
+
+  describe('W2/W3 checks', () => {
+    it('frameDeltaOf: outer minus inner, never negative, null when not finite', () => {
+      expect(frameDeltaOf({ w: 1512, h: 902 }, { width: 1512, height: 949 })).toEqual({ w: 0, h: 47 });
+      expect(frameDeltaOf({ w: 600, h: 900 }, { width: 590, height: 880 })).toEqual({ w: 0, h: 0 });
+      expect(frameDeltaOf({ w: Number.NaN, h: 1 }, { width: 1, height: 1 })).toBeNull();
+    });
+
+    it('isFitted: within 2 px of the target on each side', () => {
+      const target = { w: 524, h: 932 };
+      expect(isFitted({ w: 524, h: 932 }, target)).toBe(true);
+      expect(isFitted({ w: 524 + FIT_TOLERANCE_PX, h: 932 - FIT_TOLERANCE_PX }, target)).toBe(true);
+      expect(isFitted({ w: 527, h: 932 }, target)).toBe(false);
+      expect(isFitted({ w: 1512, h: 902 }, target)).toBe(false);
+    });
+
+    it('isUsableInner: at most 767 wide (× zoom), portrait, at least 640 tall', () => {
+      expect(isUsableInner({ w: 524, h: 965 })).toBe(true);
+      expect(isUsableInner({ w: 379, h: 866 })).toBe(true);
+      expect(isUsableInner({ w: 767, h: 767 })).toBe(true);
+      expect(isUsableInner({ w: 768, h: 1200 })).toBe(false);
+      expect(isUsableInner({ w: 1512, h: 902 })).toBe(false);
+      expect(isUsableInner({ w: 700, h: 650 })).toBe(false);
+      expect(isUsableInner({ w: 500, h: MIN_INNER_H - 1 })).toBe(false);
+      expect(isUsableInner({ w: 0, h: 900 })).toBe(false);
+      expect(isUsableInner({ w: 700, h: 900 }, 0.9)).toBe(false);
+      expect(isUsableInner({ w: 690, h: 900 }, 0.9)).toBe(true);
     });
   });
 });

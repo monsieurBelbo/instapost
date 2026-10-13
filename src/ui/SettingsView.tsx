@@ -1,7 +1,8 @@
 /**
  * Settings at `#/settings` (strategy §7.10): the account label, rehearsal (default ON), assisted
- * insert (default ON in guarded builds, OFF in live until OD3), the kill-switch lock with its
- * ENABLE field, and the Probe composer button (`mode: 'probe'`, no file).
+ * insert (default ON in guarded builds, OFF in live until OD3; AM37: its hint says why, the insert
+ * skips the story session that + → Story starts), the kill-switch lock with its ENABLE field, and the
+ * Probe composer button (`mode: 'probe'`, no file).
  *
  * AM21: rehearsal and assisted insert are fixed per hand-off when it starts, so both switches are
  * disabled while one runs; an edit then could only apply to the next hand-off anyway.
@@ -99,6 +100,11 @@ export function SettingsView() {
           />
           Assisted insert: place the image in the composer for you (otherwise you pick the file)
         </label>
+        <p class="hint" data-testid="setting-assisted-hint">
+          Off by default in the live build. On Instagram the inserted image skips the story session that + → Story
+          starts (the session id stays empty), so tapping + → Story and picking the file yourself stays the recommended
+          way until a live check (L6) says otherwise.
+        </p>
         {running && (
           <p class="hint" data-testid="setting-switches-locked">
             A hand-off is open: its switches are fixed. The hand-off panel shows the ones it runs with.

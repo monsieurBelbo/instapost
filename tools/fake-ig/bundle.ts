@@ -14,6 +14,7 @@ const ROOT = resolve(HERE, '../..');
 
 export const CLIENT_ENTRY = resolve(HERE, 'client/main.tsx');
 export const SW_FILES = {
+  claimOnRegister: resolve(HERE, 'sw/claim-on-register.js'),
   desktopShell: resolve(HERE, 'sw/desktop-shell.js'),
   claimLate: resolve(HERE, 'sw/claim-late.js'),
 } as const;
@@ -39,11 +40,12 @@ export async function bundleClient(): Promise<string> {
   return out.text;
 }
 
-/** The client bundle plus the two service-worker scripts, as core.ts serves them. */
+/** The client bundle plus the three service-worker scripts, as core.ts serves them. */
 export async function loadAssets(): Promise<CoreAssets> {
   return {
     clientJs: await bundleClient(),
     sw: {
+      claimOnRegister: readFileSync(SW_FILES.claimOnRegister, 'utf8'),
       desktopShell: readFileSync(SW_FILES.desktopShell, 'utf8'),
       claimLate: readFileSync(SW_FILES.claimLate, 'utf8'),
     },

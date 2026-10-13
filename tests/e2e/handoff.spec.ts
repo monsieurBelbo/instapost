@@ -1,8 +1,12 @@
 /**
  * Hand-off specs (strategy §7.11), against the fake, on the mock and live artifacts:
- * E4 probe mode, E5 the H1 happy path, E6 H0 by hand, E7 scoping of the device profile,
+ * E4 probe mode (and E4 (b): with msite's header mounting late, the probe waits for it, AL-1), E5 the H1 happy path, E6 H0 by hand, E7 scoping of the device profile,
  * E10 the fake-marker guard, E14 the rate guard, E15 closing the popup mid-flow; and (§11 AM21,
  * AM22) E16 the panel shows the open session's switches, E19 a reloaded extension closes its popup.
+ * Since AM35 (2026-10-12) the fake has the production shape by default: /create/story/ lands on `/`
+ * (route homeOnly), the story input sits in the header beside + (≤ 767 CSS px), and every page load
+ * registers a claiming worker without a fetch handler. So E5's H1 inserts into the header input and
+ * reaches the composer by msite's SPA navigation, and E6 is the production H0 from home (E2E (g)).
  * Headers come from the fake's request log, never from Playwright's `request.headers()`
  * (pre-dNR, AM4). E5 and E7 prove the client-hint `remove` on the wire against a positive
  * control: a normal tab of the same profile does send those hints (FID-4).
@@ -77,9 +81,14 @@ test('E4 probe mode: the popup opens, C1-C8 are reported, the window closes, no 
   expect(rec.exportId).toBeNull();
   expect(rec.level).toBeNull();
   expect(rec.outcome).toBe('not-posted');
-  expect(rec.route).toBe('direct');
-  expect(rec.preflight).toMatchObject({ C1: 'pass', C2: 'pass', C3: 'pass', C4: 'pass', C5: 'pass' });
-  expect(rec.preflight?.swControlled).toBe(false);
+  // F3: Instagram lands /create/story/ without media on home; C5 records that fact, which is the
+  // normal production outcome (not drift). C4: the header's story input is there at <= 767 CSS px.
+  expect(rec.route).toBe('homeOnly');
+  expect(rec.preflight).toMatchObject({ C1: 'pass', C2: 'pass', C3: 'pass', C4: 'pass', C5: 'fail' });
+  // P1: whether the worker had claimed the page yet when the probe ran is diagnostics only.
+  expect(typeof rec.preflight?.swControlled).toBe('boolean');
+  expect(rec.preflight?.swIntercepted).toBe(false);
+  expect(rec.probe?.navType).toBe('reload');
   // C8 without a picked file: viewport and DPR of the fitted popup, no canvas yet.
   expect(rec.preflight?.C8).toEqual({ inner: rec.probe?.inner, dpr: rec.probe?.dpr, canvas: null });
   expect(rec.probe?.inner.h).toBeGreaterThan(rec.probe?.inner.w ?? Number.POSITIVE_INFINITY);
@@ -87,6 +96,16 @@ test('E4 probe mode: the popup opens, C1-C8 are reported, the window closes, no 
   expect(rec.probe?.isMobile).toBe(true);
   expect(rec.probe?.storyInput).toBe('present');
   expect(rec.probe?.acceptOk).toBe(true);
+  expect(rec.probe?.inner.w).toBeLessThanOrEqual(767);
+  // U1: the rows say what the probe saw, in words.
+  await expect(page.locator('[data-row="page"]')).toHaveText(
+    "/ (home: Instagram's usual landing, tap + → Story there)",
+  );
+  await expect(page.locator('[data-row="story-input"]')).toHaveText('present');
+  await expect(page.locator('[data-row="service-worker"]')).toHaveText(
+    /^(controls the page — normal on Instagram|not in control)$/,
+  );
+  await expect(page.locator('[data-row="browser"]')).toHaveText('Chromium');
   // Probe mode never injects and never serves a file.
   const phases = rec.phaseLog.map((p) => p.phase);
   expect(phases).toContain('probing');
@@ -98,6 +117,37 @@ test('E4 probe mode: the popup opens, C1-C8 are reported, the window closes, no 
   expect(docs.length).toBeGreaterThan(0);
   for (const r of docs) expectAndroidProfile(r);
   expect(await sessionRules()).toEqual([]);
+});
+
+test('E4 (b) probe mode, msite’s header mounting 2.5 s late: the probe waits for the story input → present, C4 pass (AL-1)', async ({
+  editor,
+  composer,
+  fake,
+  handoffRecords,
+}) => {
+  // P5 in probe mode (live checklist L14): the report must not come from a snapshot taken before
+  // hydration, or C4 and baseline.json's storyInputBeforeTap would be recorded false.
+  await fake.setKnobs({ hydrateMs: 2500 });
+  const page = await editor('#/settings');
+  await page.getByTestId('setting-probe').click();
+  await whenClosed(await composer());
+  await waitPhase(page, 'idle');
+  await expect(page.getByTestId('handoff-error')).toHaveCount(0);
+  await expect(page.locator('[data-row="story-input"]')).toHaveText('present');
+  await expect(page.locator('[data-row="page"]')).toHaveText(
+    "/ (home: Instagram's usual landing, tap + → Story there)",
+  );
+  const rec = (await handoffRecords()).at(-1);
+  if (!rec) throw new Error('no hand-off record');
+  expect(rec).toMatchObject({ mode: 'probe', outcome: 'not-posted', route: 'homeOnly' });
+  expect(rec.probe).toMatchObject({ storyInput: 'present', acceptOk: true });
+  expect(rec.preflight).toMatchObject({ C1: 'pass', C3: 'pass', C4: 'pass', C5: 'fail' });
+  // The page's header came 2.5 s after it rendered: the probe that decided came after it.
+  const probing = rec.phaseLog.find((p) => p.phase === 'probing')?.t ?? 0;
+  const closing = rec.phaseLog.find((p) => p.phase === 'closing')?.t ?? 0;
+  expect(closing - probing).toBeGreaterThan(500);
+  expect(rec.phaseLog.map((p) => p.phase)).not.toContain('injecting');
+  expect(await fake.stories()).toHaveLength(0);
 });
 
 test('E5 @smoke H1 happy path: Android profile on the wire, trusted Share, PSNR >= 38 dB, rules gone', async ({
@@ -138,6 +188,7 @@ test('E5 @smoke H1 happy path: Android profile on the wire, trusted Share, PSNR 
   await page.getByTestId('setting-assisted').check();
   await page.goto(page.url().replace(/#.*$/, '#/'));
   await loadPhoto(page, src);
+  const posted = await lastSeq(fake);
   const exportId = await postFromDesktop(page);
   const popup = await composer({ not: [baseline] });
 
@@ -145,6 +196,8 @@ test('E5 @smoke H1 happy path: Android profile on the wire, trusted Share, PSNR 
   await expect(phaseLocator(page)).toHaveAttribute('data-level', 'H1');
   // The live build carries on against the fake, flagged (§3.6 step 7 row 2); mock never shows it.
   await expect(page.getByTestId('handoff-banner')).toHaveCount(extension.mode === 'live' ? 1 : 0);
+  // P5/F3: /create/story/ landed on home; the insert into the header's story input started msite's
+  // story session, which navigated in-page to the composer.
   await expect(popup).toHaveURL(`${IG_ORIGIN}/create/story/`);
 
   // The composer documents carried the Android profile (fake's log = post-dNR headers, AM4): the
@@ -154,6 +207,14 @@ test('E5 @smoke H1 happy path: Android profile on the wire, trusted Share, PSNR 
   expect(docs.length).toBeGreaterThanOrEqual(1);
   expect(docs.length).toBeLessThanOrEqual(2);
   for (const r of docs) expectAndroidProfile(r);
+  // Every document of the popup, the hard reload of `/` included, and nothing loaded after it: the
+  // composer came by pushState, not by a new document.
+  const popupDocs = (await fake.requests(posted)).filter(
+    (r) => r.host === 'www.instagram.com' && r.fetch['sec-fetch-dest'] === 'document',
+  );
+  // The navigation (302), the home page it landed on, and the hard reload of that page.
+  expect(popupDocs.map((r) => r.path)).toEqual(['/create/story/', '/', '/']);
+  for (const r of popupDocs) expectAndroidProfile(r);
 
   const closed = whenClosed(popup);
   await human.share(popup);
@@ -167,6 +228,9 @@ test('E5 @smoke H1 happy path: Android profile on the wire, trusted Share, PSNR 
   if (!story) throw new Error('no story');
   expect(story.isTrusted).toBe(true);
   expect(story.size).toEqual({ w: 1080, h: 1920 });
+  // AM37: the composer read the portrait shim's screen (the emulated one is landscape) and showed
+  // Share; the insert bypassed + → Story, so msite's story session was never started (E28 a).
+  expect(story.meta).toMatchObject({ sessionStarted: false, sessionId: null, screenOrientation: 'portrait-primary' });
 
   const png = await exportBytes(exportId);
   expect(await decodeSize(context, png)).toEqual({ w: 1080, h: 1920 });
@@ -177,6 +241,7 @@ test('E5 @smoke H1 happy path: Android profile on the wire, trusted Share, PSNR 
   const [rec] = await handoffRecords();
   expect(rec?.level).toBe('H1');
   expect(rec?.outcome).toBe('posted-confirmed');
+  expect(rec?.route).toBe('homeOnly');
   expect(await sessionRules()).toEqual([]);
 });
 
@@ -192,7 +257,7 @@ async function pageIsMobile(page: Page): Promise<unknown> {
     ?.is_mobile;
 }
 
-test('E6 H0 with assisted insert OFF: instructions, + → Story, the human picks the export, story recorded', async ({
+test('E6 (g) H0 with assisted insert OFF, production shape: home, + → Story, the human picks the export, story recorded', async ({
   context,
   editor,
   composer,
@@ -211,6 +276,8 @@ test('E6 H0 with assisted insert OFF: instructions, + → Story, the human picks
 
   await waitPhase(page, 'awaitingPick');
   await expect(phaseLocator(page)).toHaveAttribute('data-level', 'H0');
+  // F3: Instagram opened its home page; the + entry and its story input are in the header there.
+  await expect(popup).toHaveURL(`${IG_ORIGIN}/`);
   // The export as it landed in Downloads (the PNG of this hand-off). Under Playwright the file is
   // stored under a GUID name in Playwright's download dir; the product reports whatever name
   // chrome.downloads gives it, so the instruction is checked against that name.
@@ -220,11 +287,13 @@ test('E6 H0 with assisted insert OFF: instructions, + → Story, the human picks
   const file = downloaded[0]?.filename ?? '';
   expect(await readFile(file)).toEqual(png);
 
-  // H1 switched off is not an error: plain H0 instructions, with the downloaded file's name.
+  // H1 switched off is not an error: the H0 instructions for home, with the downloaded file's name.
   expect(await shownError(page)).toBeNull();
   await expect(instruction(page)).toHaveText(
-    `In the Instagram window tap + → Story and pick instapost/${basename(file)}.`,
+    `Instagram opened its home page, as it usually does. In the Instagram window tap + → Story, then pick instapost/${basename(file)}.`,
   );
+  await expect(page.locator('[data-row="page"]')).toContainText('/ (home');
+  await expect(page.locator('[data-row="story-input"]')).toHaveText('present');
   // That GUID name has no extension, so a file input would report an empty MIME type and the
   // composer would refuse it as "not a photo". The human picks the identical bytes as a .png.
   const picked = testInfo.outputPath('story.png');
@@ -233,6 +302,8 @@ test('E6 H0 with assisted insert OFF: instructions, + → Story, the human picks
 
   await waitPhase(page, 'awaitingShare');
   await expect(phaseLocator(page)).toHaveAttribute('data-level', 'H0');
+  // Picking the file started msite's story session: an SPA navigation to the composer.
+  await expect(popup).toHaveURL(`${IG_ORIGIN}/create/story/`);
   const closed = whenClosed(popup);
   await human.share(popup);
   await waitSeen(page, 'finished');
@@ -242,9 +313,14 @@ test('E6 H0 with assisted insert OFF: instructions, + → Story, the human picks
   const stories = await fake.stories();
   expect(stories).toHaveLength(1);
   expect(stories[0]?.isTrusted).toBe(true);
+  // AM37: the human's + → Story started msite's story session (C3a passed in the fitted window) and
+  // the composer read the portrait shim's screen (C3b), so it showed Share (E28 c).
+  expect(stories[0]?.meta).toMatchObject({ sessionStarted: true, screenOrientation: 'portrait-primary' });
   const [rec] = await handoffRecords();
   expect(rec?.level).toBe('H0');
   expect(rec?.outcome).toBe('posted-confirmed');
+  expect(rec?.route).toBe('homeOnly');
+  expect(rec?.preflight).toMatchObject({ C3: 'pass', C3b: 'pass', C4: 'pass', C5: 'fail' });
   expect(rec?.phaseLog.map((p) => p.phase)).not.toContain('injecting');
   expect(await sessionRules()).toEqual([]);
 });
@@ -282,8 +358,8 @@ test('E7 scoping: a second normal tab during a session gets the desktop shell (M
   // that rule 1001 removes from the popup.
   for (const hint of CH_REMOVE) expect(doc.ch[hint], hint).toBeDefined();
   expect(doc.classification.is_mobile).toBe(false);
-  // The popup itself still carries the Android profile.
-  await expect(popup).toHaveURL(`${IG_ORIGIN}/create/story/`);
+  // The popup itself still carries the Android profile (on home, where /create/story/ landed, F3).
+  await expect(popup).toHaveURL(`${IG_ORIGIN}/`);
   expect(await pageIsMobile(popup)).toBe(true);
 
   await cancelHandoff(page);
@@ -478,6 +554,13 @@ test('E19 a worker that starts without its stored session closes the popup the h
   await postFromDesktop(page);
   const popup = await composer();
   await waitPhase(page, 'awaitingPick');
+  // The page's own worker claims it about a second after it loads (F2), and the agent reports that
+  // `controllerchange`, which the background counts and persists (P2). Let that land first: a write
+  // by the still-running old worker after the storage.session.clear() below would hand the popup back
+  // to a "stored session" (a race of this simulation only; a real reload stops the worker and drops
+  // storage.session at once).
+  await expect.poll(() => popup.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+  await page.waitForTimeout(500);
   // What reloading, updating or disabling and re-enabling the extension leaves behind: no
   // storage.session and no session rules, but the https popup still open. (Under Playwright,
   // chrome.runtime.reload() unloads a --load-extension build for good, so the reload is simulated.)

@@ -10,11 +10,14 @@
  */
 import { computed, signal } from '@preact/signals';
 import type { ScreenAvail } from '../core/geometry/window-fit.ts';
-import type { ErrorCode, HandoffMode, PhaseLogEntry } from '../core/handoff/state.ts';
-import type { ProbeReport } from '../core/ig-contract/contract.ts';
+import type { ErrorCode, HandoffMode, HandoffStatus, PhaseLogEntry, WindowDiagnostics } from '../core/handoff/state.ts';
+import type { BrowserFlavour } from '../core/ig-contract/browser-flavour.ts';
+import type { CheckResult, ProbeReport } from '../core/ig-contract/contract.ts';
+import type { ComposerRoute } from '../core/ig-contract/urls.ts';
 import type { ExportId, HandoffId } from '../core/model/ids.ts';
 import { createHandoffClient, type HandoffClient } from '../publish/msite.ts';
 import type { HandoffStatusMsg } from '../shared/protocol.ts';
+import { detectBrowserFlavour } from './browser-flavour.ts';
 
 export const status = signal<HandoffStatusMsg | null>(null);
 /** Phases seen for the current hand-off, in arrival order (consecutive repeats collapsed). */
@@ -37,8 +40,24 @@ export const finishedInfo = signal<{ handoffId: HandoffId; detectedPosted: boole
 );
 /** The last error of the current hand-off (or of a guard refusal), with its detail (AM28: the page). */
 export const lastError = signal<{ code: ErrorCode; freeAt: number | undefined; detail?: string } | null>(null);
-/** The last probe report of the current hand-off. */
+/** The last probe report of the current hand-off (the deciding one, or the C8 one at composer-ready). */
 export const probeReport = signal<ProbeReport | null>(null);
+/**
+ * U1: the probe that decided the flow, with C4 as the preflight has it (`unknown`: the decision never
+ * reached the story input) and where the tab was. The C8 report at composer-ready never replaces it.
+ */
+export const decision = signal<{
+  probe: ProbeReport;
+  c4: CheckResult | undefined;
+  path: string | undefined;
+  route: ComposerRoute | undefined;
+} | null>(null);
+/** W5: the popup's sizing, as last reported. */
+export const windowInfo = signal<WindowDiagnostics | null>(null);
+/** W3: the guided resize (live tab size, usable or not, deadline) while it runs. */
+export const resizeInfo = signal<NonNullable<HandoffStatus['resize']> | null>(null);
+/** P6: the browser this editor detected for the current hand-off. */
+export const browserFlavour = signal<BrowserFlavour | null>(null);
 /** The switches a start request carried, shown until the background's first status answers it (AM21). */
 const requestedSwitches = signal<{ rehearsal: boolean; assistedInsert: boolean } | null>(null);
 
@@ -67,6 +86,9 @@ function resetForNew(): void {
   finishedInfo.value = null;
   lastError.value = null;
   probeReport.value = null;
+  decision.value = null;
+  windowInfo.value = null;
+  resizeInfo.value = null;
 }
 
 function onStatus(s: HandoffStatusMsg): void {
@@ -84,6 +106,12 @@ function onStatus(s: HandoffStatusMsg): void {
     lastError.value = { code: s.error, freeAt: s.freeAt, ...(detail ? { detail } : {}) };
   }
   if (s.probe) probeReport.value = s.probe;
+  // Only the statuses that carry the deciding probe carry `c4` (the C8 report at composer-ready does not).
+  if (s.probe && s.c4 !== undefined) {
+    decision.value = { probe: s.probe, c4: s.c4, path: s.path, route: s.route };
+  }
+  if (s.window) windowInfo.value = s.window;
+  resizeInfo.value = s.resize ?? (s.phase === 'resizing' ? resizeInfo.value : null);
   if (s.phase === 'finished' && s.handoffId) {
     finishedInfo.value = {
       handoffId: s.handoffId,
@@ -136,8 +164,16 @@ export function startHandoff(req: {
     assistedInsert: req.assistedInsert && req.mode === 'post' && req.exportId !== null,
   };
   starting.value = true;
+  const browser = detectBrowserFlavour();
+  browserFlavour.value = browser;
   try {
-    handoffClient().start({ exportId: req.exportId, mode: req.mode, rehearsal: req.rehearsal, screen: screenAvail() });
+    handoffClient().start({
+      exportId: req.exportId,
+      mode: req.mode,
+      rehearsal: req.rehearsal,
+      screen: screenAvail(),
+      browser,
+    });
   } catch (err) {
     starting.value = false;
     throw err;

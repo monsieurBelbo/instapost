@@ -2,14 +2,18 @@
  * U9 (strategy §7.11): the full transition table, table-driven: guard fail; DESKTOP_SHELL;
  * NOT_LOGGED_IN (no lock); landscape refits once; input missing → H0; inject → ready;
  * inject → ignored → H0 with no second Inject; challenge → kill and lock; off-host or undefined
- * URL after arming → kill; SW_TOOK_CONTROL; window closed → cleanup; composer left → finished;
- * probe mode. Plus AM2 re-probes, the start guards, timers and failed effects.
+ * URL after arming → kill; window closed → cleanup; composer left → finished; probe mode. Plus AM2
+ * re-probes, the start guards, timers and failed effects, and the 2026-10-12 changes: the verified
+ * fit with its one retry and the guided resize (W2/W3), the service worker as diagnostics with an
+ * interception tripwire (P1–P3), the msite width row (P4), the wait for a late story input (P5) and
+ * the browser flavour (P6).
  * "No transition ever emits a retry" is asserted for every row and, generically, over
  * thousands of seeded random event sequences.
  */
 import { describe, expect, it } from 'vitest';
-import { firstGuess, windowFit } from '../geometry/window-fit.ts';
-import type { ProbeReport } from '../ig-contract/contract.ts';
+import type { Size } from '../geometry/fit.ts';
+import { firstGuess, isUsableInner, type WindowBox, windowFit } from '../geometry/window-fit.ts';
+import type { PageOrientation, ProbeReport } from '../ig-contract/contract.ts';
 import { uaRule } from '../ig-contract/device-profile.ts';
 import { rehearsalRules, SESSION_RULE_IDS } from '../ig-contract/rules.ts';
 import { COMPOSER_URL, classifyComposerUrl } from '../ig-contract/urls.ts';
@@ -19,19 +23,26 @@ import {
   type AgentEventName,
   CLOSE_DELAY_MS,
   defaultSettings,
+  ERROR_EFFECT,
   type ErrorCode,
+  FIT_RETRY_DELAY_MS,
+  HANDOFF_TIMERS,
   type HandoffCtx,
   type HandoffEffect,
   type HandoffEvent,
   type HandoffPhase,
+  type HandoffRecord,
   type HandoffState,
   type HandoffStatus,
   IDLE,
   INACTIVITY_TIMEOUT_MS,
   INJECT_READY_TIMEOUT_MS,
+  INPUT_WAIT_MS,
   isArmed,
   MSITE_LOCK_MS,
   NAVIGATION_TIMEOUT_MS,
+  RESIZE_POLL_MS,
+  RESIZE_TIMEOUT_MS,
   type Settings,
 } from './state.ts';
 
@@ -57,6 +68,8 @@ const goodProbe = (over: Partial<ProbeReport> = {}): ProbeReport => ({
   dpr: 2,
   portrait: true,
   swControlled: false,
+  swIntercepted: false,
+  navType: 'reload',
   storyInput: 'present',
   acceptOk: true,
   canvas: { w: 1022, h: 1818, css: { x: 0, y: 0, w: 511, h: 909 } },
@@ -70,6 +83,7 @@ const startEv = (mode: 'post' | 'probe' = 'post', screen = SCREEN, rehearsal = t
   mode,
   rehearsal,
   screen,
+  browser: 'chromium',
 });
 const tab = (status: 'loading' | 'complete' | undefined, url: string | undefined, tabId = TAB): HandoffEvent => ({
   type: 'tabUpdated',
@@ -80,6 +94,16 @@ const tab = (status: 'loading' | 'complete' | undefined, url: string | undefined
 const report = (over: Partial<ProbeReport> = {}): HandoffEvent => ({ type: 'agentReport', probe: goodProbe(over) });
 /** agentInjected; `fresh: false` = the agent was already in that document (AM16). */
 const injected = (fresh: boolean): HandoffEvent => ({ type: 'agentInjected', fresh });
+/** AM37: the portrait shim's readings: installed on a landscape screen, or switched off (E2E flag). */
+const SHIM_INSTALLED: PageOrientation = { type: 'portrait-primary', shim: 'installed' };
+const SHIM_PRESENT: PageOrientation = { type: 'portrait-primary', shim: 'present' };
+const SHIM_OFF: PageOrientation = { type: 'landscape-primary', shim: 'off' };
+/** agentInjected with the shim's reading for that document (AM37). */
+const injectedWith = (fresh: boolean, orientation: PageOrientation): HandoffEvent => ({
+  type: 'agentInjected',
+  fresh,
+  orientation,
+});
 const SUSPENDED = 'https://www.instagram.com/accounts/suspended/?next=%2Fcreate%2Fstory%2F';
 const CODE_ENTRY = 'https://www.instagram.com/auth_platform/codeentry/?apc=x';
 const CONSENT = 'https://www.instagram.com/consent/?flow=x';
@@ -91,6 +115,35 @@ const measured = (frameH = 32): HandoffEvent => ({
   outer: { left: 500, top: 33, width: 500, height: 900 + frameH },
 });
 const MEASURED = measured();
+/** windowFit for MEASURED's 0x32 frame: inner 511x909 (S8). */
+const FIT = (() => {
+  const f = windowFit(SCREEN, { w: 0, h: 32 });
+  if (!f.ok) throw new Error('fixture screen must fit');
+  return f;
+})();
+/** updateWindow's verification: the tab reached `inner` (fitted) or stayed at `inner` (not). */
+const fittedEv = (fitted: boolean, inner: Size = FIT.inner, outer?: WindowBox): HandoffEvent => ({
+  type: 'windowFitted',
+  box: FIT.outer,
+  target: FIT.inner,
+  fitted,
+  inner,
+  outer: outer ?? { ...FIT.outer, width: inner.w, height: inner.h + 32 },
+});
+const FITTED = fittedEv(true);
+/** Arc ignoring the bounds (F1): the tab stays at 1512x902 in a 1512x949 window. */
+const ARC_TAB = { w: 1512, h: 902 };
+const ARC_WINDOW = { left: 1831, top: 13, width: 1512, height: 949 };
+const NOT_FITTED = fittedEv(false, ARC_TAB, ARC_WINDOW);
+/** The settled Arc popup, as measureTab reads it (frame 0x47). */
+const ARC_MEASURED: HandoffEvent = { type: 'tabMeasured', inner: ARC_TAB, outer: ARC_WINDOW, zoom: 1 };
+const sized = (w: number, h: number): HandoffEvent => ({
+  type: 'windowSized',
+  inner: { w, h },
+  outer: { left: 0, top: 0, width: w, height: h + 47 },
+});
+/** P5: the input wait runs out (the probe's INPUT_MISSING stands). */
+const INPUT_WAITED: HandoffEvent = { type: 'timer', timer: 'inputWait' };
 const HOUR = 3_600_000;
 /** The session switches every active status carries (AM21): the defaults of a guarded post. */
 const SWITCHES = { rehearsal: true, assistedInsert: true } as const;
@@ -109,6 +162,7 @@ interface Opts {
   rate?: RateDecision;
   chromeMajor?: number;
   brandedBrowser?: boolean;
+  resizeTimeoutMs?: number;
 }
 
 /** Drives the reducer like the runner would, recording every transition. */
@@ -133,6 +187,7 @@ class Run {
       rate: this.opts.rate ?? { ok: true },
       uuid: () => `u${++this.n}`,
       brandedBrowser: this.opts.brandedBrowser ?? false,
+      ...(this.opts.resizeTimeoutMs !== undefined ? { resizeTimeoutMs: this.opts.resizeTimeoutMs } : {}),
     };
   }
 
@@ -182,13 +237,13 @@ const types = (effects: HandoffEffect[]) => effects.map((e) => e.type);
 /** start → windowCreated → rules → fit → navigate. Stops in `navigating` (kill switch not armed). */
 function DRIVE_NAVIGATING(r: Run): Run {
   r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-  r.send(MEASURED, { type: 'windowFitted' });
+  r.send(MEASURED, FITTED);
   return r;
 }
 /** start → windowCreated → rules → fit → navigate → hard reload → reload committed. Stops in `reloading`. */
 function toReloading(r: Run, mode: 'post' | 'probe' = 'post'): Run {
   r.send(startEv(mode), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-  r.send(MEASURED, { type: 'windowFitted' }, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
+  r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
   return r;
 }
 /** …then the reload's complete and agentInjected: the agent/probe is out. */
@@ -205,14 +260,15 @@ function toShare(r: Run): Run {
   return r;
 }
 function toPick(r: Run, over: Partial<ProbeReport> = { storyInput: 'absent' }): Run {
-  toReport(r).send(report(over));
+  // P5: a missing input is waited for once; the wait runs out (a no-op when nothing waits).
+  toReport(r).send(report(over), INPUT_WAITED);
   return r;
 }
 /** As toShare, in a post with rehearsal off (AM19 holds the popup open after Share). */
 function toShareRehearsalOff(r: Run): Run {
   r.send(startEv('post', SCREEN, false));
   r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-  r.send(MEASURED, { type: 'windowFitted' }, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
+  r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
   r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report(), { type: 'agentGetFile' });
   r.send(agent('composer-ready'));
   return r;
@@ -254,8 +310,9 @@ const LIMITS: Record<string, number> = {
   hardReload: 1,
   inject: 1,
   serveFile: 1,
+  // W2: the fit and the single refit measure; the fit, its one retry and the single refit update.
   measureTab: 2,
-  updateWindow: 2,
+  updateWindow: 3,
   writeRecord: 1,
   lockMsite: 1,
   noteOpen: 1,
@@ -299,6 +356,41 @@ function checkStep(step: Step, ctx: Pick<HandoffCtx, 'guarded' | 'settings'>, ta
     expect(ts[0]).toBe('closeWindow');
   // The hard reload comes only from `navigating`.
   if (ts.includes('hardReload')) expect(prev.phase).toBe('navigating');
+  // W2/W3: the navigation starts only from a verified fit, a usable tab after the retry, or a
+  // usable size read while resizing; never from a window still at Arc's 1512x949.
+  if (ts.includes('navigate')) {
+    expect(['fitting', 'resizing']).toContain(prev.phase);
+    const win = state.phase !== 'idle' ? state.win : null;
+    const last = win?.updates.at(-1);
+    const usable = win?.finalTab ? isUsableInner(win.finalTab, win.zoom) : false;
+    expect(usable || (prev.phase === 'fitting' && last?.fitted === true)).toBe(true);
+    if (prev.phase === 'resizing') expect(win?.manualResize).toBe(true);
+  }
+  // W3: the tab size is read on demand only while the owner resizes.
+  if (ts.includes('readSize')) expect(prev.phase).toBe('resizing');
+  // AL-3: only the new popup (fitting) settles before it is measured; the refit reads it once.
+  for (const e of effects) if (e.type === 'measureTab') expect(e.settle).toBe(state.phase === 'fitting');
+  // P5 (AL-1/AF-1): a decision that read C4 from a report without a story input waited for it first.
+  for (const e of effects) {
+    if (e.type !== 'notifyEditor' || e.status.c4 === undefined || e.status.c4 === 'unknown') continue;
+    // Re-probes of a later document (a level already decided) never wait (one wait per hand-off).
+    if (e.status.probe?.storyInput !== 'absent' || prev.phase !== 'probing' || prev.level !== null) continue;
+    expect(prev.inputWaitUsed, 'C4 read from an input-less report without the input wait').toBe(true);
+  }
+  // W2 hardening: the runner's re-applies (and the hold) only while the tab is still about:blank,
+  // i.e. for the fit and its retry in `fitting`; the refit after the navigation is one windows.update.
+  for (const e of effects) {
+    if (e.type !== 'updateWindow') continue;
+    expect(e.reapply).toBe(state.phase === 'fitting');
+    if (state.phase === 'probing') expect(state.step).toBe('refitUpdate');
+  }
+  // P1: being controlled by a worker never fails a session; DESKTOP_SHELL means is_mobile was not true.
+  for (const e of effects) {
+    if (e.type !== 'notifyEditor' || e.status.error !== 'DESKTOP_SHELL') continue;
+    expect(e.status.probe?.isMobile).not.toBe(true);
+  }
+  // P2: SW_TOOK_CONTROL is never emitted any more.
+  for (const e of effects) if (e.type === 'notifyEditor') expect(e.status.error).not.toBe('SW_TOOK_CONTROL');
   // Locks only with a kill.
   for (const e of effects) {
     if (e.type !== 'lockMsite') continue;
@@ -319,7 +411,9 @@ function checkStep(step: Step, ctx: Pick<HandoffCtx, 'guarded' | 'settings'>, ta
     const p = state.phase === 'injecting' ? state.probe : null;
     expect(p).toMatchObject({ portrait: true, storyInput: 'present', acceptOk: true });
     expect(p?.isMobile).not.toBe(false);
-    expect(p?.swControlled).not.toBe(true);
+    // P1/P3: control is diagnostics; a worker that intercepted requests never sees an insert.
+    expect(p?.swIntercepted).not.toBe(true);
+    expect(p?.inner.w).toBeLessThanOrEqual(767);
     if (ctx.guarded) expect(p?.marker).toBe(true);
     if (prev.phase === 'probing' && prev.strict) expect(p?.isMobile).toBe(true);
     // Never an upgrade: once a level was decided (H0, or H1 already used), no inject follows.
@@ -451,11 +545,21 @@ describe('U9 hand-off reducer: happy path (H1)', () => {
     // AM22: the popup is remembered in storage.local, so a reloaded extension can still close it.
     expect(scoped[1]).toEqual({ type: 'rememberWindow', windowId: WIN, tabId: TAB, handoffId: 'hof_u1' });
     expect(types(r.send({ type: 'rulesInstalled' }))).toEqual(['measureTab', 'notifyEditor']);
-    expect(r.send(MEASURED)).toEqual([{ type: 'updateWindow', windowId: WIN, box: fit.outer }]);
-    expect(r.send({ type: 'windowFitted' }).slice(0, 2)).toEqual([
+    expect(r.state).toMatchObject({ phase: 'fitting', fitStep: 'measure' });
+    // W2: the settled window measured; one update to windowFit (with the target inner size to verify).
+    expect(r.send(MEASURED)).toEqual([
+      { type: 'updateWindow', windowId: WIN, tabId: TAB, box: fit.outer, inner: fit.inner, reapply: true },
+    ]);
+    const nav = r.send(FITTED);
+    expect(nav.slice(0, 2)).toEqual([
       { type: 'navigate', tabId: TAB, url: COMPOSER_URL },
       { type: 'armTimer', timer: 'navigation', ms: NAVIGATION_TIMEOUT_MS },
     ]);
+    // W5: the status that starts the navigation carries the window's sizing.
+    expect(nav[2]).toMatchObject({
+      type: 'notifyEditor',
+      status: { phase: 'navigating', window: { attempts: 1, manualResize: false, finalTab: fit.inner } },
+    });
     // Before navigating, tab updates (about:blank, url hidden) are ignored.
     expect(r.send(tab('complete', undefined))).toEqual([]);
     expect(r.send(tab('loading', COMPOSER_URL)).slice(0, 2)).toEqual([
@@ -511,9 +615,24 @@ describe('U9 hand-off reducer: happy path (H1)', () => {
       chMode: 'full',
       outcome: 'posted-confirmed',
       route: 'direct',
-      preflight: { C1: 'pass', C2: 'pass', C3: 'pass', C4: 'pass', C5: 'pass' },
+      preflight: { C1: 'pass', C2: 'pass', C3: 'pass', C4: 'pass', C5: 'pass', swIntercepted: false },
       readyProbe: ready,
+      browser: 'chromium',
+      // W5: requested (first guess), created (the settled window), frame delta, the verified update.
+      window: {
+        screen: SCREEN,
+        requested: guess.outer,
+        created: MEASURED.type === 'tabMeasured' ? MEASURED.outer : null,
+        createdTab: { w: 500, h: 900 },
+        frameDelta: { w: 0, h: 32 },
+        updates: [{ step: 'fit', box: fit.outer, target: fit.inner, fitted: true, tab: fit.inner }],
+        attempts: 1,
+        manualResize: false,
+        finalTab: fit.inner,
+        zoom: null,
+      },
     });
+    expect(rec.record.swControllerChanges).toBeUndefined();
     // C8 comes from the ready composer; the deciding probe is kept as it was.
     expect(rec.record.preflight?.C8).toEqual({ inner: ready.inner, dpr: ready.dpr, canvas: ready.canvas });
     expect(rec.record.probe).toEqual(goodProbe());
@@ -534,9 +653,7 @@ describe('U9 hand-off reducer: happy path (H1)', () => {
     ]);
     expect(types(r.send({ type: 'windowRemoved', windowId: WIN }))).toEqual([
       'removeRules',
-      'clearTimer',
-      'clearTimer',
-      'clearTimer',
+      ...HANDOFF_TIMERS.map(() => 'clearTimer'),
       'forgetWindow',
       'notifyEditor',
     ]);
@@ -584,6 +701,51 @@ const lastOutcome = (r: Run) => {
   return recs.at(-1);
 };
 const lastRecord = (r: Run) => r.effects.flatMap((e) => (e.type === 'writeRecord' ? [e.record] : [])).at(-1);
+
+// W2/W3 fixtures: the owner's ultrawide (editor screen of the 2026-10-12 run) and Arc's 0x47 frame.
+const OWNER_UW = { availLeft: 1512, availTop: -428, availWidth: 3440, availHeight: 1410 };
+const ARC_DELTA = { w: 0, h: 47 };
+function fitFor(screen = OWNER_UW, delta = ARC_DELTA) {
+  const f = windowFit(screen, delta);
+  if (!f.ok) throw new Error('fixture screen must fit');
+  return f;
+}
+/** updateWindow's verification for `f`: fitted at its target, or the tab still at `tab`. */
+const verify = (
+  f: ReturnType<typeof fitFor>,
+  fitted: boolean,
+  tab: Size = ARC_TAB,
+  applied?: number,
+): HandoffEvent => ({
+  type: 'windowFitted',
+  box: f.outer,
+  target: f.inner,
+  fitted,
+  inner: fitted ? f.inner : tab,
+  outer: fitted ? f.outer : { ...ARC_WINDOW, width: tab.w, height: tab.h + 47 },
+  ...(applied === undefined ? {} : { applied }),
+});
+const RETRY: HandoffEvent = { type: 'timer', timer: 'fitRetry' };
+/** start on the ultrawide → popup → rules → the settled Arc popup measured. Stops in fitting/update. */
+function toArcFit(r: Run, rehearsal = true): Run {
+  r.send(startEv('post', OWNER_UW, rehearsal), { type: 'windowCreated', windowId: WIN, tabId: TAB });
+  r.send({ type: 'rulesInstalled' }, ARC_MEASURED);
+  return r;
+}
+/** …both updates ignored (still 1512x902): the guided resize. */
+function toResizing(r: Run): Run {
+  const f = fitFor();
+  toArcFit(r).send(verify(f, false), RETRY, verify(f, false));
+  return r;
+}
+/** A probe of msite's home page, where the composer lands without media (F3). */
+const homeProbe = (over: Partial<ProbeReport> = {}): HandoffEvent =>
+  report({ inner: { w: 524, h: 932 }, canvas: undefined, ...over });
+/** navigating → hard reload → the reload lands on `/` (homeOnly) → agent injected: the probe is out. */
+function toHomeReport(r: Run): Run {
+  r.send(tab('loading', COMPOSER_URL), tab('loading', HOME), tab('complete', HOME), { type: 'agentInjected' });
+  return r;
+}
 
 const ROWS: Row[] = [
   // Start guards: no window opens.
@@ -689,11 +851,49 @@ const ROWS: Row[] = [
     injects: 0,
   },
   {
-    name: 'DESKTOP_SHELL: still SW-controlled after the hard reload',
-    script: (r) => toReport(r).send(report({ swControlled: true })),
+    name: 'P1: SW-controlled after the hard reload is diagnostics only: no DESKTOP_SHELL, recorded',
+    script: (r) => toReport(r).send(report({ swControlled: true }), { type: 'agentGetFile' }, agent('composer-ready')),
+    phase: 'awaitingShare',
+    error: null,
+    injects: 1,
+    check: (r) => {
+      r.send(tab(undefined, HOME));
+      expect(lastRecord(r)?.preflight).toMatchObject({ swControlled: true, swIntercepted: false, C1: 'pass' });
+    },
+  },
+  {
+    name: 'P3: the probe shows a worker intercepted requests → SW_INTERCEPTS: close, no lock, nothing inserted',
+    script: (r) => toReport(r).send(report({ swIntercepted: true })),
+    phase: 'closing',
+    error: 'SW_INTERCEPTS',
+    injects: 0,
+    lacks: ['lockMsite', 'serveFile'],
+    check: (r) => {
+      expect(lastOutcome(r)).toBe('failed:SW_INTERCEPTS');
+      // It stopped before the story input: C4 is not judged (U1).
+      expect(lastRecord(r)?.preflight?.C4).toBe('unknown');
+      expect(r.lastStatus).toMatchObject({ c4: 'unknown', path: '/create/story/' });
+    },
+  },
+  {
+    name: 'U1: a decision that ends the session on home still tells the panel the route (the 2026-10-12 live run)',
+    script: (r) => {
+      toReloading(r, 'probe').send(tab('loading', HOME), tab('complete', HOME), { type: 'agentInjected' });
+      r.send(report({ isMobile: false, inner: { w: 1512, h: 902 }, portrait: false, storyInput: 'absent' }));
+    },
     phase: 'closing',
     error: 'DESKTOP_SHELL',
-    injects: 0,
+    check: (r) => {
+      // Sent from `closing`, which has no route of its own: the decision carries it (Page row "/ (home…)").
+      expect(r.lastStatus).toMatchObject({ route: 'homeOnly', path: '/', c4: 'unknown' });
+      expect(lastRecord(r)?.route).toBe('homeOnly');
+    },
+  },
+  {
+    name: 'P3: swIntercepted unknown (no timeline) never fails',
+    script: (r) => toReport(r).send(report({ swIntercepted: 'unknown' })),
+    phase: 'injecting',
+    injects: 1,
   },
   {
     name: 'first probe: is_mobile unknown does not fail (C1 missing)',
@@ -705,7 +905,7 @@ const ROWS: Row[] = [
     name: 'NOT_LOGGED_IN on the first load: closes at once, no reload, no lock',
     script: (r) => {
       r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', LOGIN));
+      r.send(MEASURED, FITTED, tab('loading', LOGIN));
     },
     phase: 'closing',
     error: 'NOT_LOGGED_IN',
@@ -724,10 +924,11 @@ const ROWS: Row[] = [
     name: 'landscape: refits once (measure, one update), re-probes, then H1',
     script: (r) => {
       toReport(r).send(report({ portrait: false }));
-      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'measureTab', tabId: TAB, windowId: WIN }]);
+      // AL-3: the refit reads the window once (it is not new; the kill switch is armed).
+      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'measureTab', tabId: TAB, windowId: WIN, settle: false }]);
       r.send(MEASURED);
       expect(types(r.steps.at(-1)?.effects ?? [])).toEqual(['updateWindow']);
-      r.send({ type: 'windowFitted' });
+      r.send(FITTED);
       expect(r.steps.at(-1)?.effects.some(isProbeCmd)).toBe(true);
       r.send(report());
     },
@@ -741,7 +942,7 @@ const ROWS: Row[] = [
   {
     name: 'landscape twice → LANDSCAPE, no second refit',
     script: (r) => {
-      toReport(r).send(report({ portrait: false }), MEASURED, { type: 'windowFitted' }, report({ portrait: false }));
+      toReport(r).send(report({ portrait: false }), MEASURED, FITTED, report({ portrait: false }));
     },
     phase: 'closing',
     error: 'LANDSCAPE',
@@ -754,7 +955,13 @@ const ROWS: Row[] = [
     phase: 'awaitingPick',
     error: 'INPUT_MISSING',
     injects: 0,
-    check: (r) => expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0]),
+    check: (r) => {
+      // P5: the one input wait started the watch (no deadline); H0 keeps it running.
+      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0]);
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS });
+      expect(lastRecord(r)).toBeUndefined();
+      expect(r.lastStatus).toMatchObject({ c4: 'fail' });
+    },
   },
   {
     name: 'accept drift → H0',
@@ -837,7 +1044,7 @@ const ROWS: Row[] = [
     name: 'challenge on the very first load → kill, no reload',
     script: (r) => {
       r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', CHALLENGE));
+      r.send(MEASURED, FITTED, tab('loading', CHALLENGE));
     },
     phase: 'closing',
     error: 'KILLED_CHALLENGE',
@@ -879,11 +1086,73 @@ const ROWS: Row[] = [
     lacks: ['lockMsite', 'closeWindow'],
   },
   {
-    name: 'SW_TOOK_CONTROL mid-session → close, no lock',
-    script: (r) => toShare(r).send(agent('sw-controller-change')),
+    name: 'P2: a service worker taking control mid-session is counted on the record, never fatal',
+    script: (r) => toShare(r).send(agent('sw-controller-change'), agent('sw-controller-change')),
+    phase: 'awaitingShare',
+    error: null,
+    lacks: ['closeWindow', 'lockMsite'],
+    check: (r) => {
+      expect(r.state).toMatchObject({ swControllerChanges: 2 });
+      r.send(tab(undefined, HOME));
+      expect(lastRecord(r)).toMatchObject({ outcome: 'posted-confirmed', swControllerChanges: 2 });
+    },
+  },
+  {
+    name: 'P3: the watch reports an intercepted request mid-session → SW_INTERCEPTS, close, no lock',
+    script: (r) => toShare(r).send(agent('sw-intercepted')),
     phase: 'closing',
-    error: 'SW_TOOK_CONTROL',
+    error: 'SW_INTERCEPTS',
+    has: ['closeWindow'],
     lacks: ['lockMsite'],
+    check: (r) => expect(r.steps.at(-1)?.effects[0]?.type).toBe('closeWindow'),
+  },
+  {
+    name: 'AF-2: an interception the watch saw after the probe is on the status’s probe and the record (preflight)',
+    opts: { settings: { assistedInsert: false } },
+    script: (r) => {
+      // H0 from home: the deciding probe saw no interception; the watch does later.
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe(), agent('sw-intercepted'));
+    },
+    phase: 'closing',
+    error: 'SW_INTERCEPTS',
+    check: (r) => {
+      const closing = r.statuses.find((st) => st.phase === 'closing');
+      expect(closing?.probe).toMatchObject({ swIntercepted: true, storyInput: 'present' });
+      // No `c4` on it: the Story input row keeps the decision it showed.
+      expect(closing?.c4).toBeUndefined();
+      expect(lastRecord(r)).toMatchObject({
+        outcome: 'failed:SW_INTERCEPTS',
+        probe: { swIntercepted: true },
+        preflight: { swIntercepted: true, C4: 'pass' },
+      });
+    },
+  },
+  {
+    name: 'AF-2: after composer-ready the C8 report is the one shown, with the tripwire set; both probes are recorded so',
+    script: (r) =>
+      toShare(r).send(
+        report({ canvas: { w: 1080, h: 1920, css: { x: 0, y: 0, w: 511, h: 909 } } }),
+        agent('sw-intercepted'),
+      ),
+    phase: 'closing',
+    error: 'SW_INTERCEPTS',
+    check: (r) => {
+      const closing = r.statuses.find((st) => st.phase === 'closing');
+      expect(closing?.probe).toMatchObject({ swIntercepted: true, canvas: { w: 1080 } });
+      expect(lastRecord(r)).toMatchObject({
+        probe: { swIntercepted: true },
+        readyProbe: { swIntercepted: true },
+        preflight: { swIntercepted: true },
+      });
+    },
+  },
+  {
+    name: 'P3: an interception reported after the composer was left changes nothing (an upload may run)',
+    script: (r) => toShareRehearsalOff(r).send(tab(undefined, HOME), agent('sw-intercepted')),
+    phase: 'finished',
+    lacks: ['closeWindow'],
+    check: (r) => expect(r.state).toMatchObject({ holdOpen: true }),
   },
 
   // AM2: every later document load re-probes.
@@ -911,13 +1180,22 @@ const ROWS: Row[] = [
     },
   },
   {
-    name: 'AM2: a later load served by the SW → DESKTOP_SHELL',
+    name: 'AM2/P3: a later load whose requests a worker handled → SW_INTERCEPTS',
     script: (r) => {
       toPick(r).send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), { type: 'agentInjected' });
-      r.send(report({ swControlled: true, storyInput: 'absent' }));
+      r.send(report({ swIntercepted: true, navType: 'navigate', storyInput: 'absent' }));
     },
     phase: 'closing',
-    error: 'DESKTOP_SHELL',
+    error: 'SW_INTERCEPTS',
+  },
+  {
+    name: 'AM2/P1: a later load that is merely SW-controlled (no interception) resumes as H0',
+    script: (r) => {
+      toPick(r).send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), { type: 'agentInjected' });
+      r.send(report({ swControlled: true, navType: 'navigate', storyInput: 'absent' }));
+    },
+    phase: 'awaitingPick',
+    error: 'INPUT_MISSING',
   },
   {
     name: 'AM2: a passing re-probe during injecting resumes as H0 (no re-inject, no upgrade)',
@@ -952,7 +1230,7 @@ const ROWS: Row[] = [
     name: "reload race: the SW-served first load's complete is not probed",
     script: (r) => {
       r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL));
+      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL));
       expect(r.phase).toBe('reloading');
       r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL));
     },
@@ -968,6 +1246,9 @@ const ROWS: Row[] = [
     name: 'homeOnly route: H0 "tap + → Story"; / is not "composer left" before the composer',
     script: (r) => {
       toReloading(r).send(tab('complete', HOME), { type: 'agentInjected' }, report({ storyInput: 'absent' }));
+      // P5: on home the input may mount after hydration: one wait, then H0.
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput', route: 'homeOnly' });
+      r.send(INPUT_WAITED);
       expect(r.state).toMatchObject({ phase: 'awaitingPick', route: 'homeOnly', composerReached: false });
       expect(r.lastStatus).toMatchObject({ route: 'homeOnly', error: 'INPUT_MISSING' });
       r.send(tab('complete', HOME), agent('composer-left'));
@@ -1057,7 +1338,7 @@ const ROWS: Row[] = [
     name: 'AM17: the first load redirected to /accounts/suspended → kill, no reload',
     script: (r) => {
       r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', SUSPENDED));
+      r.send(MEASURED, FITTED, tab('loading', SUSPENDED));
     },
     phase: 'closing',
     error: 'KILLED_CHALLENGE',
@@ -1068,7 +1349,7 @@ const ROWS: Row[] = [
     name: 'AM17: an unknown www page on the first load → UNEXPECTED_PAGE, no reload, no lock',
     script: (r) => {
       r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', CONSENT));
+      r.send(MEASURED, FITTED, tab('loading', CONSENT));
     },
     phase: 'closing',
     error: 'UNEXPECTED_PAGE',
@@ -1215,7 +1496,7 @@ const ROWS: Row[] = [
     script: (r) => {
       r.send(startEv('post', SCREEN, false));
       r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
+      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
       r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report(), { type: 'agentGetFile' });
       r.send(agent('composer-ready'), tab(undefined, HOME));
       expect(r.state).toMatchObject({ phase: 'finished', holdOpen: true, detectedPosted: true });
@@ -1235,8 +1516,8 @@ const ROWS: Row[] = [
     script: (r) => {
       r.send(startEv('post', SCREEN, false));
       r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
-      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report({ storyInput: 'absent' }));
+      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
+      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report({ storyInput: 'absent' }), INPUT_WAITED);
       r.send(agent('composer-ready'), agent('composer-left'));
       r.send({ type: 'outcome', handoffId: 'hof_u1', posted: false });
     },
@@ -1253,8 +1534,8 @@ const ROWS: Row[] = [
     script: (r) => {
       r.send(startEv('post', SCREEN, false));
       r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
-      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report({ storyInput: 'absent' }));
+      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
+      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report({ storyInput: 'absent' }), INPUT_WAITED);
       r.send(agent('composer-ready'), tab(undefined, HOME));
       r.tick(INACTIVITY_TIMEOUT_MS).send({ type: 'timer', timer: 'inactivity' });
     },
@@ -1267,7 +1548,7 @@ const ROWS: Row[] = [
     script: (r) => {
       r.send(startEv('post', SCREEN, false));
       r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' }, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
+      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
       r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report(), { type: 'agentGetFile' });
       r.send(tab(undefined, HOME));
     },
@@ -1298,7 +1579,7 @@ const ROWS: Row[] = [
     script: (r) => {
       toReloading(r).send(tab('complete', COMPOSER_URL), tab(undefined, HOME));
       expect(r.state).toMatchObject({ phase: 'probing', route: 'homeOnly' });
-      r.send({ type: 'agentInjected' }, report({ storyInput: 'absent' }));
+      r.send({ type: 'agentInjected' }, report({ storyInput: 'absent' }), INPUT_WAITED);
     },
     phase: 'awaitingPick',
     error: 'INPUT_MISSING',
@@ -1317,6 +1598,7 @@ const ROWS: Row[] = [
     name: 'AM18: a pushState home during the first probe (status loading) → re-probed, H0 homeOnly',
     script: (r) => {
       toReport(r).send(tab('loading', HOME), tab('complete', HOME), injected(false), report({ storyInput: 'absent' }));
+      r.send(INPUT_WAITED);
     },
     phase: 'awaitingPick',
     check: (r) => expect(r.state).toMatchObject({ route: 'homeOnly', level: 'H0' }),
@@ -1574,6 +1856,577 @@ const ROWS: Row[] = [
     has: ['openWindow'],
   },
 
+  // W2/W3 (Arc, 2026-10-12): a verified fit, one retry, then the guided resize.
+  {
+    name: 'W2 hardening: the runner re-applied the box within the first update (Arc dropped the early ones) → navigating, no retry',
+    script: (r) => {
+      toArcFit(r);
+      const f = fitFor();
+      r.send(verify(f, true, ARC_TAB, 3));
+    },
+    phase: 'navigating',
+    has: ['navigate'],
+    check: (r) => {
+      expect(r.count((e) => e.type === 'updateWindow')).toBe(1);
+      expect(r.count((e) => e.type === 'armTimer' && e.timer === 'fitRetry')).toBe(0);
+      if (r.state.phase === 'idle') throw new Error('unreachable');
+      expect(r.state.win).toMatchObject({ attempts: 1, created: ARC_WINDOW });
+      expect(r.state.win.updates).toEqual([expect.objectContaining({ step: 'fit', fitted: true, applied: 3 })]);
+      r.send({ type: 'cancel' });
+      expect(lastRecord(r)?.window?.updates[0]?.applied).toBe(3);
+    },
+  },
+  {
+    name: 'W2 hardening: an implausible `applied` is recorded as one windows.update',
+    script: (r) => {
+      toArcFit(r);
+      r.send(verify(fitFor(), true, ARC_TAB, Number.NaN));
+    },
+    phase: 'navigating',
+    check: (r) => {
+      if (r.state.phase === 'idle') throw new Error('unreachable');
+      expect(r.state.win.updates[0]?.applied).toBe(1);
+    },
+  },
+  {
+    name: 'W1/W2: Arc ignored the create; the first update does not verify; one retry 300 ms later fits → navigating',
+    script: (r) => {
+      toArcFit(r);
+      const f = fitFor();
+      // 524x932 inner (+47 frame), centred on the ultrawide the editor is on.
+      expect(f.outer).toEqual({ left: 2970, top: -212, width: 524, height: 979 });
+      expect(r.steps.at(-1)?.effects).toEqual([
+        { type: 'updateWindow', windowId: WIN, tabId: TAB, box: f.outer, inner: { w: 524, h: 932 }, reapply: true },
+      ]);
+      expect(r.send(verify(f, false))).toEqual([{ type: 'armTimer', timer: 'fitRetry', ms: FIT_RETRY_DELAY_MS }]);
+      expect(r.state).toMatchObject({ phase: 'fitting', fitStep: 'retryWait' });
+      expect(r.tick(FIT_RETRY_DELAY_MS).send(RETRY)).toEqual([
+        { type: 'updateWindow', windowId: WIN, tabId: TAB, box: f.outer, inner: f.inner, reapply: true },
+      ]);
+      r.send(verify(f, true));
+    },
+    phase: 'navigating',
+    has: ['navigate'],
+    check: (r) => {
+      const guess = firstGuess(OWNER_UW);
+      if (!guess.ok) throw new Error('fixture');
+      expect(r.state).toMatchObject({
+        win: {
+          screen: OWNER_UW,
+          requested: guess.outer,
+          created: ARC_WINDOW,
+          createdTab: ARC_TAB,
+          frameDelta: ARC_DELTA,
+          attempts: 2,
+          manualResize: false,
+          finalTab: { w: 524, h: 932 },
+          zoom: 1,
+        },
+      });
+      if (r.state.phase === 'idle') throw new Error('unreachable');
+      expect(r.state.win.updates.map((u) => [u.step, u.fitted])).toEqual([
+        ['fit', false],
+        ['retry', true],
+      ]);
+      // The record shows created ≠ requested and the final fit (E2E a).
+      r.send({ type: 'cancel' });
+      expect(lastRecord(r)?.window).toMatchObject({ created: ARC_WINDOW, attempts: 2, finalTab: { w: 524, h: 932 } });
+    },
+  },
+  {
+    name: 'W2: the retry misses but the tab is usable anyway (600x900) → navigating, no guided resize',
+    script: (r) => {
+      const f = fitFor();
+      toArcFit(r).send(verify(f, false), RETRY, verify(f, false, { w: 600, h: 900 }));
+    },
+    phase: 'navigating',
+    has: ['navigate'],
+    lacks: ['readSize'],
+    check: (r) =>
+      expect(r.state).toMatchObject({ win: { attempts: 2, manualResize: false, finalTab: { w: 600, h: 900 } } }),
+  },
+  {
+    name: 'W2: never a third fit update: stray retries and verifications change nothing',
+    script: (r) => {
+      const f = fitFor();
+      toArcFit(r).send(RETRY, verify(f, false), RETRY, RETRY, verify(f, true), RETRY, verify(f, false));
+    },
+    phase: 'navigating',
+    check: (r) => {
+      expect(r.count((e) => e.type === 'updateWindow')).toBe(2);
+      expect(r.count((e) => e.type === 'navigate')).toBe(1);
+    },
+  },
+  {
+    name: 'W2/W3: both updates ignored (1512x902) → resizing: deadline and poll armed, the size shown as not usable',
+    script: (r) => toResizing(r),
+    phase: 'resizing',
+    lacks: ['navigate'],
+    check: (r) => {
+      const effects = r.steps.at(-1)?.effects ?? [];
+      expect(effects.slice(0, 2)).toEqual([
+        { type: 'armTimer', timer: 'resizeDeadline', ms: RESIZE_TIMEOUT_MS },
+        { type: 'armTimer', timer: 'resizePoll', ms: RESIZE_POLL_MS },
+      ]);
+      expect(r.lastStatus).toMatchObject({
+        phase: 'resizing',
+        resize: { tab: ARC_TAB, ok: false, until: T0 + RESIZE_TIMEOUT_MS, maxW: 767 },
+        window: { attempts: 2, manualResize: false },
+      });
+    },
+  },
+  {
+    name: 'AF-8: at another default zoom the resize status names the width its ✓ uses (767 × zoom)',
+    script: (r) => {
+      const f = fitFor(OWNER_UW, ARC_DELTA);
+      r.send(startEv('post', OWNER_UW), { type: 'windowCreated', windowId: WIN, tabId: TAB });
+      r.send({ type: 'rulesInstalled' }, { ...ARC_MEASURED, zoom: 1.1 } as HandoffEvent);
+      const up = r.steps.at(-1)?.effects[0];
+      if (up?.type !== 'updateWindow') throw new Error('expected the fit');
+      const missed = verify(f, false);
+      if (missed.type !== 'windowFitted') throw new Error('unreachable');
+      const zoomed: HandoffEvent = { ...missed, box: up.box, target: up.inner };
+      r.send(zoomed, RETRY, zoomed);
+      expect(r.lastStatus).toMatchObject({ phase: 'resizing', resize: { ok: false, maxW: 843 } });
+      // 800 window px at 110% is 727 CSS px: usable, and the status says so with the same limit.
+      r.send(sized(800, 900));
+    },
+    phase: 'navigating',
+    check: (r) => expect(r.lastStatus).toMatchObject({ resize: { tab: { w: 800, h: 900 }, ok: true, maxW: 843 } }),
+  },
+  {
+    name: 'W3: windows.onBoundsChanged reads the size; a usable one → navigating, timers cleared, manual resize recorded',
+    script: (r) => {
+      toResizing(r);
+      expect(r.send({ type: 'boundsChanged', windowId: WIN })).toEqual([
+        { type: 'readSize', windowId: WIN, tabId: TAB },
+      ]);
+      expect(r.send({ type: 'boundsChanged', windowId: 99 })).toEqual([]);
+      // Still too wide: only the indicator moves.
+      expect(types(r.send(sized(900, 902)))).toEqual(['notifyEditor']);
+      expect(r.lastStatus).toMatchObject({ phase: 'resizing', resize: { tab: { w: 900, h: 902 }, ok: false } });
+      expect(r.send(sized(900, 902))).toEqual([]);
+      const go = r.send(sized(493, 820));
+      expect(go.slice(0, 4)).toEqual([
+        { type: 'clearTimer', timer: 'resizeDeadline' },
+        { type: 'clearTimer', timer: 'resizePoll' },
+        { type: 'navigate', tabId: TAB, url: COMPOSER_URL },
+        { type: 'armTimer', timer: 'navigation', ms: NAVIGATION_TIMEOUT_MS },
+      ]);
+    },
+    phase: 'navigating',
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ phase: 'navigating', resize: { tab: { w: 493, h: 820 }, ok: true } });
+      expect(r.state).toMatchObject({ win: { manualResize: true, finalTab: { w: 493, h: 820 }, attempts: 2 } });
+    },
+  },
+  {
+    name: 'W3: the poll reads the size every second and re-arms; landscape or too short sizes never pass',
+    script: (r) => {
+      toResizing(r);
+      expect(r.tick(RESIZE_POLL_MS).send({ type: 'timer', timer: 'resizePoll' })).toEqual([
+        { type: 'readSize', windowId: WIN, tabId: TAB },
+        { type: 'armTimer', timer: 'resizePoll', ms: RESIZE_POLL_MS },
+      ]);
+      r.send(sized(700, 650), sized(600, 500), sized(500, 600));
+    },
+    phase: 'resizing',
+    lacks: ['navigate'],
+  },
+  {
+    name: 'W3: no usable size within 3 minutes → WINDOW_NOT_FITTED: close, no lock, never navigated',
+    script: (r) => toResizing(r).tick(RESIZE_TIMEOUT_MS).send({ type: 'timer', timer: 'resizeDeadline' }),
+    phase: 'closing',
+    error: 'WINDOW_NOT_FITTED',
+    has: ['closeWindow'],
+    lacks: ['navigate', 'lockMsite', 'hardReload'],
+    check: (r) => {
+      expect(lastOutcome(r)).toBe('failed:WINDOW_NOT_FITTED');
+      expect(lastRecord(r)?.window).toMatchObject({ attempts: 2, manualResize: false, finalTab: ARC_TAB });
+      // Stale timers after the close do nothing.
+      expect(r.send({ type: 'timer', timer: 'resizePoll' })).toEqual([]);
+    },
+  },
+  {
+    name: 'W3: a guarded E2E flag shortens the deadline',
+    opts: { resizeTimeoutMs: 2000 },
+    script: (r) => toResizing(r),
+    phase: 'resizing',
+    check: (r) => {
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'resizeDeadline', ms: 2000 });
+      expect(r.state).toMatchObject({ resizeUntil: T0 + 2000 });
+    },
+  },
+  {
+    name: 'W3: a live build ignores the E2E deadline flag',
+    opts: { guarded: false, resizeTimeoutMs: 2000 },
+    script: (r) => toResizing(r),
+    phase: 'resizing',
+    check: (r) =>
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'resizeDeadline', ms: RESIZE_TIMEOUT_MS }),
+  },
+  {
+    name: 'W3: cancel while resizing closes the popup (closeWindow first)',
+    script: (r) => toResizing(r).send({ type: 'cancel' }),
+    phase: 'closing',
+    has: ['closeWindow'],
+    check: (r) => {
+      expect(r.steps.at(-1)?.effects[0]?.type).toBe('closeWindow');
+      expect(lastOutcome(r)).toBe('abandoned');
+    },
+  },
+  {
+    name: 'W2: a failed windows.update while fitting closes the popup (AGENT_UNREACHABLE), never navigates',
+    script: (r) => toArcFit(r).send({ type: 'effectFailed', effect: 'updateWindow', message: 'No window' }),
+    phase: 'closing',
+    error: 'AGENT_UNREACHABLE',
+    lacks: ['navigate'],
+  },
+  {
+    name: 'W2: a failed size read while resizing is ignored (the window going away ends it)',
+    script: (r) => toResizing(r).send({ type: 'effectFailed', effect: 'readSize', message: 'No tab' }),
+    phase: 'resizing',
+  },
+
+  // P4: the composer must be in msite's mobile layout (≤ 767 CSS px) and portrait.
+  {
+    name: 'P4: the failed live run’s probe (1512x902, SW-controlled, mobile) now refits instead of DESKTOP_SHELL',
+    script: (r) => {
+      toReport(r).send(
+        report({
+          inner: { w: 1512, h: 902 },
+          portrait: false,
+          swControlled: true,
+          storyInput: 'absent',
+          acceptOk: false,
+          acceptSeen: [],
+        }),
+      );
+      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'measureTab', tabId: TAB, windowId: WIN, settle: false }]);
+      r.send(MEASURED, FITTED, report({ swControlled: true }));
+    },
+    phase: 'injecting',
+    injects: 1,
+    check: (r) => expect(r.count((e) => e.type === 'updateWindow')).toBe(2),
+  },
+  {
+    name: 'P4: a portrait composer wider than 767 CSS px refits once, then still too wide → LAYOUT_TOO_WIDE',
+    script: (r) => {
+      const wide = { inner: { w: 800, h: 1200 }, portrait: true };
+      toReport(r).send(report(wide), MEASURED, FITTED, report(wide));
+    },
+    phase: 'closing',
+    error: 'LAYOUT_TOO_WIDE',
+    injects: 0,
+    lacks: ['lockMsite'],
+    check: (r) => {
+      expect(lastOutcome(r)).toBe('failed:LAYOUT_TOO_WIDE');
+      expect(lastRecord(r)?.preflight?.C4).toBe('unknown');
+      // W5: the refit is on the record too.
+      expect(lastRecord(r)?.window?.updates.map((u) => u.step)).toEqual(['fit', 'refit']);
+    },
+  },
+  {
+    name: 'P4: the refit uses the composer page’s zoom to keep the width at or below 767 CSS px',
+    opts: { settings: { composerProfile: { innerW: 820, innerH: 1000, capturedAt: 1 } } },
+    script: (r) => {
+      toReport(r).send(report({ inner: { w: 820, h: 1000 } }));
+      r.send({
+        type: 'tabMeasured',
+        inner: { w: 738, h: 900 },
+        outer: { left: 0, top: 33, width: 738, height: 932 },
+        zoom: 0.9,
+      });
+    },
+    phase: 'probing',
+    check: (r) => {
+      const up = r.steps.at(-1)?.effects[0];
+      if (up?.type !== 'updateWindow') throw new Error('expected the refit update');
+      expect(up.inner.w).toBeLessThanOrEqual(Math.floor(767 * 0.9));
+      // After the navigation: one windows.update, never the pre-navigation re-applies (Instagram sees it).
+      expect(up.reapply).toBe(false);
+      expect(r.state).toMatchObject({ step: 'refitUpdate', win: { zoom: 0.9 } });
+    },
+  },
+
+  // P5: on `/` msite mounts the header input after hydration; H1 into it opens the composer by SPA.
+  {
+    name: 'P5: home without the input, it appears → one more probe → H1 into the header input → SPA to the composer → posted',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput', route: 'homeOnly', inputWaitUsed: true });
+      expect(r.steps.at(-1)?.effects).toEqual([
+        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/watch', readyTimeoutMs: 0 } },
+        { type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS },
+      ]);
+      expect(r.send(agent('input-appeared'))).toEqual([
+        { type: 'clearTimer', timer: 'inputWait' },
+        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } },
+      ]);
+      r.send(homeProbe());
+      expect(r.state).toMatchObject({ phase: 'injecting', level: 'H1', injectAt: 'home' });
+      // Title and favicon updates on home before the insert lands are not "composer left".
+      r.send({ type: 'agentGetFile' }, tab(undefined, HOME), tab('complete', HOME));
+      expect(r.state).toMatchObject({ phase: 'injecting', injectAt: 'home' });
+      // The insert starts msite's story session: an SPA navigation to the composer (AM16).
+      r.send(tab('loading', COMPOSER_URL), agent('composer-ready'), tab('complete', COMPOSER_URL), injected(false));
+      expect(r.state).toMatchObject({ phase: 'awaitingShare', level: 'H1', injectAt: 'composer' });
+      r.send(tab(undefined, HOME));
+    },
+    phase: 'finished',
+    injects: 1,
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ detectedPosted: true, route: 'homeOnly' });
+      expect(lastRecord(r)).toMatchObject({
+        outcome: 'posted-confirmed',
+        level: 'H1',
+        route: 'homeOnly',
+        preflight: { C4: 'pass', C5: 'fail' },
+      });
+    },
+  },
+  {
+    name: 'P5: no input within 6 s → H0 INPUT_MISSING with "tap + → Story" (homeOnly); C4 fail',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
+      r.tick(INPUT_WAIT_MS).send(INPUT_WAITED);
+    },
+    phase: 'awaitingPick',
+    error: 'INPUT_MISSING',
+    injects: 0,
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ route: 'homeOnly', c4: 'fail', path: '/' });
+      // No second watch: the one started for the wait keeps running.
+      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0]);
+    },
+  },
+  {
+    name: 'P5: hydration’s replaceState during the wait resumes it (watch restarted, the rest re-armed)',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent' }));
+      r.tick(2000).send(tab('loading', `${HOME}?hl=en`), tab('complete', `${HOME}?hl=en`));
+      // The deadline passing while the background re-injects does not end the wait by itself.
+      expect(r.send(INPUT_WAITED)).toEqual([]);
+      expect(r.send(injected(false))).toEqual([
+        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/watch', readyTimeoutMs: 0 } },
+        { type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS - 2000 },
+      ]);
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput' });
+      r.send(agent('input-appeared'), homeProbe());
+    },
+    phase: 'injecting',
+    injects: 1,
+    check: (r) => expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(2),
+  },
+  {
+    name: 'P5: a same-document load that outlasts the wait: one more probe decides (no new wait)',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent' }), tab('loading', HOME), tab('complete', HOME));
+      r.tick(INPUT_WAIT_MS).send(injected(false));
+      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } }]);
+      r.send(homeProbe({ storyInput: 'absent' }));
+    },
+    phase: 'awaitingPick',
+    error: 'INPUT_MISSING',
+  },
+  {
+    name: 'P5: a new document during the wait is probed strictly; the wait went with the old one',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent' }), tab('loading', HOME), tab('complete', HOME));
+      r.send(injected(true));
+      expect(r.state).toMatchObject({ step: 'awaitReport', strict: true, inputWaitUntil: null });
+      r.send(homeProbe({ storyInput: 'absent' }));
+    },
+    phase: 'awaitingPick',
+    error: 'INPUT_MISSING',
+    check: (r) => expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(1),
+  },
+  {
+    name: 'P5: one wait only: the re-probe after input-appeared still finds none → H0 at once',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(
+        homeProbe({ storyInput: 'absent' }),
+        agent('input-appeared'),
+        homeProbe({ storyInput: 'absent' }),
+      );
+    },
+    phase: 'awaitingPick',
+    error: 'INPUT_MISSING',
+    check: (r) => expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(1),
+  },
+  {
+    name: 'P5: an insert on home that never opens the composer is not engaged: unconfirmed → H0, home is not C9',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe(), { type: 'agentGetFile' }, agent('inject-unconfirmed'), tab(undefined, HOME));
+    },
+    phase: 'awaitingPick',
+    error: 'INJECTION_IGNORED',
+    check: (r) => expect(r.state).toMatchObject({ insertDispatched: false, injectAt: 'home' }),
+  },
+  // AL-1/AF-1: every first decision that reads C4 waits once for a late story input, not only H1.
+  {
+    name: 'AL-1: probe mode on home without the input waits once; it appears → one more probe → probe-done, C4 pass',
+    script: (r) => {
+      r.send(startEv('probe'), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
+      r.send(MEASURED, FITTED);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput', inputWaitUsed: true, c4Reached: false });
+      // A watch is not an inject: probe mode only watches for the input.
+      expect(r.steps.at(-1)?.effects).toEqual([
+        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/watch', readyTimeoutMs: 0 } },
+        { type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS },
+      ]);
+      expect(r.send(agent('input-appeared'))).toEqual([
+        { type: 'clearTimer', timer: 'inputWait' },
+        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } },
+      ]);
+      r.send(homeProbe());
+    },
+    phase: 'closing',
+    error: null,
+    injects: 0,
+    lacks: ['serveFile'],
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ c4: 'pass', path: '/', route: 'homeOnly' });
+      expect(r.lastStatus?.probe).toMatchObject({ storyInput: 'present' });
+      expect(lastRecord(r)).toMatchObject({
+        mode: 'probe',
+        outcome: 'not-posted',
+        probe: { storyInput: 'present' },
+        preflight: { C4: 'pass', C5: 'fail' },
+      });
+    },
+  },
+  {
+    name: 'AL-1: probe mode, no input within 6 s → probe-done on that report: C4 fail, checked (no "not checked")',
+    script: (r) => {
+      r.send(startEv('probe'), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
+      r.send(MEASURED, FITTED);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
+      r.tick(INPUT_WAIT_MS).send(INPUT_WAITED);
+    },
+    phase: 'closing',
+    error: null,
+    injects: 0,
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ c4: 'fail', path: '/' });
+      expect(lastRecord(r)).toMatchObject({ outcome: 'not-posted', preflight: { C4: 'fail' } });
+      expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(1);
+    },
+  },
+  {
+    name: 'AF-1: H1 off (assisted insert off) on home without the input waits once; it appears → H0 with no error, C4 pass',
+    opts: { settings: { assistedInsert: false } },
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput' });
+      r.send(agent('input-appeared'), homeProbe());
+    },
+    phase: 'awaitingPick',
+    error: null,
+    injects: 0,
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ c4: 'pass', route: 'homeOnly', level: 'H0' });
+      // The re-probe's H0 restarts the watch: harmless, and the document has one either way.
+      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0, 0]);
+    },
+  },
+  {
+    name: 'AF-1: H1 off, no input within 6 s → H0 with no error on that report (C4 fail); the wait’s watch keeps running',
+    opts: { settings: { assistedInsert: false } },
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
+      r.tick(INPUT_WAIT_MS).send(INPUT_WAITED);
+    },
+    phase: 'awaitingPick',
+    error: null,
+    injects: 0,
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ c4: 'fail', route: 'homeOnly', level: 'H0' });
+      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0]);
+      // The owner picks by hand from home as usual.
+      r.send(tab(undefined, COMPOSER_URL), agent('composer-ready'));
+      expect(r.phase).toBe('awaitingShare');
+    },
+  },
+  {
+    name: 'P5: a session that ends during the wait records C4 unknown (the input was not checked to the end)',
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }), { type: 'cancel' });
+      expect(lastRecord(r)).toMatchObject({ outcome: 'abandoned', preflight: { C4: 'unknown' } });
+      // The deadline firing while the window closes changes nothing; the cleanup clears it.
+      expect(r.send(INPUT_WAITED)).toEqual([]);
+      r.send({ type: 'windowRemoved', windowId: WIN });
+    },
+    phase: 'idle',
+    check: (r) => expect(r.steps.at(-1)?.effects).toContainEqual({ type: 'clearTimer', timer: 'inputWait' }),
+  },
+  {
+    name: 'P5: an input present at the first probe, or a decision before C4, never waits',
+    opts: { settings: { assistedInsert: false } },
+    script: (r) => {
+      DRIVE_NAVIGATING(r);
+      toHomeReport(r).send(homeProbe());
+    },
+    phase: 'awaitingPick',
+    error: null,
+    check: (r) => {
+      expect(r.effects.some((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(false);
+      const probe = toReport(new Run(), 'probe').send(report());
+      expect(probe.some((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(false);
+      const wide = toReport(new Run(), 'probe').send(report({ storyInput: 'absent', inner: { w: 900, h: 1300 } }));
+      expect(wide.some((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(false);
+    },
+  },
+  {
+    name: 'P5: a stray inputWait or input-appeared outside the wait does nothing',
+    script: (r) => toInjecting(r).send(INPUT_WAITED, agent('input-appeared')),
+    phase: 'injecting',
+    check: (r) => expect(r.steps.slice(-2).every((st) => st.effects.length === 0)).toBe(true),
+  },
+
+  // P6: the editor's browser flavour.
+  {
+    name: 'P6: a guarded build refuses when the editor reports Arc → BRANDED_BROWSER, no window',
+    script: (r) => r.send({ ...startEv(), browser: 'arc' } as HandoffEvent),
+    phase: 'idle',
+    error: 'BRANDED_BROWSER',
+    lacks: ['openWindow', 'noteOpen'],
+    check: (r) => expect(r.lastStatus).toMatchObject({ handoffId: null, detail: 'browser arc' }),
+  },
+  {
+    name: 'P6: a live build in Arc proceeds and records the flavour',
+    opts: { guarded: false },
+    script: (r) => {
+      r.send({ ...startEv(), browser: 'arc' } as HandoffEvent);
+      r.send({ type: 'cancel' });
+    },
+    phase: 'closing',
+    check: (r) => expect(lastRecord(r)).toMatchObject({ browser: 'arc', outcome: 'abandoned' }),
+  },
+
+  // U1: C4 is judged only when the decision reached it.
+  {
+    name: 'U1: DESKTOP_SHELL stops before the story input: the status and the record say C4 unknown',
+    script: (r) => toReport(r).send(report({ isMobile: false, storyInput: 'absent', acceptOk: false })),
+    phase: 'closing',
+    error: 'DESKTOP_SHELL',
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ c4: 'unknown' });
+      expect(lastRecord(r)?.preflight).toMatchObject({ C1: 'fail', C4: 'unknown' });
+    },
+  },
+
   // Probe mode.
   {
     name: 'probe mode: store the report, close, done; never injects or serves a file',
@@ -1714,7 +2567,7 @@ describe('U9 hand-off reducer: transition table', () => {
     fitting: (r) => r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' }),
     navigating: (r) => {
       r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, { type: 'windowFitted' });
+      r.send(MEASURED, FITTED);
     },
     reloading: (r) => toReloading(r),
     probing: (r) => toReport(r),
@@ -1759,7 +2612,7 @@ describe('U9 hand-off reducer: transition table', () => {
     for (const ev of [
       agent('input-appeared'),
       { type: 'rulesInstalled' },
-      { type: 'windowFitted' },
+      FITTED,
       { type: 'agentInjected' },
       { type: 'timer', timer: 'closeDelay' },
       tab('complete', COMPOSER_URL),
@@ -1812,6 +2665,301 @@ describe('U9 hand-off reducer: transition table', () => {
 });
 
 // ---------------------------------------------------------------------------------------
+// AM37 (2026-10-12): the portrait shim's reading (C3b) and SCREEN_LANDSCAPE.
+
+/** The records the run wrote, in order. */
+const written = (r: Run): HandoffRecord[] => r.effects.flatMap((e) => (e.type === 'writeRecord' ? [e.record] : []));
+
+/** Through the hard reload to the first probe on home (`/`, msite's usual landing), injected with `o`. */
+function toHomeShim(r: Run, o: PageOrientation, mode: 'post' | 'probe' = 'post'): Run {
+  r.send(startEv(mode), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
+  r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', HOME), tab('complete', HOME));
+  r.send(injectedWith(true, o));
+  return r;
+}
+
+/** The pick's (or the insert's) SPA navigation to the composer: a same-document load, `o` its reading. */
+const toComposer = (o: PageOrientation): HandoffEvent[] => [
+  tab('loading', COMPOSER_URL),
+  tab('complete', COMPOSER_URL),
+  injectedWith(false, o),
+];
+
+describe('U9 AM37: the composer’s screen-orientation gate (C3b) and SCREEN_LANDSCAPE', () => {
+  it('every report is stamped with the shim’s reading; the record’s preflight has C3b', () => {
+    const r = toHomeShim(new Run(), SHIM_INSTALLED);
+    // The agent's own report never carries it (normalizeProbeReport); the background adds it.
+    r.send(report());
+    expect(r.state).toMatchObject({ phase: 'injecting', pageOrientation: SHIM_INSTALLED });
+    expect(r.state.phase !== 'idle' && 'probe' in r.state ? r.state.probe?.orientation : null).toEqual(SHIM_INSTALLED);
+    expect(r.statuses.find((s) => s.probe)?.probe?.orientation).toEqual(SHIM_INSTALLED);
+    // The insert's SPA navigation reaches the composer; the shim is still in place there.
+    r.send({ type: 'agentGetFile' }, ...toComposer(SHIM_PRESENT), agent('composer-ready'));
+    expect(r.phase).toBe('awaitingShare');
+    // AM13's C8 report is stamped with the composer document's reading.
+    r.send(report({ canvas: { w: 1022, h: 1816, css: { x: 0, y: 0, w: 511, h: 908 } } }));
+    expect(r.state).toMatchObject({ readyProbe: { orientation: SHIM_PRESENT } });
+    r.send(tab(undefined, HOME));
+    const [rec] = written(r);
+    expect(rec?.outcome).toBe('posted-confirmed');
+    expect(rec?.preflight).toMatchObject({ C3: 'pass', C3b: 'pass' });
+    checkRun(r);
+  });
+
+  it('H0 from home, shim off: the pick reaches the composer while the page reads landscape → SCREEN_LANDSCAPE', () => {
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
+    // On home the composer is not mounted yet: the reading is recorded, the owner is asked to pick.
+    r.send(report());
+    expect(r.phase).toBe('awaitingPick');
+    expect(r.lastStatus?.probe?.orientation).toEqual(SHIM_OFF);
+    const out = r.send(...toComposer(SHIM_OFF));
+    expect(r.phase).toBe('closing');
+    expect(types(out)).toEqual(['closeWindow', 'notifyEditor', 'writeRecord']);
+    expect(r.lastStatus).toMatchObject({
+      error: 'SCREEN_LANDSCAPE',
+      detail: 'screen landscape-primary, portrait shim off',
+      probe: { orientation: SHIM_OFF },
+    });
+    const [rec] = written(r);
+    expect(rec).toMatchObject({
+      outcome: 'failed:SCREEN_LANDSCAPE',
+      level: 'H0',
+      detail: 'screen landscape-primary, portrait shim off',
+      probe: { orientation: SHIM_OFF },
+    });
+    // C3a passed (the + → Story session start reads the portrait viewport), C3b failed.
+    expect(rec?.preflight).toMatchObject({ C3: 'pass', C3b: 'fail' });
+    // A close, never a kill: no lock.
+    expect(r.count((e) => e.type === 'lockMsite')).toBe(0);
+    r.send({ type: 'windowRemoved', windowId: WIN });
+    expect(r.state).toMatchObject({ phase: 'idle', last: { outcome: 'failed:SCREEN_LANDSCAPE' } });
+    checkRun(r);
+  });
+
+  it('H1 on home, shim off: SCREEN_LANDSCAPE once the insert’s navigation reaches the composer; one inject', () => {
+    const r = toHomeShim(new Run(), SHIM_OFF);
+    r.send(report(), { type: 'agentGetFile' });
+    expect(r.phase).toBe('injecting');
+    r.send(...toComposer(SHIM_OFF));
+    expect(r.phase).toBe('closing');
+    expect(r.lastStatus?.error).toBe('SCREEN_LANDSCAPE');
+    expect(r.injects).toBe(1);
+    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE', level: 'H1' });
+    checkRun(r);
+  });
+
+  it('a composer-ready that came first (awaitingShare) still ends in SCREEN_LANDSCAPE at the composer', () => {
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
+    r.send(report(), agent('composer-ready'));
+    expect(r.phase).toBe('awaitingShare');
+    r.send(...toComposer(SHIM_OFF));
+    expect(r.phase).toBe('closing');
+    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE' });
+    checkRun(r);
+  });
+
+  it('with the shim in place the same navigation resumes the interrupted phase', () => {
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
+    r.send(report());
+    r.send(...toComposer(SHIM_PRESENT));
+    expect(r.phase).toBe('awaitingPick');
+    expect(r.state).toMatchObject({ pageOrientation: SHIM_PRESENT });
+    r.send(agent('composer-ready'));
+    expect(r.phase).toBe('awaitingShare');
+    checkRun(r);
+  });
+
+  it('the composer at the first probe (route direct), page reading landscape: row 5b, nothing inserted', () => {
+    const r = toReloading(new Run());
+    r.send(tab('complete', COMPOSER_URL), injectedWith(true, SHIM_OFF), report());
+    expect(r.phase).toBe('closing');
+    expect(r.injects).toBe(0);
+    expect(r.lastStatus).toMatchObject({
+      error: 'SCREEN_LANDSCAPE',
+      detail: 'screen landscape-primary, portrait shim off',
+      c4: 'unknown',
+    });
+    expect(written(r)[0]).toMatchObject({
+      outcome: 'failed:SCREEN_LANDSCAPE',
+      route: 'direct',
+      preflight: { C3b: 'fail', C4: 'unknown' },
+    });
+    checkRun(r);
+  });
+
+  it('probe mode on home records the reading (C3b) and finishes normally', () => {
+    const r = toHomeShim(new Run(), SHIM_OFF, 'probe');
+    r.send(report());
+    expect(r.phase).toBe('closing');
+    expect(r.lastStatus?.error).toBeUndefined();
+    expect(written(r)[0]).toMatchObject({ outcome: 'not-posted', preflight: { C3b: 'fail' } });
+    const ok = toHomeShim(new Run(), SHIM_INSTALLED, 'probe').send(report());
+    expect(ok.find((e) => e.type === 'writeRecord')).toMatchObject({ record: { preflight: { C3b: 'pass' } } });
+  });
+
+  it('a new document starts from its own reading; one injected without a reading forgets the old one', () => {
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
+    r.send(report());
+    // A full-document load (fresh agent) brings the shim's new reading with it.
+    r.send(tab('loading', HOME), tab('complete', HOME), injectedWith(true, SHIM_INSTALLED));
+    expect(r.state).toMatchObject({ phase: 'probing', pageOrientation: SHIM_INSTALLED });
+    r.send(tab('loading', HOME), tab('complete', HOME), { type: 'agentInjected', fresh: true });
+    expect(r.state).toMatchObject({ phase: 'probing', pageOrientation: null });
+    // The same document without a reading keeps the one it had (and home is no composer: no failure).
+    const same = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
+    same.send(report(), tab('loading', `${HOME}?x`), tab('complete', `${HOME}?x`), injected(false));
+    expect(same.state).toMatchObject({ phase: 'awaitingPick', pageOrientation: SHIM_OFF });
+    checkRun(same);
+  });
+
+  it('SCREEN_LANDSCAPE closes without a lock (§3.10 effect)', () => {
+    expect(ERROR_EFFECT.SCREEN_LANDSCAPE).toBe('close');
+  });
+
+  // SH-1 (2026-10-13): Instagram reads the orientation when the composer mounts (and on resize). A shim
+  // that installs itself only at the injection after the composer was entered came too late.
+  const LATE: PageOrientation = { ...SHIM_INSTALLED, afterComposerMount: true };
+  const LATE_DETAIL = 'screen portrait-primary, portrait shim installed after the composer mounted';
+
+  it('SH-1 (b): home read a portrait screen (nothing installed); by the pick it is landscape: installed on the composer → SCREEN_LANDSCAPE', () => {
+    const PORTRAIT: PageOrientation = { type: 'portrait-primary', shim: 'portrait' };
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), PORTRAIT);
+    r.send(report());
+    expect(r.phase).toBe('awaitingPick');
+    const out = r.send(...toComposer(SHIM_INSTALLED));
+    expect(r.phase).toBe('closing');
+    expect(types(out)).toEqual(['closeWindow', 'notifyEditor', 'writeRecord']);
+    expect(r.lastStatus).toMatchObject({
+      error: 'SCREEN_LANDSCAPE',
+      detail: LATE_DETAIL,
+      probe: { orientation: LATE },
+    });
+    const [rec] = written(r);
+    expect(rec).toMatchObject({
+      outcome: 'failed:SCREEN_LANDSCAPE',
+      level: 'H0',
+      detail: LATE_DETAIL,
+      probe: { orientation: LATE },
+      preflight: { C3: 'pass', C3b: 'fail' },
+    });
+    expect(r.count((e) => e.type === 'lockMsite')).toBe(0);
+    checkRun(r);
+  });
+
+  it('SH-1 (b): the same with H1 on home: the insert’s navigation reaches the composer, the shim installs only there', () => {
+    const r = toHomeShim(new Run(), { type: 'portrait-primary', shim: 'portrait' });
+    r.send(report(), { type: 'agentGetFile' });
+    expect(r.phase).toBe('injecting');
+    r.send(...toComposer(SHIM_INSTALLED));
+    expect(r.lastStatus).toMatchObject({ error: 'SCREEN_LANDSCAPE', detail: LATE_DETAIL });
+    expect(r.injects).toBe(1);
+    checkRun(r);
+  });
+
+  it('SH-1: no late shim when it was there before the composer (present), or the screen reads portrait there', () => {
+    for (const there of [SHIM_PRESENT, { type: 'portrait-primary', shim: 'portrait' } as const]) {
+      const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
+      r.send(report(), ...toComposer(there));
+      expect(r.phase).toBe('awaitingPick');
+      expect(r.state).toMatchObject({ pageOrientation: there, composerEntered: false });
+      checkRun(r);
+    }
+  });
+
+  it('SH-1: a later same-document load that stays on the composer is no entry (the composer did not mount again)', () => {
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
+    r.send(report(), ...toComposer(SHIM_PRESENT), agent('composer-ready'));
+    expect(r.phase).toBe('awaitingShare');
+    // E.g. the screen became landscape on another display, and the shim's getters were gone: it installs.
+    r.send(
+      tab('loading', `${COMPOSER_URL}?x=1`),
+      tab('complete', `${COMPOSER_URL}?x=1`),
+      injectedWith(false, SHIM_INSTALLED),
+    );
+    expect(r.phase).toBe('awaitingShare');
+    expect(r.state).toMatchObject({ pageOrientation: SHIM_INSTALLED });
+    checkRun(r);
+  });
+
+  it('SH-1: a new document on the composer (a full load) is no late shim: its composer has no photo yet', () => {
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
+    r.send(report());
+    r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injectedWith(true, SHIM_INSTALLED));
+    expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitReport', pageOrientation: SHIM_INSTALLED });
+    r.send(report());
+    expect(r.phase).toBe('awaitingPick');
+    checkRun(r);
+  });
+
+  it('SH-1 (a): the owner picked before the reloaded home completed: the first injection lands on the composer → SCREEN_LANDSCAPE', () => {
+    const r = new Run({ settings: { assistedInsert: false } });
+    r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
+    // First load, the reload's own commit (home), the pick's SPA navigation, then the first `complete`.
+    r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', HOME), tab('loading', COMPOSER_URL));
+    expect(r.state).toMatchObject({ phase: 'reloading', composerEntered: true });
+    r.send(tab('complete', COMPOSER_URL), injectedWith(true, SHIM_INSTALLED));
+    expect(r.state).toMatchObject({ phase: 'probing', pageOrientation: LATE, composerEntered: false });
+    r.send(report());
+    expect(r.phase).toBe('closing');
+    expect(r.injects).toBe(0);
+    expect(r.lastStatus).toMatchObject({ error: 'SCREEN_LANDSCAPE', detail: LATE_DETAIL });
+    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE', preflight: { C3b: 'fail' } });
+    checkRun(r);
+  });
+
+  it('SH-1 (a): the reload’s own commit to the composer (route direct) is no entry: installed there passes', () => {
+    const r = toReloading(new Run());
+    expect(r.state).toMatchObject({ phase: 'reloading', composerEntered: false });
+    r.send(tab('complete', COMPOSER_URL), injectedWith(true, SHIM_INSTALLED), report());
+    expect(r.phase).toBe('injecting');
+    expect(r.state).toMatchObject({ pageOrientation: SHIM_INSTALLED, route: 'direct' });
+    // A portrait reading after a later commit onto the composer is fine as well.
+    const p = new Run({ settings: { assistedInsert: false } });
+    p.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
+    p.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', HOME), tab('loading', COMPOSER_URL));
+    p.send(tab('complete', COMPOSER_URL), injectedWith(true, { type: 'portrait-primary', shim: 'portrait' }), report());
+    expect(p.phase).toBe('awaitingPick');
+    checkRun(p);
+  });
+
+  // SH-2 (2026-10-13): an unreadable reading ({null, failed}: the shim threw, or its result was
+  // malformed) is never a pass: C3b unknown, and on the composer SCREEN_LANDSCAPE.
+  const UNREADABLE: PageOrientation = { type: null, shim: 'failed' };
+
+  it('SH-2: unreadable on home is recorded (C3b unknown); the pick reaching the composer unreadable → SCREEN_LANDSCAPE', () => {
+    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), UNREADABLE);
+    r.send(report());
+    expect(r.phase).toBe('awaitingPick');
+    r.send(...toComposer(UNREADABLE));
+    expect(r.phase).toBe('closing');
+    expect(r.lastStatus).toMatchObject({
+      error: 'SCREEN_LANDSCAPE',
+      detail: 'screen unknown, portrait shim failed',
+      probe: { orientation: UNREADABLE },
+    });
+    expect(written(r)[0]).toMatchObject({
+      outcome: 'failed:SCREEN_LANDSCAPE',
+      detail: 'screen unknown, portrait shim failed',
+      preflight: { C3b: 'unknown' },
+    });
+    checkRun(r);
+  });
+
+  it('SH-2: unreadable at the first probe on the composer (route direct): row 5b, nothing inserted', () => {
+    const r = toReloading(new Run());
+    r.send(tab('complete', COMPOSER_URL), injectedWith(true, UNREADABLE), report());
+    expect(r.phase).toBe('closing');
+    expect(r.injects).toBe(0);
+    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE', preflight: { C3b: 'unknown' } });
+    // In probe mode on home it is only recorded: C3b unknown, not a pass.
+    const probe = toHomeShim(new Run(), UNREADABLE, 'probe').send(report());
+    expect(probe.find((e) => e.type === 'writeRecord')).toMatchObject({
+      record: { outcome: 'not-posted', preflight: { C3b: 'unknown' } },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------
 // "No transition ever emits a retry", generically: seeded random event sequences.
 
 function mulberry32(seed: number): () => number {
@@ -1852,6 +3000,7 @@ const AGENT_EVENTS: readonly AgentEventName[] = [
   'inject-ignored',
   'inject-unconfirmed',
   'sw-controller-change',
+  'sw-intercepted',
 ];
 const EFFECT_TYPES: readonly HandoffEffect['type'][] = [
   'openWindow',
@@ -1863,6 +3012,7 @@ const EFFECT_TYPES: readonly HandoffEffect['type'][] = [
   'injectAgent',
   'sendAgent',
   'serveFile',
+  'readSize',
   'notifyEditor',
   'closeWindow',
   'removeRules',
@@ -1876,7 +3026,14 @@ function randomProbe(rnd: () => number): ProbeReport {
     marker: good(),
     isMobile: good() ? true : pick(rnd, [false, 'unknown'] as const),
     portrait: good(),
-    swControlled: good() ? false : pick(rnd, [true, 'unknown'] as const),
+    inner: good()
+      ? { w: 511, h: 909 }
+      : pick(rnd, [
+          { w: 1512, h: 902 },
+          { w: 800, h: 1200 },
+        ]),
+    swControlled: rnd() < 0.5 ? true : pick(rnd, [false, 'unknown'] as const),
+    swIntercepted: good() ? false : pick(rnd, [true, 'unknown'] as const),
     storyInput: good() ? 'present' : 'absent',
     acceptOk: good(),
   });
@@ -1892,7 +3049,25 @@ function happy(s: HandoffState, rnd: () => number): HandoffEvent {
     case 'scoping':
       return { type: 'rulesInstalled' };
     case 'fitting':
-      return s.frameDelta === null ? MEASURED : { type: 'windowFitted' };
+      switch (s.fitStep) {
+        case 'measure':
+          return rnd() < 0.5 ? MEASURED : ARC_MEASURED;
+        case 'update':
+        case 'retry':
+          return rnd() < 0.6 ? FITTED : pick(rnd, [NOT_FITTED, fittedEv(false, { w: 600, h: 900 })]);
+        case 'retryWait':
+          return { type: 'timer', timer: 'fitRetry' };
+      }
+      break;
+    case 'resizing':
+      return pick(rnd, [
+        sized(1512, 902),
+        sized(700, 650),
+        sized(524, 965),
+        { type: 'boundsChanged', windowId: WIN },
+        { type: 'timer', timer: 'resizePoll' },
+        { type: 'timer', timer: 'resizeDeadline' },
+      ] as HandoffEvent[]);
     case 'navigating':
       return rnd() < 0.9 ? tab('loading', COMPOSER_URL) : tab(pick(rnd, ['loading', 'complete'] as const), undefined);
     case 'reloading':
@@ -1902,7 +3077,10 @@ function happy(s: HandoffState, rnd: () => number): HandoffEvent {
         case 'awaitComplete':
           return tab('complete', COMPOSER_URL);
         case 'injectAgent':
-          return rnd() < 0.5 ? { type: 'agentInjected' } : injected(rnd() < 0.5);
+          // AM37: the shim's reading comes with it, mostly portrait (installed), sometimes landscape.
+          return rnd() < 0.4
+            ? { type: 'agentInjected' }
+            : injectedWith(rnd() < 0.5, rnd() < 0.85 ? SHIM_INSTALLED : SHIM_OFF);
         case 'awaitReport':
           // AM28: a same-document load, or home, can come before the report of a new document.
           return rnd() < 0.85
@@ -1911,7 +3089,9 @@ function happy(s: HandoffState, rnd: () => number): HandoffEvent {
         case 'refitMeasure':
           return MEASURED;
         case 'refitUpdate':
-          return { type: 'windowFitted' };
+          return rnd() < 0.8 ? FITTED : NOT_FITTED;
+        case 'awaitInput':
+          return pick(rnd, [agent('input-appeared'), INPUT_WAITED, agent('sw-controller-change')]);
       }
       break;
     // Post-probe phases also see later document loads (AM2), which must re-probe.
@@ -1964,15 +3144,27 @@ function noise(rnd: () => number): HandoffEvent {
     case 5:
       return { type: 'agentGetFile' };
     case 6:
-      return pick(rnd, [{ type: 'agentInjected' }, { type: 'windowFitted' }, { type: 'rulesInstalled' }, MEASURED]);
+      return pick(rnd, [
+        { type: 'agentInjected' },
+        { type: 'agentInjected', fresh: false, orientation: SHIM_OFF },
+        FITTED,
+        NOT_FITTED,
+        { type: 'rulesInstalled' },
+        MEASURED,
+        sized(524, 965),
+        { type: 'boundsChanged', windowId: rnd() < 0.5 ? WIN : 99 },
+      ]);
     case 7:
       return { type: 'effectFailed', effect: pick(rnd, EFFECT_TYPES), message: 'boom' };
     case 8:
-      return { type: 'timer', timer: pick(rnd, ['inactivity', 'closeDelay', 'navigation'] as const) };
+      return { type: 'timer', timer: pick(rnd, HANDOFF_TIMERS) };
     case 9:
       return { type: 'cancel' };
     case 10:
-      return startEv(pick(rnd, ['post', 'probe'] as const));
+      return {
+        ...startEv(pick(rnd, ['post', 'probe'] as const)),
+        browser: pick(rnd, ['chromium', 'arc', 'unknown']),
+      } as HandoffEvent;
     case 11:
       return { type: 'outcome', handoffId: pick(rnd, ['hof_u1', 'hof_u3', 'x']), posted: rnd() < 0.5 };
     case 12:
@@ -2004,6 +3196,8 @@ describe('U9 hand-off reducer: no transition ever emits a retry (random sequence
         const ev = rnd() < happyBias ? happy(r.state, rnd) : noise(rnd);
         expect(() => r.send(ev)).not.toThrow();
         reached.add(r.phase);
+        if (r.state.phase === 'probing') reached.add(`probing:${r.state.step}`);
+        if (r.state.phase === 'fitting') reached.add(`fitting:${r.state.fitStep}`);
         for (const e of r.steps.at(-1)?.effects ?? []) emitted.add(isInject(e) ? 'inject' : e.type);
       }
       checkRun(r);
@@ -2014,6 +3208,7 @@ describe('U9 hand-off reducer: no transition ever emits a retry (random sequence
       'opening',
       'scoping',
       'fitting',
+      'resizing',
       'navigating',
       'reloading',
       'probing',
@@ -2024,6 +3219,9 @@ describe('U9 hand-off reducer: no transition ever emits a retry (random sequence
       'closing',
     ];
     for (const p of phases) expect(reached).toContain(p);
+    for (const step of ['probing:awaitInput', 'probing:refitUpdate', 'fitting:retryWait', 'fitting:retry']) {
+      expect(reached).toContain(step);
+    }
     for (const e of [
       'inject',
       'hardReload',
@@ -2031,6 +3229,7 @@ describe('U9 hand-off reducer: no transition ever emits a retry (random sequence
       'lockMsite',
       'patchRecordOutcome',
       'updateWindow',
+      'readSize',
       'rememberWindow',
       'forgetWindow',
     ]) {

@@ -46,10 +46,15 @@ function describe(e: CoreEvent): string {
       return `fake-ig: WRITE_PATH_REACHED ${e.write.method} ${e.write.host}${e.write.path} (${e.write.filter})`;
     case 'story': {
       const size = e.story.size ? `${e.story.size.w}x${e.story.size.h}` : 'not-jpeg';
-      return `fake-ig: story ${e.story.id} ${size} ${e.story.bytes} B isTrusted=${e.story.isTrusted}`;
+      const session = e.story.meta ? ` sessionStarted=${e.story.meta.sessionStarted}` : '';
+      return `fake-ig: story ${e.story.id} ${size} ${e.story.bytes} B isTrusted=${e.story.isTrusted}${session}`;
     }
     case 'violation':
       return `fake-ig: VIOLATION ${e.violation.kind} story=${e.violation.storyId}: ${e.violation.detail}`;
+    case 'composerView': {
+      const v = e.view;
+      return `fake-ig: composer ${v.landscape ? 'LANDSCAPE (rotate snackbar, no Share)' : 'portrait (Share shown)'} via ${v.via} screen=${v.screenOrientation} sessionStarted=${v.sessionStarted}`;
+    }
   }
 }
 

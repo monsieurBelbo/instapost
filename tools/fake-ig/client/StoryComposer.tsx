@@ -2,10 +2,20 @@
 /**
  * The msite story composer (strategy §6.1, §7.6), mountable on its own (B6).
  *
- * - The hidden story input (`accept` per knob) is rendered when `inputMounted`.
+ * - In the msite shell (AM35), the story session starts in the shell's header: a file picked (or
+ *   inserted) in its hidden story input passes the checks below there and arrives as `sessionFile`,
+ *   after the shell's SPA navigation to /create/story/. Standalone (B6), the composer renders its own
+ *   hidden story input (`accept` per knob) when `inputMounted`.
  * - Files are read from `change` (React onChange; a synthetic `change` fires it, AM3) or, with
- *   `listen=drop`, only from a drop. `trusted=require` ignores events with isTrusted=false.
- * - Portrait guard and photo-only toasts as research §1 item 2 describes.
+ *   `listen=drop`, only from a drop. `trusted=require` ignores events with isTrusted=false. A file
+ *   event never checks the orientation (Instagram's onFileChange goes straight to the media).
+ * - The landscape gate (AM37, client/orientation.ts): once a photo is in play (the story session's
+ *   file, or a file accepted here), the composer page reads its gate at that moment and on every
+ *   `resize`: `screen.orientation.type` (knob `landscapeCheck=screen`, production) or the viewport.
+ *   Landscape: the rotate snackbar, and no header (Close, Save) and no Share footer; the canvas still
+ *   draws. Each verdict is reported to /__fake__/composer-view with whether + → Story started the
+ *   story session (`sessionId`), so specs can read what the page showed after the popup closed.
+ * - Photo-only toast as research §1 item 2 describes.
  * - Ready (C6) = the canvas is mounted and drawn, `slowMs` after the file was accepted. The
  *   source is cover-cropped to the canvas aspect and drawn centred; the geometry ground truth
  *   goes in `document.documentElement.dataset.fakeGeometry`.
@@ -42,18 +52,29 @@ import {
 import { reportControl } from './control.ts';
 import { computeGeometry, coverCrop } from './geometry.ts';
 import type { Strings } from './i18n.ts';
+import {
+  type LandscapeGate,
+  readLandscapeGate,
+  reportComposerView,
+  sameGate,
+  screenOrientationType,
+} from './orientation.ts';
 import { useCx } from './styles.ts';
 import { CLAIM_LATE_DELAY_MS, registerClaimLate } from './sw.ts';
-import { Toast, useToast } from './ui.tsx';
+import { Snackbar, Toast, useToast } from './ui.tsx';
 
 export interface StoryComposerProps {
   knobs: Knobs;
   t: Strings;
-  /** The story input is in the DOM: `input=present`, or the human tapped + → Story. */
+  /** Standalone (B6): the composer renders its own hidden story input. The msite shell passes false. */
   inputMounted: boolean;
-  /** The human just tapped + → Story: open the file picker once, then call onPickHandled. */
-  pickPending?: boolean;
-  onPickHandled?: () => void;
+  /** The file that started this story session in the shell's header input (already checked there). */
+  sessionFile?: File | null;
+  /**
+   * AM37: the story session id + → Story issued before that file was picked; null when the file came
+   * without the tap (H1's insert), as Instagram's sessionId then stays null.
+   */
+  sessionId?: string | null;
   /** After a recorded Share, or on Close. The msite shell SPA-navigates to `/`. */
   onExit?: (reason: 'shared' | 'closed') => void;
   /** Where Share posts (default /__fake__/stories). */
@@ -67,17 +88,17 @@ type Phase =
   | { kind: 'sharing'; bitmap: ImageBitmap };
 
 /** Last input outcome, for debugging only (`data-fake-input` on <html>). */
-type InputOutcome = 'accepted' | 'ignored-listen' | 'ignored-untrusted' | 'rejected-landscape' | 'rejected-type';
+type InputOutcome = 'accepted' | 'ignored-listen' | 'ignored-untrusted' | 'rejected-type';
 
 const JPEG_QUALITY = 0.92;
 /** How long the composer stays ready before `offhost=afterReady` navigates away. */
 const OFFHOST_DELAY_MS = 500;
 
 const html = () => document.documentElement.dataset;
-const markInput = (o: InputOutcome) => {
+/** Records the verdict on the last file event, for the specs (`data-fake-input` on <html>). */
+export const markInput = (o: InputOutcome) => {
   html().fakeInput = o;
 };
-const isLandscape = () => window.innerHeight < window.innerWidth;
 const delay = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
 
 function toJpeg(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -112,6 +133,30 @@ function useViewport(): Viewport {
   return vp;
 }
 
+/**
+ * AM37: the composer page's landscape gate, read when a photo comes into play (`active`: the page
+ * "mounts" with media, as PolarisStoryCreationPage does) and again on every `resize`; null while no
+ * photo is in play. A layout effect, so the first painted frame already has the verdict.
+ */
+function useLandscapeGate(active: boolean, check: Knobs['landscapeCheck']): LandscapeGate | null {
+  const [gate, setGate] = useState<LandscapeGate | null>(null);
+  useLayoutEffect(() => {
+    if (!active) {
+      setGate(null);
+      return;
+    }
+    const read = () =>
+      setGate((prev) => {
+        const next = readLandscapeGate(check);
+        return prev && sameGate(prev, next) ? prev : next;
+      });
+    read();
+    window.addEventListener('resize', read);
+    return () => window.removeEventListener('resize', read);
+  }, [active, check]);
+  return gate;
+}
+
 /** Instagram's finalize step would follow the upload; both are subresource POSTs, never navigations. */
 async function fireRealPaths(jpeg: Blob): Promise<void> {
   const uploadId = String(Date.now());
@@ -123,7 +168,8 @@ async function fireRealPaths(jpeg: Blob): Promise<void> {
 }
 
 export function StoryComposer(props: StoryComposerProps) {
-  const { knobs, t, inputMounted, pickPending, onPickHandled, onExit } = props;
+  const { knobs, t, inputMounted, sessionFile, onExit } = props;
+  const sessionId = props.sessionId ?? null;
   const shareUrl = props.shareUrl ?? FAKE_PATHS.stories;
   const c = useCx();
   const vp = useViewport();
@@ -135,7 +181,23 @@ export function StoryComposer(props: StoryComposerProps) {
   const mounted = useRef(true);
 
   const bitmap = phase.kind === 'ready' || phase.kind === 'sharing' ? phase.bitmap : null;
-  const landscape = vp.h < vp.w;
+  // AM37: the gate applies once a photo is in play (the session's file, or one accepted here).
+  const gate = useLandscapeGate(Boolean(sessionFile) || phase.kind !== 'idle', knobs.landscapeCheck);
+  const landscape = gate?.landscape === true;
+
+  // Every verdict (on mount with the photo, then on each flip) is recorded, before the page can go away.
+  useLayoutEffect(() => {
+    if (!gate) return;
+    reportComposerView({
+      landscape: gate.landscape,
+      share: !gate.landscape,
+      via: gate.via,
+      screenOrientation: gate.screenOrientation,
+      inner: gate.inner,
+      sessionStarted: sessionId !== null,
+      path: window.location.pathname,
+    });
+  }, [gate, sessionId]);
 
   useEffect(() => {
     mounted.current = true;
@@ -148,25 +210,9 @@ export function StoryComposer(props: StoryComposerProps) {
 
   useEffect(() => (bitmap ? () => bitmap.close() : undefined), [bitmap]);
 
-  useEffect(() => {
-    if (!pickPending || !inputMounted) return;
-    inputRef.current?.click();
-    onPickHandled?.();
-  }, [pickPending, inputMounted, onPickHandled]);
-
-  const acceptFiles = useCallback(
-    async (files: FileList | null, isTrusted: boolean, via: Knobs['listen']) => {
-      if (knobs.listen !== via) return markInput('ignored-listen');
-      if (knobs.trusted === 'require' && !isTrusted) return markInput('ignored-untrusted');
-      const file = files?.[0];
-      if (!file) return;
-      // The rotate toast is already showing; the file is dropped, as on Instagram.
-      if (isLandscape()) return markInput('rejected-landscape');
-      if (!file.type.startsWith('image/')) {
-        showToast(t.toastPhotoOnly);
-        return markInput('rejected-type');
-      }
-      markInput('accepted');
+  /** Decodes an accepted file into the composer (ready after `slowMs`). */
+  const load = useCallback(
+    async (file: File) => {
       setPhase({ kind: 'loading' });
       let decoded: ImageBitmap;
       try {
@@ -180,7 +226,28 @@ export function StoryComposer(props: StoryComposerProps) {
       if (!mounted.current) return decoded.close();
       setPhase({ kind: 'ready', bitmap: decoded });
     },
-    [knobs.listen, knobs.trusted, knobs.slowMs, showToast, t],
+    [knobs.slowMs, showToast, t],
+  );
+
+  // The shell's header input started the story session with this file (AM35).
+  useEffect(() => {
+    if (sessionFile) void load(sessionFile);
+  }, [sessionFile, load]);
+
+  const acceptFiles = useCallback(
+    async (files: FileList | null, isTrusted: boolean, via: Knobs['listen']) => {
+      if (knobs.listen !== via) return markInput('ignored-listen');
+      if (knobs.trusted === 'require' && !isTrusted) return markInput('ignored-untrusted');
+      const file = files?.[0];
+      if (!file) return;
+      if (!file.type.startsWith('image/')) {
+        showToast(t.toastPhotoOnly);
+        return markInput('rejected-type');
+      }
+      markInput('accepted');
+      await load(file);
+    },
+    [knobs.listen, knobs.trusted, load, showToast, t],
   );
 
   const onChange = (e: ChangeEvent<HTMLInputElement>) =>
@@ -276,6 +343,9 @@ export function StoryComposer(props: StoryComposerProps) {
       geometry: truth,
       path: window.location.pathname,
       navigatorUa: navigator.userAgent,
+      sessionStarted: sessionId !== null,
+      sessionId,
+      screenOrientation: screenOrientationType(),
     };
     const upload = () =>
       fetch(shareUrl, {
@@ -345,43 +415,48 @@ export function StoryComposer(props: StoryComposerProps) {
               zIndex: 11,
             }}
           />
-          <div className={c('bar')} style={{ top: 0 }}>
-            <button
-              type="button"
-              data-testid="fake-close"
-              className={c('barBtn')}
-              onClick={(e) => {
-                reportControl('close', e.nativeEvent.isTrusted);
-                onExit?.('closed');
-              }}
-            >
-              {t.close}
-            </button>
-            {knobs.save === 'on' ? (
+          {/* AM37: in landscape the composer renders no header and no Share footer, only the snackbar. */}
+          {landscape ? null : (
+            <div className={c('bar')} style={{ top: 0 }}>
               <button
                 type="button"
-                data-testid="fake-save"
+                data-testid="fake-close"
                 className={c('barBtn')}
                 onClick={(e) => {
-                  reportControl('save', e.nativeEvent.isTrusted);
-                  void save();
+                  reportControl('close', e.nativeEvent.isTrusted);
+                  onExit?.('closed');
                 }}
               >
-                {t.save}
+                {t.close}
               </button>
-            ) : null}
-          </div>
-          <div className={c('bar')} style={{ bottom: 0, justifyContent: 'flex-end' }}>
-            <button
-              type="button"
-              data-testid="fake-share"
-              className={c('share')}
-              disabled={phase.kind === 'sharing'}
-              onClick={(e) => void share(e)}
-            >
-              {t.share}
-            </button>
-          </div>
+              {knobs.save === 'on' ? (
+                <button
+                  type="button"
+                  data-testid="fake-save"
+                  className={c('barBtn')}
+                  onClick={(e) => {
+                    reportControl('save', e.nativeEvent.isTrusted);
+                    void save();
+                  }}
+                >
+                  {t.save}
+                </button>
+              ) : null}
+            </div>
+          )}
+          {landscape ? null : (
+            <div className={c('bar')} style={{ bottom: 0, justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                data-testid="fake-share"
+                className={c('share')}
+                disabled={phase.kind === 'sharing'}
+                onClick={(e) => void share(e)}
+              >
+                {t.share}
+              </button>
+            </div>
+          )}
         </>
       ) : (
         <div className={c('start')}>
@@ -396,7 +471,7 @@ export function StoryComposer(props: StoryComposerProps) {
         </div>
       )}
       <div className={c('toasts')}>
-        {landscape ? <Toast rotate text={t.toastRotate} /> : null}
+        {landscape ? <Snackbar text={t.toastRotate} /> : null}
         {toast ? <Toast text={toast} /> : null}
       </div>
     </section>

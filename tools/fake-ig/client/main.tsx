@@ -25,7 +25,7 @@ const cx = boot.knobs.drift === 'renamed' ? renamedCx() : plainCx;
 const style = document.createElement('style');
 style.textContent = stylesheet(cx);
 document.head.append(style);
-void syncServiceWorker(boot.knobs.sw);
+void syncServiceWorker(boot.knobs.sw, boot.shell === 'msite');
 
 const t = strings(boot.knobs.locale);
 const rootEl = document.getElementById(boot.rootId);

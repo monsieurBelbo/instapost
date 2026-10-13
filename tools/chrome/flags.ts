@@ -48,6 +48,21 @@ export const HEADLESS_SCREEN_ARGS: readonly string[] = [
   '--screen-info={0,0 3024x1964 devicePixelRatio=2 workAreaTop=66}',
 ];
 
+/**
+ * Headless E2E only: the owner's two displays at the first live run (2026-10-12). Spike S11 (CfT
+ * 155.0.8059.39 and Playwright's Chromium, headless): `--screen-info` takes several screens as
+ * consecutive `{…}` groups, and negative origins; a label needs quotes, which the seal forbids, so
+ * none is given. The MacBook is primary (as HEADLESS_SCREEN_ARGS); the 3440x1440 @1 ultrawide sits at
+ * (1512,-428) and loses 30 px of work area at the bottom. A window moved onto the ultrawide then reads
+ * screen.avail* = 1512,-428 3440x1410, exactly what the owner's editor reported.
+ */
+export const HEADLESS_DUAL_SCREEN_ARGS: readonly string[] = [
+  '--screen-info={0,0 3024x1964 devicePixelRatio=2 workAreaTop=66}{1512,-428 3440x1440 devicePixelRatio=1 workAreaBottom=30}',
+];
+
+/** Which emulated screens a headless launch gets. */
+export type HeadlessScreens = 'owner' | 'ownerDual';
+
 /** Persistent profile for manual dev under `wxt` (never logged in anywhere, SG2). */
 export const DEV_PROFILE_DIR = resolve(ROOT, '.profiles/dev-fake');
 
@@ -74,13 +89,18 @@ export const sealedWebExtArgs = (spki: string, opts: { headless?: boolean } = {}
 /**
  * Playwright path. Never put --user-data-dir here: launchPersistentContext takes the
  * profile directory as a parameter and rejects the flag. Pass `{ headless: true }` whenever the
- * launch is headless, so popups get the emulated owner screen (HEADLESS_SCREEN_ARGS, spike S8).
+ * launch is headless, so popups get the emulated owner screen (HEADLESS_SCREEN_ARGS, spike S8), or
+ * with `screens: 'ownerDual'` the owner's two displays (HEADLESS_DUAL_SCREEN_ARGS, spike S11).
  */
-export const sealedPlaywrightArgs = (spki: string, extDir: string, opts: { headless?: boolean } = {}): string[] => [
+export const sealedPlaywrightArgs = (
+  spki: string,
+  extDir: string,
+  opts: { headless?: boolean; screens?: HeadlessScreens } = {},
+): string[] => [
   ...sealedArgs(spki),
   `--disable-extensions-except=${extDir}`,
   `--load-extension=${extDir}`,
-  ...(opts.headless ? HEADLESS_SCREEN_ARGS : []),
+  ...(opts.headless ? (opts.screens === 'ownerDual' ? HEADLESS_DUAL_SCREEN_ARGS : HEADLESS_SCREEN_ARGS) : []),
 ];
 
 const SPKI_RE = /^[A-Za-z0-9+/]{43}=$/;

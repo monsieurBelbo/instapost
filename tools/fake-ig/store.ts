@@ -1,6 +1,7 @@
 /**
  * The fake's recordings (strategy §6.2): stories, requests, writes to real-shaped paths,
- * violations, and the server-global knobs. In memory; stories are also written to
+ * violations, what the composer page showed (AM37: its landscape gate), and the server-global
+ * knobs. In memory; stories are also written to
  * `.fake-ig/stories/` (`<id>.jpg` + `<id>.json`) when a directory is given, and reloaded from
  * there on start, so the dashboard survives a server restart. reset() clears all of it,
  * the files included, and puts the knobs back to DEFAULT_KNOBS.
@@ -9,7 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DEFAULT_KNOBS, type Knobs, mergeKnobs } from './knobs.ts';
-import type { FakeShareMeta, Size } from './protocol.ts';
+import type { FakeComposerView, FakeShareMeta, Size } from './protocol.ts';
 import type { UaClassification } from './ua.ts';
 
 /** Request headers the log keeps: user-agent, sec-ch-ua*, sec-fetch-*, origin (§6.2). */
@@ -71,6 +72,12 @@ export interface ViolationRecord {
   detail: string;
 }
 
+/** AM37: one report of what the composer page showed (its landscape gate), as the page sent it. */
+export interface ComposerViewRecord extends FakeComposerView {
+  seq: number;
+  t: number;
+}
+
 export interface StoryInput extends SeenHeaders {
   body: Uint8Array;
   contentType: string | null;
@@ -92,6 +99,9 @@ export interface Store {
   storyBytes(id: string): Uint8Array | null;
   addViolation(rec: Omit<ViolationRecord, 't'>): ViolationRecord;
   violations(): ViolationRecord[];
+  /** AM37: what the composer page showed (landscape gate), oldest first. */
+  addComposerView(view: FakeComposerView): ComposerViewRecord;
+  composerViews(): ComposerViewRecord[];
   reset(): void;
 }
 
@@ -104,6 +114,8 @@ export interface StoreOptions {
 }
 
 const ID_RE = /^s[0-9a-z]+-[0-9a-f]{6}$/;
+/** Composer views kept in memory (a test produces a handful). */
+const MAX_COMPOSER_VIEWS = 200;
 
 /** Width and height from a baseline or progressive JPEG's SOFn segment; null if not a JPEG. */
 export function jpegSize(b: Uint8Array): Size | null {
@@ -139,6 +151,7 @@ export function createStore(opts: StoreOptions = {}): Store {
   let writes: WriteRecord[] = [];
   let stories: StoryRecord[] = [];
   let violations: ViolationRecord[] = [];
+  let composerViews: ComposerViewRecord[] = [];
   const bytes = new Map<string, Uint8Array>();
 
   const fileOf = (id: string, ext: 'jpg' | 'json') => resolve(dir ?? '.', `${id}.${ext}`);
@@ -209,6 +222,13 @@ export function createStore(opts: StoreOptions = {}): Store {
       return full;
     },
     violations: () => [...violations],
+    addComposerView(view) {
+      const full: ComposerViewRecord = { ...view, seq: ++seq, t: now() };
+      composerViews.push(full);
+      if (composerViews.length > MAX_COMPOSER_VIEWS) composerViews = composerViews.slice(-MAX_COMPOSER_VIEWS);
+      return full;
+    },
+    composerViews: () => [...composerViews],
     reset() {
       if (dir && existsSync(dir)) {
         for (const name of readdirSync(dir)) {
@@ -221,6 +241,7 @@ export function createStore(opts: StoreOptions = {}): Store {
       writes = [];
       stories = [];
       violations = [];
+      composerViews = [];
       bytes.clear();
     },
   };

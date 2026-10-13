@@ -12,7 +12,7 @@ import { blockRuleset, type DnrRule, rehearsalRules, SESSION_RULE_IDS } from '..
 
 const arg = process.argv[2];
 const rules: DnrRule[] = arg === undefined ? blockRuleset() : rehearsalRules(Number.parseInt(arg, 10));
-const b: Baseline = baseline as Baseline;
+const b: Baseline = baseline as unknown as Baseline;
 console.log(JSON.stringify(rules, null, 2));
 console.error(
   `${rules.length} rules; session id range ${SESSION_RULE_IDS[0]}..${SESSION_RULE_IDS.at(-1)}; baseline capturedAt=${b.capturedAt}`,

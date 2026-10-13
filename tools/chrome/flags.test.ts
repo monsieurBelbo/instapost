@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertSealed,
   DEV_PROFILE_DIR,
+  HEADLESS_DUAL_SCREEN_ARGS,
   HEADLESS_SCREEN_ARGS,
   RESOLVER_RULES,
   sealedArgs,
@@ -21,6 +22,7 @@ const builders: Record<string, string[]> = {
   sealedWebExtArgs: sealedWebExtArgs(SPKI),
   sealedPlaywrightArgs: sealedPlaywrightArgs(SPKI, EXT),
   'sealedPlaywrightArgs headless': sealedPlaywrightArgs(SPKI, EXT, { headless: true }),
+  'sealedPlaywrightArgs headless ownerDual': sealedPlaywrightArgs(SPKI, EXT, { headless: true, screens: 'ownerDual' }),
   'sealedWebExtArgs headless': sealedWebExtArgs(SPKI, { headless: true }),
 };
 
@@ -60,6 +62,17 @@ describe('U17 sealed browser arguments', () => {
       expect.arrayContaining([...HEADLESS_SCREEN_ARGS]),
     );
     for (const a of HEADLESS_SCREEN_ARGS) expect(sealedPlaywrightArgs(SPKI, EXT)).not.toContain(a);
+  });
+
+  it('S11: the owner’s two displays replace the one screen, headless only, as one --screen-info', () => {
+    const dual = sealedPlaywrightArgs(SPKI, EXT, { headless: true, screens: 'ownerDual' });
+    expect(dual.filter((a) => a.startsWith('--screen-info='))).toEqual([...HEADLESS_DUAL_SCREEN_ARGS]);
+    // MacBook primary at 0,0 (as the single screen), the ultrawide at 1512,-428 @1 (2026-10-12 live run).
+    expect(HEADLESS_DUAL_SCREEN_ARGS[0]).toContain('{0,0 3024x1964 devicePixelRatio=2 workAreaTop=66}');
+    expect(HEADLESS_DUAL_SCREEN_ARGS[0]).toContain('{1512,-428 3440x1440 devicePixelRatio=1 workAreaBottom=30}');
+    expect(sealedPlaywrightArgs(SPKI, EXT, { screens: 'ownerDual' }).some((a) => a.startsWith('--screen-info'))).toBe(
+      false,
+    );
   });
 
   it('rejects a missing --no-proxy-server or --disable-quic', () => {

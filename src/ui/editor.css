@@ -433,6 +433,13 @@ input:focus-visible {
   border-radius: 4px;
   background: rgb(143 179 255 / 0.08);
 }
+/* W3: the guided resize's live size, green once the window is narrow and tall enough. */
+.instruction.resize [data-ok="true"] {
+  color: var(--ok);
+}
+.instruction.resize [data-ok="false"] {
+  color: var(--danger);
+}
 .instruction p {
   margin: 0 0 8px;
 }

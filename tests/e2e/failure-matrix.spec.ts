@@ -1,28 +1,36 @@
 /**
- * E12 (strategy §7.11, §3.6, §3.10): one test per fake knob, on the mock and live artifacts.
+ * E12 (strategy §7.11, §3.6, §3.10): one test per fake knob, on the mock and live artifacts. Since
+ * AM35 (2026-10-12) the fake's defaults are the production shape: route=homeOnly, the story input in
+ * the header beside + (≤ 767 CSS px), sw=claimOnRegister (a claiming worker without a fetch handler).
  *
  * | Case | Knob                    | Expected                                                        |
  * |------|-------------------------|-----------------------------------------------------------------|
- * | (a)  | sw=desktopShell         | after the hard reload: mobile, uncontrolled; a normal tab: desktop |
- * | (b)  | sw=claimLate            | SW_TOOK_CONTROL, no lock                                        |
+ * | (a)  | sw=desktopShell, first  | first load SW-served desktop, the hard reload escapes it (mobile), |
+ * |      | (hypothetical worker    | then the worker claims the page and handles its requests:       |
+ * |      | with a fetch handler)   | SW_INTERCEPTS, no lock; a normal tab: desktop (E2E (e), AM30)   |
+ * | (b)  | sw=claimLate            | a worker claiming mid-session is counted, never fatal (P2)      |
  * | (c)  | auth=out                | NOT_LOGGED_IN, no lock                                          |
  * | (d)  | auth=challenge          | kill; next start MSITE_LOCKED; ENABLE re-enables                |
  * | (e)  | offhost=afterReady      | kill (KILLED_OFFHOST)                                           |
  * | (f)  | trusted=require         | INJECTION_IGNORED → H0, exactly one inject                      |
  * | (g)  | listen=drop             | as (f)                                                          |
- * | (h)  | input=afterTap          | H0 (INPUT_MISSING)                                              |
- * | (i)  | route=homeOnly          | H0 with the "tap + → Story" text                                |
+ * | (h)  | input=afterTap          | H0 (INPUT_MISSING) after the P5 wait for a late input            |
+ * | (i)  | route=direct            | the composer route itself (pre-F3 shape): C5 pass, plain H0 text |
  * | (j)  | accept=changed          | ACCEPT_DRIFT → H0                                               |
  * | (k)  | classifier=client-hints | still mobile                                                    |
  * | (l)  | locale=es               | the same outcomes as en                                         |
  * | (m)  | drift=renamed           | unaffected                                                      |
- * | (a2) | sw=desktopShell, post   | homeOnly H0, posted by hand; every reloaded document mobile     |
+ * | (a2) | sw=desktopShell, page   | the composer registers it itself: SW_INTERCEPTS, nothing posted; |
+ * |      |                         | a normal tab's request through it has workerStart > 0           |
  * | (n)  | auth=codeentry          | kill and lock (AM17: /auth_platform is a security flow)         |
  * | (o)  | route=elsewhere         | UNEXPECTED_PAGE, no reload, no lock, nothing injected (AM17)     |
  * | (p)  | offhost=firstLoad       | kill and lock before the kill switch is armed (AM20)            |
  * | (q)  | pushState after the pick| H1 kept: same document, no re-probe, no INJECTION_IGNORED (AM16) |
  * | (r)  | share=background        | rehearsal off: held open until answered, upload lands (AM19)    |
- * | (s)  | reload, desktopComposer | a later SW-served desktop document → DESKTOP_SHELL (AM2)         |
+ * | (s)  | client-hints + uaOnly   | Instagram serves desktop (is_mobile false) → DESKTOP_SHELL (P1)  |
+ * | (w)  | a later desktop document| AM2's strict re-probe of a reloaded document served desktop (no |
+ * |      | (uaOnly, then hints)    | worker involved): DESKTOP_SHELL, on home (H0) and after the H1  |
+ * |      |                         | insert on the composer; one inject, nothing posted (AL-5, AF-4) |
  * | (t)  | reload, 302 home        | pinned: counts as composer left after Share (see AM16)          |
  * | (u)  | challenge=…             | mid-session challenge, full or in-page, ready or shared: kill   |
  * | (v)  | geometry=cssFixed:360x640 | insert never confirmed (C6), Share → C9, no pre-answer, held open (AM28) |
@@ -32,10 +40,10 @@
  * 60 s and clear the rate guard's log in between (fixtures.ts `clearRateLog`).
  */
 import { writeFile } from 'node:fs/promises';
-import type { Page, TestInfo } from '@playwright/test';
-import { CLOSE_DELAY_MS, type HandoffRecord } from '../../src/core/handoff/state.ts';
+import type { Page, TestInfo, Worker } from '@playwright/test';
+import { CLOSE_DELAY_MS, type HandoffRecord, INPUT_WAIT_MS } from '../../src/core/handoff/state.ts';
 import { BACKGROUND_UPLOAD_DELAY_MS, OFFHOST_URL } from '../../tools/fake-ig/protocol.ts';
-import { expect, IG_ORIGIN, test, whenClosed } from './fixtures.ts';
+import { type ExtGlobal, expect, IG_ORIGIN, test, whenClosed } from './fixtures.ts';
 import {
   answerPosted,
   cancelHandoff,
@@ -99,15 +107,18 @@ const isDocument = (r: RequestRecord) => r.host === 'www.instagram.com' && r.fet
 // ---------------------------------------------------------------------------------------------
 // (a)–(e): service worker, auth and off-host
 
-test('E12 (a) sw=desktopShell: after the hard reload mobile and uncontrolled; a normal tab still gets desktop', async ({
+test('E12 (a) (e) sw=desktopShell installed first: the hard reload escapes it, then it handles the page’s requests → SW_INTERCEPTS', async ({
   context,
   editor,
   composer,
   fake,
   handoffRecords,
-}) => {
+  storedSettings,
+}, testInfo) => {
+  // Hypothetical (F2: Instagram's worker has no fetch handler): a worker that answers navigations
+  // with its own desktop-UA fetch and handles every other request too. Everyday browsing installs it
+  // first (FID-1).
   await fake.setKnobs({ sw: 'desktopShell' });
-  // Everyday browsing installs Instagram's (here: the fake's) service worker first.
   const visit = await context.newPage();
   await visit.goto(`${IG_ORIGIN}/`);
   await visit.evaluate(async () => {
@@ -116,15 +127,23 @@ test('E12 (a) sw=desktopShell: after the hard reload mobile and uncontrolled; a 
   await visit.close();
 
   const since = await lastSeq(fake);
-  const page = await editor('#/settings');
-  await page.getByTestId('setting-probe').click();
+  const page = await editor();
+  // H0: the agent's watch runs, so the tripwire is read continuously, not only at the probe.
+  await setSwitches(page, { assisted: false });
+  await loadPhoto(page, await photoFile(context, testInfo));
+  await postFromDesktop(page);
   await whenClosed(await composer({ not: [visit] }));
   await waitPhase(page, 'idle');
-  expect(await shownError(page)).toBeNull();
+  expect(await shownError(page)).toBe('SW_INTERCEPTS');
   const rec = await lastRecord(handoffRecords);
-  expect(rec.outcome).toBe('not-posted');
-  expect(rec.probe).toMatchObject({ isMobile: true, swControlled: false });
-  expect(rec.preflight).toMatchObject({ C1: 'pass', swControlled: false });
+  expect(rec.outcome).toBe('failed:SW_INTERCEPTS');
+  expect(rec.probe).toMatchObject({ isMobile: true });
+  expect(rec.preflight).toMatchObject({ C1: 'pass' });
+  // AF-2: whether the probe or the watch saw it, the row and the record say the worker intercepted.
+  await expect(page.locator('[data-row="service-worker"]')).toHaveText('intercepts requests');
+  expect(rec.preflight?.swIntercepted).toBe(true);
+  expect((await storedSettings())?.msiteLockedUntil ?? null).toBeNull();
+  expect(await fake.stories()).toHaveLength(0);
 
   // The worker really answered the popup's first load, with its own desktop-UA fetch (tabId -1,
   // spike S4; such fetches are `sec-fetch-dest: empty`) ...
@@ -132,14 +151,18 @@ test('E12 (a) sw=desktopShell: after the hard reload mobile and uncontrolled; a 
   const viaSw = session.filter((r) => r.viaSw);
   expect(viaSw.map((r) => r.path)).toContain('/create/story/');
   for (const r of viaSw) expect(r.classification.is_mobile).toBe(false);
-  // ... and every document the hard reload fetched itself carried the Android profile.
+  // ... and every document the hard reload fetched itself carried the Android profile ...
   const reloaded = session.filter((r) => !r.viaSw && isDocument(r));
   expect(reloaded.length).toBeGreaterThanOrEqual(1);
   for (const r of reloaded) expect(r.classification.is_mobile).toBe(true);
+  // ... but the worker then took the page, and its next request (the beacon) went through the
+  // worker, out of rule 1001's reach (desktop UA on the wire).
+  const beacons = session.filter((r) => r.path.startsWith('/fake-static/beacon'));
+  expect(beacons.length).toBeGreaterThan(0);
+  expect(beacons.some((r) => r.classification.is_mobile === false)).toBe(true);
   // The fake 302s a desktop /create/story/ to `/`, and the worker's redirect commits before the
   // reload runs, so the reload reloads `/` and C5 reads homeOnly (docs/contract.md C5 caveat).
   expect(rec.route).toBe('homeOnly');
-  expect(rec.preflight?.C5).toBe('fail');
 
   // Afterwards an ordinary tab is still served the desktop shell, through the worker.
   const after = await lastSeq(fake);
@@ -152,12 +175,58 @@ test('E12 (a) sw=desktopShell: after the hard reload mobile and uncontrolled; a 
   for (const r of later) expect(r.classification.is_mobile).toBe(false);
 });
 
-test('E12 (b) sw=claimLate: a service worker taking control mid-session ends it with SW_TOOK_CONTROL', async ({
+test('E12 (a2) (e) sw=desktopShell registered by the composer itself: SW_INTERCEPTS; its requests show workerStart > 0', async ({
   context,
   editor,
   composer,
   fake,
   handoffRecords,
+  storedSettings,
+}, testInfo) => {
+  await fake.setKnobs({ sw: 'desktopShell' });
+  const page = await editor();
+  await setSwitches(page, { assisted: true });
+  await loadPhoto(page, await photoFile(context, testInfo));
+  await postFromDesktop(page);
+  const popup = await composer();
+  await whenClosed(popup);
+  await waitPhase(page, 'idle');
+  expect(await shownError(page)).toBe('SW_INTERCEPTS');
+  await expect(page.getByTestId('handoff-error')).toContainText('handled the composer’s own requests');
+  await expect(page.locator('[data-row="service-worker"]')).toHaveText('intercepts requests');
+  const rec = await lastRecord(handoffRecords);
+  expect(rec.outcome).toBe('failed:SW_INTERCEPTS');
+  expect(rec.preflight?.swIntercepted).toBe(true);
+  expect((await storedSettings())?.msiteLockedUntil ?? null).toBeNull();
+  expect(await fake.stories()).toHaveLength(0);
+
+  // The signal itself, on the fake (P3, F2): a page this worker controls sees workerStart > 0 on a
+  // www request it handled. (The claim-on-register default keeps it at 0: E23.)
+  const tab = await context.newPage();
+  await tab.goto(`${IG_ORIGIN}/`);
+  await expect.poll(() => tab.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+  const workerStart = await tab.evaluate(async () => {
+    const url = `${location.origin}/fake-static/beacon?probe=${Date.now()}`;
+    await (await fetch(url, { cache: 'no-store' })).arrayBuffer();
+    // The entry is buffered once the response is complete: give it a moment.
+    for (let i = 0; i < 40; i++) {
+      const e = performance.getEntriesByName(url)[0] as PerformanceResourceTiming | undefined;
+      if (e) return e.workerStart;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return -1;
+  });
+  expect(workerStart).toBeGreaterThan(0);
+});
+
+test('E12 (b) sw=claimLate: a worker taking control mid-session is counted, never fatal (P2)', async ({
+  context,
+  editor,
+  composer,
+  fake,
+  human,
+  handoffRecords,
+  handoffState,
   storedSettings,
 }, testInfo) => {
   await fake.setKnobs({ sw: 'claimLate' });
@@ -166,13 +235,21 @@ test('E12 (b) sw=claimLate: a service worker taking control mid-session ends it 
   await loadPhoto(page, await photoFile(context, testInfo));
   await postFromDesktop(page);
   const popup = await composer();
-  await waitSeen(page, 'awaitingShare');
-  await whenClosed(popup);
-  await waitPhase(page, 'idle');
-  expect(await shownError(page)).toBe('SW_TOOK_CONTROL');
-  expect((await lastRecord(handoffRecords)).outcome).toBe('failed:SW_TOOK_CONTROL');
+  await waitPhase(page, 'awaitingShare');
+  // The worker registers 2 s after the composer is ready and claims it: `controllerchange`.
+  await expect
+    .poll(() => popup.evaluate(() => navigator.serviceWorker.controller !== null), { timeout: 10_000 })
+    .toBe(true);
+  await expect
+    .poll(async () => ((await handoffState()) as { swControllerChanges?: number } | undefined)?.swControllerChanges)
+    .toBeGreaterThanOrEqual(1);
+  expect(await shownError(page)).toBeNull();
+  await shareAndFinish(page, popup, human);
+  const rec = await lastRecord(handoffRecords);
+  expect(rec.outcome).toBe('posted-confirmed');
+  expect(rec.swControllerChanges).toBeGreaterThanOrEqual(1);
   expect((await storedSettings())?.msiteLockedUntil ?? null).toBeNull();
-  expect(await fake.stories()).toHaveLength(0);
+  expect(await fake.stories()).toHaveLength(1);
 });
 
 test('E12 (c) auth=out: NOT_LOGGED_IN closes the window at once, with no lock', async ({
@@ -333,7 +410,9 @@ test('E12 (g) listen=drop: the insert is ignored → INJECTION_IGNORED → H0, w
   exportBytes,
   handoffRecords,
 }, testInfo) => {
-  await fake.setKnobs({ listen: 'drop' });
+  // The drop target is the composer on /create/story/, so this case lands there directly (route=direct);
+  // the insert goes into the header's story input, whose `change` this composer does not read.
+  await fake.setKnobs({ listen: 'drop', route: 'direct' });
   await countUntrustedFileChanges(context);
   const page = await editor();
   await setSwitches(page, { assisted: true });
@@ -360,7 +439,7 @@ test('E12 (g) listen=drop: the insert is ignored → INJECTION_IGNORED → H0, w
   expect(await fake.stories()).toHaveLength(1);
 });
 
-test('E12 (h) input=afterTap: no story input on load → H0 (INPUT_MISSING); + → Story and pick', async ({
+test('E12 (h) input=afterTap: no story input on home, even after the P5 wait → H0 (INPUT_MISSING); + → Story and pick', async ({
   context,
   editor,
   composer,
@@ -376,10 +455,14 @@ test('E12 (h) input=afterTap: no story input on load → H0 (INPUT_MISSING); + �
   await loadPhoto(page, await photoFile(context, testInfo));
   const exportId = await postFromDesktop(page);
   const popup = await composer();
-  await waitPhase(page, 'awaitingPick');
+  // P5: the probe on `/` found no story input; H0 comes only after the 6 s wait for a late one.
+  await waitPhase(page, 'awaitingPick', 20_000);
   await expect(phaseLocator(page)).toHaveAttribute('data-level', 'H0');
   expect(await shownError(page)).toBe('INPUT_MISSING');
-  await expect(instruction(page)).toContainText('tap + → Story and pick');
+  await expect(instruction(page)).toContainText('tap + → Story, then pick');
+  await expect(page.locator('[data-row="story-input"]')).toHaveText(
+    'none image-only (file inputs: image/jpeg,image/png,video/mp4,video/quicktime)',
+  );
 
   await human.pickViaStory(popup, await exportFile(exportBytes, exportId, testInfo));
   await waitPhase(page, 'awaitingShare');
@@ -392,10 +475,15 @@ test('E12 (h) input=afterTap: no story input on load → H0 (INPUT_MISSING); + �
   expect(phasesOf(rec)).not.toContain('injecting');
   expect(rec.probe?.storyInput).toBe('absent');
   expect(rec.preflight?.C4).toBe('fail');
+  expect(rec.route).toBe('homeOnly');
+  // The wait ran (from probing to awaitingPick at least INPUT_WAIT_MS later).
+  const probing = rec.phaseLog.find((p) => p.phase === 'probing')?.t ?? 0;
+  const pick = rec.phaseLog.find((p) => p.phase === 'awaitingPick')?.t ?? 0;
+  expect(pick - probing).toBeGreaterThanOrEqual(INPUT_WAIT_MS);
   expect(await fake.stories()).toHaveLength(1);
 });
 
-test('E12 (i) route=homeOnly: H0 with the "tap + → Story" text; the owner gets there from home', async ({
+test('E12 (i) route=direct (the pre-F3 shape): /create/story/ renders itself, C5 passes, plain H0 text', async ({
   context,
   editor,
   composer,
@@ -404,19 +492,17 @@ test('E12 (i) route=homeOnly: H0 with the "tap + → Story" text; the owner gets
   exportBytes,
   handoffRecords,
 }, testInfo) => {
-  await fake.setKnobs({ route: 'homeOnly' });
+  await fake.setKnobs({ route: 'direct' });
   const page = await editor();
-  await setSwitches(page, { assisted: true });
+  await setSwitches(page, { assisted: false });
   await loadPhoto(page, await photoFile(context, testInfo));
   const exportId = await postFromDesktop(page);
   const popup = await composer();
   await waitPhase(page, 'awaitingPick');
-  await expect(popup).toHaveURL(`${IG_ORIGIN}/`);
-  await expect(instruction(page)).toContainText(
-    'The composer did not open directly. In the Instagram window tap + → Story, then pick instapost/',
-  );
+  await expect(popup).toHaveURL(`${IG_ORIGIN}/create/story/`);
+  await expect(instruction(page)).toContainText('In the Instagram window tap + → Story and pick instapost/');
+  await expect(page.locator('[data-row="page"]')).toHaveText('/create/story/ (the story composer directly)');
 
-  // + → Story navigates in-page to /create/story/ (an AM2 re-probe), then the owner picks.
   await human.pickViaStory(popup, await exportFile(exportBytes, exportId, testInfo));
   await waitPhase(page, 'awaitingShare');
   await expect(popup).toHaveURL(`${IG_ORIGIN}/create/story/`);
@@ -425,8 +511,8 @@ test('E12 (i) route=homeOnly: H0 with the "tap + → Story" text; the owner gets
   const rec = await lastRecord(handoffRecords);
   expect(rec.level).toBe('H0');
   expect(rec.outcome).toBe('posted-confirmed');
-  expect(rec.route).toBe('homeOnly');
-  expect(rec.preflight?.C5).toBe('fail');
+  expect(rec.route).toBe('direct');
+  expect(rec.preflight?.C5).toBe('pass');
   expect(phasesOf(rec)).not.toContain('injecting');
   expect(await fake.stories()).toHaveLength(1);
 });
@@ -525,7 +611,14 @@ async function h1Post(
   await shareAndFinish(f.page, popup, f.human);
   const rec = await lastRecord(f.handoffRecords);
   const story = (await f.fake.stories()).at(-1);
-  const { contractVersion: _v, C8, ...checks } = rec.preflight ?? ({} as NonNullable<HandoffRecord['preflight']>);
+  // swControlled is diagnostics only (P1): whether Instagram's worker had claimed the page when the probe
+  // ran is a race of about a second (F2), so two runs of the same flow may differ there.
+  const {
+    contractVersion: _v,
+    C8,
+    swControlled: _sw,
+    ...checks
+  } = rec.preflight ?? ({} as NonNullable<HandoffRecord['preflight']>);
   return {
     popup,
     rec,
@@ -597,97 +690,165 @@ test('E12 (m) drift=renamed: randomised class names and ids change nothing', asy
 });
 
 // ---------------------------------------------------------------------------------------------
-// Review fixes (§11 AM16–AM26): service worker in post mode, fail-closed URLs, the first
-// navigation, same-document loads, uploads after Share, later full-document loads, challenges.
+// Review fixes (§11 AM16–AM26): Instagram's desktop site, fail-closed URLs, the first navigation,
+// same-document loads, uploads after Share, later full-document loads, challenges.
 
-test.describe('with the fake service worker installed first (FID-1)', () => {
-  test.use({ preinstallFakeSw: true });
-
-  test('E12 (a2) sw=desktopShell, post: H0 "tap + → Story" from home, posted by hand; reloaded documents mobile', async ({
-    context,
-    editor,
-    composer,
-    fake,
-    human,
-    exportBytes,
-    handoffRecords,
-  }, testInfo) => {
-    const since = await lastSeq(fake);
-    const page = await editor();
-    await setSwitches(page, { assisted: true });
-    await loadPhoto(page, await photoFile(context, testInfo));
-    const exportId = await postFromDesktop(page);
-    const popup = await composer();
-    await waitPhase(page, 'awaitingPick');
-    await expect(instruction(page)).toContainText('The composer did not open directly');
-    await human.pickViaStory(popup, await exportFile(exportBytes, exportId, testInfo));
-    await waitPhase(page, 'awaitingShare');
-    await shareAndFinish(page, popup, human);
-
-    const rec = await lastRecord(handoffRecords);
-    expect(rec).toMatchObject({ level: 'H0', outcome: 'posted-confirmed', route: 'homeOnly' });
-    expect(rec.preflight?.C5).toBe('fail');
-    const session = await fake.requests(since);
-    expect(session.filter((r) => r.viaSw).map((r) => r.path)).toContain('/create/story/');
-    const reloaded = session.filter((r) => !r.viaSw && isDocument(r));
-    expect(reloaded.length).toBeGreaterThanOrEqual(1);
-    for (const r of reloaded) expect(r.classification.is_mobile).toBe(true);
-    expect(await fake.stories()).toHaveLength(1);
+test('E12 (s) classifier=client-hints with chMode uaOnly: Instagram serves its desktop site → DESKTOP_SHELL (P1)', async ({
+  context,
+  extension,
+  editor,
+  composer,
+  fake,
+  handoffRecords,
+  storedSettings,
+}, testInfo) => {
+  // Instagram classifying by sec-ch-ua-mobile while rule 1001 rewrites only the UA (§3.7 `uaOnly`):
+  // the composer is served the desktop site. P1: is_mobile alone decides DESKTOP_SHELL (until
+  // 2026-10-12 a controlled page did too; Instagram's worker claims every page, F2).
+  await fake.setKnobs({ classifier: 'client-hints' });
+  await extension.sw.evaluate(async () => {
+    const { local } = (globalThis as ExtGlobal).chrome.storage;
+    const { settings } = await local.get('settings');
+    await local.set({ settings: { ...(settings ?? {}), chMode: 'uaOnly' } });
   });
+  const page = await editor();
+  await setSwitches(page, { assisted: true });
+  await loadPhoto(page, await photoFile(context, testInfo));
+  await postFromDesktop(page);
+  await whenClosed(await composer());
+  await waitPhase(page, 'idle');
+  expect(await shownError(page)).toBe('DESKTOP_SHELL');
+  await expect(page.locator('[data-row="mobile"]')).toHaveText('no');
+  // AF-10: the detail names what the probe read (an explicit is_mobile false here).
+  await expect(page.getByTestId('handoff-error-detail')).toHaveText('The page said is_mobile false.');
+  const rec = await lastRecord(handoffRecords);
+  expect(rec.outcome).toBe('failed:DESKTOP_SHELL');
+  expect(rec.chMode).toBe('uaOnly');
+  expect(rec.probe?.isMobile).toBe(false);
+  expect(rec.preflight).toMatchObject({ C1: 'fail', C4: 'unknown' });
+  expect(phasesOf(rec)).not.toContain('injecting');
+  expect((await storedSettings())?.msiteLockedUntil ?? null).toBeNull();
+  expect(await fake.stories()).toHaveLength(0);
+});
 
-  test('E12 (s) reload=afterReady, desktopComposer=desktopShell: the SW-served desktop document → DESKTOP_SHELL', async ({
-    context,
-    editor,
-    composer,
-    fake,
-    handoffRecords,
-  }, testInfo) => {
-    await fake.setKnobs({ desktopComposer: 'desktopShell', reload: 'afterReady' });
-    const page = await editor();
-    await setSwitches(page, { assisted: true });
-    await loadPhoto(page, await photoFile(context, testInfo));
-    await postFromDesktop(page);
-    const popup = await composer();
-    await waitSeen(page, 'awaitingShare');
-    await whenClosed(popup);
-    await waitPhase(page, 'idle');
-    expect(await shownError(page)).toBe('DESKTOP_SHELL');
-    const rec = await lastRecord(handoffRecords);
-    expect(rec.outcome).toBe('failed:DESKTOP_SHELL');
-    expect(rec.level).toBe('H1');
-    expect(await fake.stories()).toHaveLength(0);
+/** chMode `uaOnly` (§3.7): rule 1001 rewrites only the User-Agent, so a client-hints classifier sees desktop. */
+async function useUaOnly(sw: Worker): Promise<void> {
+  await sw.evaluate(async () => {
+    const { local } = (globalThis as ExtGlobal).chrome.storage;
+    const { settings } = await local.get('settings');
+    await local.set({ settings: { ...(settings ?? {}), chMode: 'uaOnly' } });
   });
+}
 
-  test('E12 (t) reload=afterReady, desktop 302 home: pinned, the reload counts as the composer left after Share', async ({
-    context,
-    editor,
-    composer,
-    fake,
-    human,
-    exportBytes,
-    handoffRecords,
-  }, testInfo) => {
-    // A later full-document load that the SW redirects home is indistinguishable from a full
-    // navigation home after a real Share (AM16), so it ends as C9, pre-answered "posted"; the
-    // owner's answer corrects the record. The window still closes (rehearsal on).
-    await fake.setKnobs({ reload: 'afterReady' });
-    const page = await editor();
-    await setSwitches(page, { assisted: true });
-    await loadPhoto(page, await photoFile(context, testInfo));
-    const exportId = await postFromDesktop(page);
-    const popup = await composer();
-    await waitPhase(page, 'awaitingPick'); // homeOnly: the SW-served first load went home
-    const closed = whenClosed(popup);
-    await human.pickViaStory(popup, await exportFile(exportBytes, exportId, testInfo));
-    await waitSeen(page, 'finished');
-    await answerPosted(page, false);
-    await closed;
-    await waitPhase(page, 'idle');
-    const rec = await lastRecord(handoffRecords);
-    expect(rec.outcome).toBe('not-posted');
-    expect(phasesOf(rec)).toContain('awaitingShare');
-    expect(await fake.stories()).toHaveLength(0);
-  });
+test('E12 (w) a later document served desktop, on home in H0: the strict re-probe ends it with DESKTOP_SHELL (AM2)', async ({
+  context,
+  extension,
+  editor,
+  composer,
+  fake,
+  handoffRecords,
+  storedSettings,
+}, testInfo) => {
+  // No worker is involved (the default one has no fetch handler): the reloaded document itself is
+  // classified desktop. uaOnly + the UA classifier: the first documents are mobile ...
+  await useUaOnly(extension.sw);
+  const page = await editor();
+  await setSwitches(page, { assisted: false });
+  await loadPhoto(page, await photoFile(context, testInfo));
+  await postFromDesktop(page);
+  const popup = await composer();
+  await waitPhase(page, 'awaitingPick');
+  await expect(popup).toHaveURL(`${IG_ORIGIN}/`);
+  // ... then Instagram starts classifying by client hints (unchanged by uaOnly: ?0) and the page reloads.
+  await fake.setKnobs({ classifier: 'client-hints' });
+  const closed = whenClosed(popup);
+  await popup.reload().catch(() => undefined);
+  await closed;
+  await waitPhase(page, 'idle');
+  expect(await shownError(page)).toBe('DESKTOP_SHELL');
+  await expect(page.locator('[data-row="mobile"]')).toHaveText('no');
+  const rec = await lastRecord(handoffRecords);
+  expect(rec.outcome).toBe('failed:DESKTOP_SHELL');
+  expect(rec.probe?.isMobile).toBe(false);
+  // The strict re-probe of the new document decided: probing again after the H0 wait for the pick.
+  const phases = phasesOf(rec);
+  expect(phases.slice(phases.indexOf('awaitingPick'))).toEqual(['awaitingPick', 'probing', 'closing']);
+  expect(phases).not.toContain('injecting');
+  expect((await storedSettings())?.msiteLockedUntil ?? null).toBeNull();
+  expect(await fake.stories()).toHaveLength(0);
+});
+
+test('E12 (w) a later document served desktop after the H1 insert on the composer: DESKTOP_SHELL, one inject, nothing posted (AM2)', async ({
+  context,
+  extension,
+  editor,
+  composer,
+  fake,
+  handoffRecords,
+}, testInfo) => {
+  await useUaOnly(extension.sw);
+  await countUntrustedFileChanges(context);
+  const page = await editor();
+  await setSwitches(page, { assisted: true });
+  await loadPhoto(page, await photoFile(context, testInfo));
+  await postFromDesktop(page);
+  const popup = await composer();
+  await waitPhase(page, 'awaitingShare');
+  await expect(phaseLocator(page)).toHaveAttribute('data-level', 'H1');
+  // H1 went into the header input on home, which opened the composer in-page (P5): one insert.
+  await expect(popup).toHaveURL(`${IG_ORIGIN}/create/story/`);
+  expect(await untrustedFileChanges(popup)).toBe(1);
+  expect(await fakeInputOutcome(popup)).toBe('accepted');
+  // The composer document is reloaded and served desktop at /create/story/ (not a 302 home, which
+  // would be C9 once engaged, E12 t).
+  await fake.setKnobs({ classifier: 'client-hints', desktopComposer: 'desktopShell' });
+  const closed = whenClosed(popup);
+  await popup.reload().catch(() => undefined);
+  await closed;
+  await waitPhase(page, 'idle');
+  expect(await shownError(page)).toBe('DESKTOP_SHELL');
+  const rec = await lastRecord(handoffRecords);
+  expect(rec.outcome).toBe('failed:DESKTOP_SHELL');
+  expect(rec.level).toBe('H1');
+  expect(rec.probe?.isMobile).toBe(false);
+  // The strict re-probe of the new document decided; no insert came after the composer was ready
+  // (the one insert above was the session's only one: `injecting` shows twice only because its SPA
+  // navigation to the composer interrupted and resumed it, AM16).
+  const phases = phasesOf(rec);
+  expect(phases.slice(phases.lastIndexOf('awaitingShare'))).toEqual(['awaitingShare', 'probing', 'closing']);
+  expect(phases.lastIndexOf('injecting')).toBeLessThan(phases.lastIndexOf('awaitingShare'));
+  expect(await fake.stories()).toHaveLength(0);
+});
+
+test('E12 (t) reload=afterReady, 302 home: pinned, the reload counts as the composer left after Share', async ({
+  context,
+  editor,
+  composer,
+  fake,
+  human,
+  exportBytes,
+  handoffRecords,
+}, testInfo) => {
+  // A later full-document load that lands home (the composer's own reload: /create/story/ 302s to `/`,
+  // F3) is indistinguishable from a full navigation home after a real Share (AM16), so it ends as C9,
+  // pre-answered "posted"; the owner's answer corrects the record. The window still closes (rehearsal on).
+  await fake.setKnobs({ reload: 'afterReady' });
+  const page = await editor();
+  await setSwitches(page, { assisted: false });
+  await loadPhoto(page, await photoFile(context, testInfo));
+  const exportId = await postFromDesktop(page);
+  const popup = await composer();
+  await waitPhase(page, 'awaitingPick');
+  const closed = whenClosed(popup);
+  await human.pickViaStory(popup, await exportFile(exportBytes, exportId, testInfo));
+  await waitSeen(page, 'finished');
+  await answerPosted(page, false);
+  await closed;
+  await waitPhase(page, 'idle');
+  const rec = await lastRecord(handoffRecords);
+  expect(rec.outcome).toBe('not-posted');
+  expect(phasesOf(rec)).toContain('awaitingShare');
+  expect(await fake.stories()).toHaveLength(0);
 });
 
 test('E12 (n) auth=codeentry: a security flow under /auth_platform kills and locks the lane (AM17)', async ({
@@ -879,7 +1040,8 @@ test('E12 (v) geometry=cssFixed:360x640: an insert C6 never confirms, then Share
   const rec = await lastRecord(handoffRecords);
   expect(rec.outcome).toBe('posted-confirmed');
   expect(rec.detail).toMatch(/not confirmed/);
-  expect(rec.route).toBe('direct');
+  // The insert went into the header's story input on home (P5), which opened the composer in-page.
+  expect(rec.route).toBe('homeOnly');
   expect(phasesOf(rec)).toEqual(expect.arrayContaining(['injecting', 'awaitingPick', 'finished']));
   expect(phasesOf(rec)).not.toContain('awaitingShare');
   expect(await fake.stories()).toHaveLength(1);

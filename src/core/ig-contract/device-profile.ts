@@ -3,6 +3,7 @@
  * Rule 1001 is a tab-scoped session rule installed while the popup is still at about:blank.
  */
 import { type DnrRule, type HeaderOperation, type ResourceType, UA_RULE_ID } from './rules.ts';
+import { UA_RULE_HOSTS } from './urls.ts';
 
 /** `full` rewrites UA plus client hints; `uaOnly` is the fallback if S5 shows CH ops do not apply. */
 export type ChMode = 'full' | 'uaOnly';
@@ -10,8 +11,8 @@ export type ChMode = 'full' | 'uaOnly';
 /** Rule 1001's priority (§3.7); the rehearsal block rules use BLOCK_PRIORITY (100). */
 export const UA_RULE_PRIORITY = 1;
 
-/** CDN hosts are deliberately out of scope (OD6). */
-export const UA_RULE_DOMAINS = ['www.instagram.com', 'i.instagram.com'] as const;
+/** CDN hosts are deliberately out of scope (OD6). Kept in urls.ts so the agent can read it without the rules. */
+export const UA_RULE_DOMAINS = UA_RULE_HOSTS;
 
 /** Every resource type, main_frame included: with resourceTypes unset dNR skips main_frame. */
 export const ALL_RESOURCE_TYPES: readonly ResourceType[] = [

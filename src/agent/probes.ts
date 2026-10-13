@@ -8,21 +8,18 @@ import {
   acceptSetEquals,
   C6_MIN_VIEWPORT_AREA,
   FAKE_MARKER_META,
+  isImageOnlyAccept,
+  NAV_TYPES,
+  type NavType,
   type ProbeReport,
   STORY_ACCEPT,
 } from '../core/ig-contract/contract.ts';
 import { parseIsMobile, UA_JSON_KEY } from '../core/ig-contract/ua-json.ts';
-import { COMPOSER_PATH_PREFIX } from '../core/ig-contract/urls.ts';
+import { COMPOSER_PATH_PREFIX, UA_RULE_HOSTS } from '../core/ig-contract/urls.ts';
 import { PROBE_LIMITS } from '../shared/protocol.ts';
 
 /** The window the agent reads; its constructors (File, DataTransfer, Event) belong to the same realm. */
 export type AgentWindow = Window & typeof globalThis;
-
-const tokens = (accept: string): string[] =>
-  accept
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s !== '');
 
 /** Every `input[type=file]` in the document, in document order. */
 export function fileInputs(doc: Document): HTMLInputElement[] {
@@ -34,8 +31,7 @@ export function fileInputs(doc: Document): HTMLInputElement[] {
  * accepts video, so it never counts; an input without an accept list never counts either.
  */
 export function isStoryCandidate(input: HTMLInputElement): boolean {
-  const list = tokens(input.accept);
-  return list.length > 0 && list.every((t) => /^image\//i.test(t));
+  return isImageOnlyAccept(input.accept);
 }
 
 /** C4: the first candidate whose accept list set-equals STORY_ACCEPT, or null. H1 inserts into it. */
@@ -112,10 +108,69 @@ export function isComposerReady(win: AgentWindow): boolean {
   return readyCanvases(win).length > 0;
 }
 
-/** The service worker controlling this document, as the isolated world sees it. */
+/** The service worker controlling this document, as the isolated world sees it. Diagnostics only (P1). */
 export function swControlled(win: AgentWindow): ProbeReport['swControlled'] {
   const sw = win.navigator.serviceWorker;
   return sw ? sw.controller !== null : 'unknown';
+}
+
+/** The hosts rule 1001 covers: a request to one of them that a worker handled went out without it. */
+const RULE_HOSTS: readonly string[] = UA_RULE_HOSTS;
+
+/** The host of an absolute http(s) URL, lower-cased; null otherwise (no URL global needed). */
+function hostOf(url: string): string | null {
+  const m = /^https?:\/\/([^/?#]*)/i.exec(url);
+  if (!m) return null;
+  const authority = m[1] ?? '';
+  const host = authority.slice(authority.lastIndexOf('@') + 1).replace(/:\d+$/, '');
+  return host.toLowerCase();
+}
+
+/** The fields of a PerformanceEntry the tripwire reads. */
+export interface TimingLike {
+  name: string;
+  workerStart?: number;
+  type?: string;
+}
+
+/**
+ * P3 tripwire, one entry: a www/i.instagram.com resource that a service worker handled
+ * (`workerStart > 0`). Resource entries only; the navigation entry has its own rule.
+ */
+export function resourceIntercepted(entry: TimingLike): boolean {
+  const host = hostOf(entry.name);
+  return host !== null && RULE_HOSTS.includes(host) && (entry.workerStart ?? 0) > 0;
+}
+
+/** P3, the navigation entry: handled by a worker (`workerStart > 0`) on a load that was not a reload. */
+export function navigationIntercepted(entry: TimingLike): boolean {
+  return (entry.workerStart ?? 0) > 0 && entry.type !== 'reload';
+}
+
+function entries(win: AgentWindow, type: 'navigation' | 'resource'): TimingLike[] | null {
+  const perf = win.performance as Partial<Performance> | undefined;
+  if (!perf || typeof perf.getEntriesByType !== 'function') return null;
+  try {
+    return perf.getEntriesByType(type) as unknown as TimingLike[];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * P3: whether a service worker handled this document's requests (SW_INTERCEPTS), from the
+ * performance timeline the isolated world shares with the page, and the navigation type.
+ * F2: Instagram's worker has no fetch handler, so on a healthy page every `workerStart` is 0.
+ */
+export function swInterception(win: AgentWindow): { swIntercepted: ProbeReport['swIntercepted']; navType: NavType } {
+  const nav = entries(win, 'navigation');
+  const res = entries(win, 'resource');
+  const first = nav?.[0];
+  const navType: NavType =
+    first && (NAV_TYPES as readonly string[]).includes(first.type ?? '') ? (first.type as NavType) : 'unknown';
+  if (nav === null || res === null) return { swIntercepted: 'unknown', navType };
+  const intercepted = (first !== undefined && navigationIntercepted(first)) || res.some(resourceIntercepted);
+  return { swIntercepted: intercepted, navType };
 }
 
 /** The full report for `agent/probe` (strategy §3.5). */
@@ -130,6 +185,7 @@ export function probeComposer(win: AgentWindow): ProbeReport {
     dpr: win.devicePixelRatio || 1,
     portrait: win.innerHeight >= win.innerWidth,
     swControlled: swControlled(win),
+    ...swInterception(win),
     storyInput: inputs.some(isStoryCandidate) ? 'present' : 'absent',
     acceptOk: findStoryInput(doc) !== null,
     acceptSeen: inputs.slice(0, PROBE_LIMITS.acceptEntries).map((el) => el.accept.slice(0, PROBE_LIMITS.acceptLength)),

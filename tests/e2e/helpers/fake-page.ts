@@ -46,3 +46,37 @@ export async function countUntrustedFileChanges(context: BrowserContext): Promis
 export function untrustedFileChanges(page: Page): Promise<number> {
   return page.evaluate((key) => (window as unknown as Record<string, number>)[key] ?? -1, COUNTER);
 }
+
+/** AM37: the screen orientation as the page's own scripts read it, and what the screen really is. */
+export interface PageScreen {
+  /** `screen.orientation.type` and `.angle` as Instagram reads them (after the portrait shim). */
+  type: string | null;
+  angle: number | null;
+  /** The ScreenOrientation prototype's own getter: the emulated screen itself, whatever the shim did. */
+  real: string | null;
+  /** Own properties of the page's ScreenOrientation instance (the shim's two getters, or none). */
+  own: string[];
+  /** The prototype still has its native `type` getter (the shim never touches it). */
+  nativeProto: boolean;
+  /** What the shim leaves alone. */
+  mqPortrait: boolean;
+  screen: { w: number; h: number };
+}
+
+/** Reads PageScreen in the page's main world (Playwright evaluates there, as Instagram's code runs). */
+export function pageScreen(page: Page): Promise<PageScreen> {
+  return page.evaluate(() => {
+    const o = screen.orientation as ScreenOrientation | undefined;
+    const proto = Object.getOwnPropertyDescriptor(ScreenOrientation.prototype, 'type');
+    return {
+      type: o ? String(o.type) : null,
+      angle: o ? Number(o.angle) : null,
+      real: o && proto?.get ? String(proto.get.call(o)) : null,
+      own: o ? Object.getOwnPropertyNames(o).sort() : [],
+      nativeProto:
+        typeof proto?.get === 'function' && /\[native code\]/.test(Function.prototype.toString.call(proto.get)),
+      mqPortrait: matchMedia('(orientation: portrait)').matches,
+      screen: { w: screen.width, h: screen.height },
+    };
+  });
+}

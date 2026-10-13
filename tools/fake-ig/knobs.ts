@@ -8,7 +8,7 @@
  * Pure module (no Node APIs): imported by core.ts and bundled into the client.
  */
 import baselineJson from '../../src/core/ig-contract/baseline.json' with { type: 'json' };
-import { acceptSetEquals, type Baseline } from '../../src/core/ig-contract/contract.ts';
+import { acceptSetEquals, type Baseline, MSITE_MAX_CSS_WIDTH } from '../../src/core/ig-contract/contract.ts';
 
 export type GeometryModel = Baseline['geometry']['model'];
 
@@ -16,16 +16,32 @@ export interface Knobs {
   /** How `is_mobile` is decided: the User-Agent header (real Instagram, §5.1) or `sec-ch-ua-mobile`. */
   classifier: 'ua' | 'client-hints';
   /**
-   * `direct`: /create/story/ renders the composer; `homeOnly`: it 302s to `/`; `elsewhere`: it 302s
-   * to an interstitial www page that is neither home nor a security flow (`/consent/`, AM17).
+   * `homeOnly` (production, F3 and the 2026-10-12 live run): /create/story/ without media 302s to
+   * `/`, where the owner starts a story from the header's + → Story; `direct`: /create/story/ renders
+   * the composer route itself; `elsewhere`: it 302s to an interstitial www page that is neither home
+   * nor a security flow (`/consent/`, AM17).
    */
-  route: 'direct' | 'homeOnly' | 'elsewhere';
-  /** The story input is in the DOM on mount, or only after tapping + → Story. */
+  route: 'homeOnly' | 'direct' | 'elsewhere';
+  /**
+   * Where msite's hidden story input (`PolarisImageFileForm`, F3) is. `present` (production): beside
+   * the header's + entry, in the DOM whenever that entry is rendered (viewport at most
+   * MSITE_MAX_CSS_WIDTH CSS px wide, after `hydrateMs`); `afterTap`: only once + → Story was tapped
+   * (a menu variant). Picking (or inserting) a file there starts the story session: portrait check,
+   * then an SPA navigation to /create/story/ with the composer.
+   */
   input: 'present' | 'afterTap';
   /** The story input's accept list: STORY_ACCEPT_LISTS[accept]. */
   accept: 'default' | 'changed';
   /** Which event the composer reads files from. */
   listen: 'change' | 'drop';
+  /**
+   * AM37: what the composer page's landscape gate reads (PolarisStoryCreationPage `isLandscape`, at
+   * mount and on every resize; landscape: the rotate snackbar, no header and no Share footer).
+   * `screen` (production, 2026-10-12): `screen.orientation.type` (else `window.orientation`, else the
+   * viewport), so a landscape screen blocks Share in any window; `viewport`: `innerWidth > innerHeight`
+   * only (the earlier assumption). The + → Story session start checks the viewport either way.
+   */
+  landscapeCheck: 'screen' | 'viewport';
   /** `require`: file events with isTrusted=false are ignored (React itself never filters, S7). */
   trusted: 'ignore' | 'require';
   geometry: GeometryModel;
@@ -39,7 +55,17 @@ export interface Knobs {
    * behind its feed would; the story is recorded only if the window is still open then.
    */
   share: 'fake' | 'real-paths' | 'background';
-  sw: 'none' | 'desktopShell' | 'claimLate';
+  /**
+   * `claimOnRegister` (production, F2): every load registers
+   * `/fake-sw/claim-on-register.js?enableAddToHomeScreen=<is_mobile>&zenon_device_id=<per-load id>`;
+   * the new worker has no fetch handler, calls skipWaiting() and clients.claim(), so the page is
+   * controlled within about a second but its requests stay tab-attributed (workerStart 0).
+   * `desktopShell` (hypothetical, drives SW_INTERCEPTS): a worker WITH a fetch handler, at a stable
+   * URL, that answers navigations with its own desktop-UA fetch (tabId -1) and passes every other
+   * request through itself, and claims every page that registers it. `claimLate`: a worker without a
+   * fetch handler that claims the composer 2 s after it is ready (counted, P2). `none`: no worker.
+   */
+  sw: 'claimOnRegister' | 'none' | 'desktopShell' | 'claimLate';
   /** `codeentry`: 302 to /auth_platform/codeentry/ (AM17), another security flow. */
   auth: 'in' | 'out' | 'challenge' | 'codeentry';
   /** `firstLoad` (AM20): /create/story/ itself 302s off-host, before the kill switch is armed. */
@@ -63,22 +89,30 @@ export interface Knobs {
   marker: 'on' | 'off';
   /** Composer readiness delay after a file is accepted. */
   slowMs: number;
+  /**
+   * P5: msite's header (+ entry and story input) mounts this long after the shell renders, as after
+   * hydration. 0: at once.
+   */
+  hydrateMs: number;
 }
 
 export type KnobName = keyof Knobs;
-type EnumKnob = Exclude<KnobName, 'geometry' | 'insets' | 'slowMs'>;
+type EnumKnob = Exclude<KnobName, 'geometry' | 'insets' | 'slowMs' | 'hydrateMs'>;
+/** Knobs that take a whole number of milliseconds (0..60000). */
+export const MS_KNOBS = ['slowMs', 'hydrateMs'] as const;
 
 /** Allowed values of every enum knob, in display order (first = the usual default). */
 export const KNOB_CHOICES: { readonly [K in EnumKnob]: readonly Knobs[K][] } = {
   classifier: ['ua', 'client-hints'],
-  route: ['direct', 'homeOnly', 'elsewhere'],
+  route: ['homeOnly', 'direct', 'elsewhere'],
   input: ['present', 'afterTap'],
   accept: ['default', 'changed'],
   listen: ['change', 'drop'],
+  landscapeCheck: ['screen', 'viewport'],
   trusted: ['ignore', 'require'],
   save: ['on', 'off'],
   share: ['fake', 'real-paths', 'background'],
-  sw: ['none', 'desktopShell', 'claimLate'],
+  sw: ['claimOnRegister', 'none', 'desktopShell', 'claimLate'],
   auth: ['in', 'out', 'challenge', 'codeentry'],
   offhost: ['none', 'afterReady', 'firstLoad'],
   challenge: ['none', 'afterReady', 'afterReadySpa', 'afterShare', 'afterShareSpa'],
@@ -96,6 +130,7 @@ export const KNOB_NAMES: readonly KnobName[] = [
   'input',
   'accept',
   'listen',
+  'landscapeCheck',
   'trusted',
   'geometry',
   'insets',
@@ -111,6 +146,7 @@ export const KNOB_NAMES: readonly KnobName[] = [
   'drift',
   'marker',
   'slowMs',
+  'hydrateMs',
 ];
 
 /** Story input accept lists. `changed` adds HEIC (still images only), so C4 reports ACCEPT_DRIFT. */
@@ -125,16 +161,17 @@ export const POST_ACCEPT = 'image/jpeg,image/png,video/mp4,video/quicktime';
 /** The defaults the fake is written for. U16: must equal deriveKnobs(baseline.json). */
 export const DEFAULT_KNOBS: Readonly<Knobs> = Object.freeze<Knobs>({
   classifier: 'ua',
-  route: 'direct',
+  route: 'homeOnly',
   input: 'present',
   accept: 'default',
   listen: 'change',
+  landscapeCheck: 'screen',
   trusted: 'ignore',
   geometry: 'viewportDpr',
   insets: [0, 0],
   save: 'on',
   share: 'fake',
-  sw: 'none',
+  sw: 'claimOnRegister',
   auth: 'in',
   offhost: 'none',
   challenge: 'none',
@@ -144,18 +181,22 @@ export const DEFAULT_KNOBS: Readonly<Knobs> = Object.freeze<Knobs>({
   drift: 'none',
   marker: 'on',
   slowMs: 0,
+  hydrateMs: 0,
 });
 
 /** baseline.json as committed (structural facts only, strategy §7.7). */
-export const BASELINE: Baseline = baselineJson as Baseline;
+export const BASELINE: Baseline = baselineJson as unknown as Baseline;
 
 /**
- * Knob defaults implied by a baseline (strategy §3.9 item 3, §7.6, §11 AM26). Knobs the baseline
- * says nothing about (classifier, share, auth, offhost, challenge, desktopComposer, reload, locale,
- * drift, marker, slowMs) take the behaviour research describes, and so does every fact the
- * baseline marks `unknown`. L6's facts map too: an untrusted insert that Instagram ignores makes
- * `trusted=require`, a composer that reads only drops makes `listen=drop`. Throws for facts the
- * fake cannot model.
+ * Knob defaults implied by a baseline (strategy §3.9 item 3, §7.6, §11 AM26, AM35). Knobs the
+ * baseline says nothing about (classifier, share, auth, offhost, challenge, desktopComposer, reload,
+ * locale, drift, marker, slowMs, hydrateMs) take the behaviour research describes, and so does every
+ * fact the baseline marks `unknown`. L6's facts map too: an untrusted insert that Instagram ignores
+ * makes `trusted=require`, a composer that reads only drops makes `listen=drop`. The 2026-10-12 facts
+ * (first live run, logged-out code reading) make the production shape the default: `route=homeOnly`,
+ * the story input in the header (`input=present`), `sw=claimOnRegister`. Throws for facts the fake
+ * cannot model. AM37: `composerLandscapeCheck: screen` (live, 2026-10-12) makes the composer read the
+ * screen orientation (`landscapeCheck=screen`); `unknown` keeps the viewport check research described.
  */
 export function deriveKnobs(b: Baseline): Knobs {
   const unmodelled = (fact: string): never => {
@@ -163,7 +204,11 @@ export function deriveKnobs(b: Baseline): Knobs {
   };
   if (b.uaProfile !== 'android-reduced') unmodelled(`uaProfile=${String(b.uaProfile)}`);
   if (b.isMobileKeyFound === false) unmodelled('isMobileKeyFound=false');
-  if (b.swControlledAfterHardReload === true) unmodelled('swControlledAfterHardReload=true');
+  // The page is controlled after the hard reload only by a worker that claims it on registration.
+  if (b.swControlledAfterHardReload === true && b.swClaimsOnLoad !== true) {
+    unmodelled('swControlledAfterHardReload=true without swClaimsOnLoad=true');
+  }
+  if (b.msiteMaxCssWidth !== MSITE_MAX_CSS_WIDTH) unmodelled(`msiteMaxCssWidth=${String(b.msiteMaxCssWidth)}`);
   const accept = (Object.keys(STORY_ACCEPT_LISTS) as Knobs['accept'][]).find((k) =>
     acceptSetEquals(STORY_ACCEPT_LISTS[k], b.accept),
   );
@@ -172,16 +217,17 @@ export function deriveKnobs(b: Baseline): Knobs {
   if (geometry === null) unmodelled(`geometry.model=${b.geometry.model}`);
   return {
     classifier: 'ua',
-    route: b.route === 'homeOnly' ? 'homeOnly' : 'direct',
+    route: b.route === 'direct' ? 'direct' : 'homeOnly',
     input: b.storyInputBeforeTap === false ? 'afterTap' : 'present',
     accept: accept as Knobs['accept'],
     listen: b.fileEvent === 'drop' ? 'drop' : 'change',
+    landscapeCheck: b.composerLandscapeCheck === 'screen' ? 'screen' : 'viewport',
     trusted: b.untrustedInsertAccepted === false ? 'require' : 'ignore',
     geometry: b.geometry.model,
     insets: [b.geometry.insets[0], b.geometry.insets[1]],
     save: b.geometry.saveExposed === false ? 'off' : 'on',
     share: 'fake',
-    sw: b.firstLoadServedBySw === true ? 'desktopShell' : 'none',
+    sw: swKnob(b),
     auth: 'in',
     offhost: 'none',
     challenge: 'none',
@@ -191,7 +237,20 @@ export function deriveKnobs(b: Baseline): Knobs {
     drift: 'none',
     marker: 'on',
     slowMs: 0,
+    hydrateMs: 0,
   };
+}
+
+/**
+ * F2: a worker with a fetch handler (hypothetical) is the intercepting `desktopShell`; Instagram's
+ * real one has none and claims every page on registration (`claimOnRegister`); with neither fact, a
+ * worker that serves the first load is again `desktopShell`.
+ */
+function swKnob(b: Baseline): Knobs['sw'] {
+  if (b.swFetchHandler === true) return 'desktopShell';
+  if (b.swClaimsOnLoad === true) return 'claimOnRegister';
+  if (b.firstLoadServedBySw === true) return 'desktopShell';
+  return 'none';
 }
 
 export type ParsedGeometry =
@@ -224,7 +283,7 @@ function parseInt0(v: unknown, max: number): number | null {
 /**
  * Validates a partial knob update from the API (JSON) or the dashboard form (strings).
  * Unknown names and invalid values are errors; nothing is applied unless all are valid.
- * `insets` accepts `"top,bottom"` or `[top, bottom]`; `slowMs` a number or digit string.
+ * `insets` accepts `"top,bottom"` or `[top, bottom]`; `slowMs` and `hydrateMs` a number or digit string.
  */
 export function parseKnobPatch(input: unknown): KnobPatchResult {
   if (!isRecord(input)) return { ok: false, errors: ['knobs: expected an object'] };
@@ -243,10 +302,10 @@ export function parseKnobPatch(input: unknown): KnobPatchResult {
       const nums = parts.map((p) => parseInt0(p, 2000));
       if (nums.length === 2 && nums[0] != null && nums[1] != null) patch.insets = [nums[0], nums[1]];
       else errors.push(`insets: expected "top,bottom" (0..2000), got ${JSON.stringify(value)}`);
-    } else if (name === 'slowMs') {
+    } else if ((MS_KNOBS as readonly string[]).includes(name)) {
       const n = parseInt0(value, 60_000);
-      if (n !== null) patch.slowMs = n;
-      else errors.push(`slowMs: expected an integer 0..60000, got ${JSON.stringify(value)}`);
+      if (n !== null) patch[name] = n;
+      else errors.push(`${name}: expected an integer 0..60000, got ${JSON.stringify(value)}`);
     } else {
       const choices = KNOB_CHOICES[name as EnumKnob] as readonly string[];
       if (typeof value === 'string' && choices.includes(value)) patch[name] = value;
