@@ -1,10 +1,10 @@
 /**
- * Composer agent controller, in node against a hand-rolled window (not B6: B6 mounts the fake's
- * real React components in a browser). Covers the messaging contract the background relies on:
- * every command acked, the hand-off pinned, one insert per handoffId, the 10 s ready deadline,
- * the watch re-reporting on restart, C9 and controllerchange; AM24 (a canvas ready before the
- * watch, or before an H1 insert, never counts) and AM18 (the watch survives composer-left).
- * P3 (2026-10-12): the service-worker interception tripwire, in the probe and in the watch.
+ * Composer agent controller, in node against a hand-rolled window (the browser tests mount real DOM: B6 the
+ * fake's StoryComposer, B11 to B14 the autopilot's fixtures). Covers the messaging contract the background
+ * relies on (ux.md §10, IA6): every command acked, the hand-off pinned, one open-entry, insert and Share per
+ * handoffId, nothing driven once Finish by hand began; the probe's IA5 fields (account, entry, activation,
+ * visibility); the watch (input-appeared, account-appeared, controllerchange, restart re-reports); P3, the
+ * service-worker interception tripwire, in the probe and in the watch.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { STORY_ACCEPT } from '../core/ig-contract/contract.ts';
@@ -19,6 +19,9 @@ interface FakeInput {
   accept: string;
   files: unknown;
   events: string[];
+  isConnected: boolean;
+  parentElement: null;
+  closest(sel: string): null;
   dispatchEvent(e: Event): boolean;
 }
 
@@ -30,11 +33,22 @@ interface FakeCanvas {
   checkVisibility(): boolean;
 }
 
+/** An account link as readAccount reads it (closest, getAttribute, querySelector). */
+interface FakeLink {
+  href: string;
+  nav: boolean;
+  article: boolean;
+  avatar: boolean;
+}
+
 const input = (accept: string): FakeInput => ({
   type: 'file',
   accept,
   files: null,
   events: [],
+  isConnected: true,
+  parentElement: null,
+  closest: () => null,
   dispatchEvent(e) {
     this.events.push(`${e.type}:${e.bubbles && e.composed ? 'bubbling' : 'flat'}`);
     return true;
@@ -50,6 +64,16 @@ const canvas = (w: number, h: number, css: FakeCanvas['css']): FakeCanvas => ({
     return { x, y, width: cw, height: ch, left: x, top: y, right: x + cw, bottom: y + ch };
   },
   checkVisibility: () => true,
+});
+
+const linkEl = (l: FakeLink) => ({
+  getAttribute: (name: string) => (name === 'href' ? l.href : null),
+  querySelector: (sel: string) => (sel === 'img, svg' && l.avatar ? {} : null),
+  closest: (sel: string) => {
+    if (sel === 'article') return l.article ? {} : null;
+    if (sel.startsWith('nav')) return l.nav ? {} : null;
+    return null;
+  },
 });
 
 /** P3: a PerformanceObserver the test can feed entries to (null: the window has none). */
@@ -73,13 +97,18 @@ function fakeWindow(opts: { observer?: boolean } = {}) {
     }
   }
   let seq = 0;
-  const intervals = new Map<number, { fn: () => void; ms: number; next: number }>();
+  /** Intervals and timeouts on one fake clock (`every: 0` is a timeout). */
+  const timers = new Map<number, { fn: () => void; every: number; next: number }>();
   const swListeners: (() => void)[] = [];
+  const docListeners: { type: string; fn: (e: unknown) => void }[] = [];
   const page = {
     inputs: [] as FakeInput[],
     canvases: [] as FakeCanvas[],
     scripts: [] as { textContent: string }[],
+    links: [] as FakeLink[],
     marker: true,
+    visibility: 'visible' as 'visible' | 'hidden',
+    activation: { isActive: false, hasBeenActive: false },
     /** P3: the performance timeline (the navigation entry, then resources); null = not readable. */
     navigation: [{ name: 'https://www.instagram.com/', type: 'reload', workerStart: 0 }] as
       | { name: string; type: string; workerStart: number }[]
@@ -97,9 +126,12 @@ function fakeWindow(opts: { observer?: boolean } = {}) {
     innerWidth: 511,
     innerHeight: 909,
     devicePixelRatio: 2,
-    location: { pathname: '/create/story/' },
+    location: { pathname: '/' },
     navigator: {
       serviceWorker: { controller: null, addEventListener: (_: string, l: () => void) => void swListeners.push(l) },
+      get userActivation() {
+        return page.activation;
+      },
     },
     performance: {
       now: () => t,
@@ -109,10 +141,16 @@ function fakeWindow(opts: { observer?: boolean } = {}) {
       },
     },
     setInterval: (fn: () => void, ms: number) => {
-      intervals.set(++seq, { fn, ms, next: t + ms });
+      timers.set(++seq, { fn, every: ms, next: t + ms });
       return seq;
     },
-    clearInterval: (id: number) => void intervals.delete(id),
+    clearInterval: (id: number) => void timers.delete(id),
+    setTimeout: (fn: () => void, ms: number) => {
+      timers.set(++seq, { fn, every: 0, next: t + Math.max(0, ms) });
+      return seq;
+    },
+    clearTimeout: (id: number) => void timers.delete(id),
+    AbortController,
     File,
     Event,
     DataTransfer: FakeDataTransfer,
@@ -120,14 +158,27 @@ function fakeWindow(opts: { observer?: boolean } = {}) {
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
     document: {
       documentElement: { lang: 'es' },
+      get visibilityState() {
+        return page.visibility;
+      },
       querySelectorAll(sel: string) {
         if (sel === 'input') return page.inputs;
         if (sel === 'canvas') return page.canvases;
         if (sel.startsWith('script')) return page.scripts;
+        if (sel === 'a[href]') return page.links.map(linkEl);
         return [];
       },
       querySelector: (sel: string) =>
         sel.startsWith('meta[name="instapost-fake-instagram"]') && page.marker ? {} : null,
+      addEventListener(type: string, fn: (e: unknown) => void, o?: { signal?: AbortSignal }) {
+        const entry = { type, fn };
+        docListeners.push(entry);
+        o?.signal?.addEventListener('abort', () => {
+          const i = docListeners.indexOf(entry);
+          if (i >= 0) docListeners.splice(i, 1);
+        });
+      },
+      removeEventListener() {},
     },
   };
   return {
@@ -137,17 +188,24 @@ function fakeWindow(opts: { observer?: boolean } = {}) {
     advance(ms: number) {
       const end = t + ms;
       for (;;) {
-        const due = [...intervals.values()].filter((i) => i.next <= end).sort((a, b) => a.next - b.next)[0];
+        const due = [...timers.entries()].filter(([, x]) => x.next <= end).sort((a, b) => a[1].next - b[1].next)[0];
         if (!due) break;
-        t = due.next;
-        due.next += due.ms;
-        due.fn();
+        const [id, x] = due;
+        t = x.next;
+        if (x.every > 0) x.next += x.every;
+        else timers.delete(id);
+        x.fn();
       }
       t = end;
     },
     controllerChange: () => {
       for (const l of swListeners) l();
     },
+    /** Fires a document event at the listeners registered for it. */
+    fire: (type: string, e: unknown = {}) => {
+      for (const l of docListeners.filter((x) => x.type === type)) l.fn(e);
+    },
+    docListeners,
     /** Delivers resource entries to the connected observers (entries past a full timeline buffer). */
     observe: (entries: { name: string; workerStart: number }[]) => {
       for (const o of observers) if (o.connected) o.cb({ getEntries: () => entries });
@@ -159,12 +217,14 @@ function fakeWindow(opts: { observer?: boolean } = {}) {
 const EXT = 'jehchapoghccaofddgdkakdkjijmknhk';
 const ADDR = { handoffId: 'hof_1', nonce: 'n-1' };
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
-const flush = () => new Promise((r) => setTimeout(r, 0));
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+};
 
 function harness(opts: { observer?: boolean } = {}) {
   const w = fakeWindow(opts);
   const sent: AgentToBackground[] = [];
-  let fileReply: unknown = { ok: true, name: 'story.png', mime: 'image/png', b64: bytesToB64(PNG) };
+  const fileReply: unknown = { ok: true, name: 'story.png', mime: 'image/png', b64: bytesToB64(PNG) };
   let listener: Parameters<AgentRuntime['listen']>[0] | null = null;
   const runtime: AgentRuntime = {
     id: EXT,
@@ -176,7 +236,7 @@ function harness(opts: { observer?: boolean } = {}) {
       listener = l;
     },
   };
-  startAgent(w.win, runtime);
+  const agent = startAgent(w.win, runtime);
   const command = (msg: Record<string, unknown>, senderId = EXT): AgentAck | undefined => {
     let ack: AgentAck | undefined;
     listener?.({ v: 1, ...ADDR, ...msg }, { id: senderId }, (a) => {
@@ -185,15 +245,8 @@ function harness(opts: { observer?: boolean } = {}) {
     return ack;
   };
   const events = () => sent.filter((m) => m.type === 'agent/event').map((m) => (m as { event: string }).event);
-  return {
-    ...w,
-    sent,
-    command,
-    events,
-    setFileReply: (r: unknown) => {
-      fileReply = r;
-    },
-  };
+  const facts = () => sent.flatMap((m) => (m.type === 'agent/fact' ? [m.fact] : []));
+  return { ...w, agent, sent, command, events, facts };
 }
 
 let h: ReturnType<typeof harness>;
@@ -207,9 +260,16 @@ beforeEach(() => {
 
 /** The composer canvas: 9:16 filling the viewport. */
 const composerCanvas = () => canvas(1022, 1818, { x: 0, y: 0, w: 511, h: 909 });
+const profile = (over: Partial<FakeLink> = {}): FakeLink => ({
+  href: '/testuser/',
+  nav: true,
+  article: false,
+  avatar: true,
+  ...over,
+});
 
 describe('agent commands', () => {
-  it('acks every valid command and reports the probe with the pinned address', () => {
+  it('acks every valid command and reports the probe with the pinned address (IA5 fields included)', () => {
     expect(h.command({ type: 'agent/probe' })).toEqual({ ok: true });
     expect(h.sent).toEqual([
       {
@@ -229,6 +289,10 @@ describe('agent commands', () => {
           acceptOk: true,
           acceptSeen: ['image/jpeg,image/png,video/mp4,video/quicktime', 'image/avif,image/jpeg,image/png'],
           lang: 'es',
+          activation: { isActive: false, hasBeenActive: false },
+          visibility: 'visible',
+          account: { handle: null, candidates: 0 },
+          entryFound: false,
         },
       },
     ]);
@@ -238,7 +302,9 @@ describe('agent commands', () => {
     h.command({ type: 'agent/probe' });
     expect(h.command({ type: 'agent/probe', nonce: 'other' })).toEqual({ ok: false });
     expect(h.command({ type: 'agent/probe', handoffId: 'hof_2' })).toEqual({ ok: false });
-    expect(h.command({ type: 'agent/watch' })).toEqual({ ok: false });
+    expect(h.command({ type: 'agent/inject' })).toEqual({ ok: false });
+    expect(h.command({ type: 'agent/drive', step: 'tap-anything' })).toEqual({ ok: false });
+    expect(h.command({ type: 'agent/observe', from: 'page' })).toEqual({ ok: false });
     expect(h.command({ type: 'agent/probe' }, 'another-extension')).toBeUndefined();
     expect(h.sent).toHaveLength(1);
   });
@@ -259,154 +325,135 @@ describe('agent commands', () => {
       probe: { canvas: { w: 1022, h: 1818, css: { x: 0, y: 0, w: 511, h: 909 } } },
     });
   });
+
+  it('IA5: reports the account link, the owner’s activation and a hidden page', () => {
+    h.page.links.push(profile(), profile({ href: '/explore/' }), profile({ href: '/other/', article: true }));
+    h.page.activation = { isActive: true, hasBeenActive: true };
+    h.page.visibility = 'hidden';
+    h.command({ type: 'agent/probe' });
+    expect(h.sent.at(-1)).toMatchObject({
+      probe: {
+        account: { handle: 'testuser', candidates: 1 },
+        activation: { isActive: true, hasBeenActive: true },
+        visibility: 'hidden',
+      },
+    });
+  });
+
+  it('C14: two different handles in the navigation are unreadable, never a guess', () => {
+    h.page.links.push(profile(), profile({ href: '/someone_else/' }));
+    h.command({ type: 'agent/probe' });
+    expect(h.sent.at(-1)).toMatchObject({ probe: { account: { handle: null, candidates: 2 } } });
+  });
 });
 
-describe('H1 insert', () => {
-  it('assigns the file once per handoffId and dispatches input, then change (AM3)', async () => {
-    h.command({ type: 'agent/probe' });
-    h.command({ type: 'agent/watch', readyTimeoutMs: 10_000 });
-    h.command({ type: 'agent/inject' });
-    h.command({ type: 'agent/inject' });
+describe('IA6: one step per hand-off, and none after Finish by hand', () => {
+  it('open-entry without a + beside the input reports ENTRY_MISSING once, whatever the background sends', async () => {
+    h.command({ type: 'agent/drive', step: 'open-entry', fingerprint: null });
+    h.command({ type: 'agent/drive', step: 'open-entry', fingerprint: null });
     await flush();
-    expect(h.sent.filter((m) => m.type === 'agent/get-file')).toHaveLength(1);
-    const story = h.page.inputs[1];
-    expect(story?.events).toEqual(['input:bubbling', 'change:bubbling']);
-    const files = story?.files as File[];
-    expect(files).toHaveLength(1);
-    expect(files[0]?.name).toBe('story.png');
-    expect(files[0]?.type).toBe('image/png');
-    expect(new Uint8Array(await (files[0] as File).arrayBuffer())).toEqual(PNG);
-    expect(h.page.inputs[0]?.events).toEqual([]); // never the post input
+    const entries = h.facts().filter((f) => f.kind === 'entry');
+    expect(entries).toEqual([expect.objectContaining({ kind: 'entry', result: 'ENTRY_MISSING', plusTaps: 0 })]);
   });
 
-  it('reports composer-ready when C6 holds within the deadline', async () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 10_000 });
-    h.command({ type: 'agent/inject' });
+  it('insert without an armed input fails at once and never asks for the file', async () => {
+    h.command({ type: 'agent/drive', step: 'insert' });
+    h.command({ type: 'agent/drive', step: 'insert' });
     await flush();
-    h.advance(3000);
-    h.page.canvases.push(composerCanvas());
-    h.advance(20_000);
-    expect(h.events()).toEqual(['input-appeared', 'composer-ready']);
-  });
-
-  it('AM28: reports inject-unconfirmed once when C6 does not hold within 10 s of a dispatched insert', async () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 10_000 });
-    h.command({ type: 'agent/inject' });
-    await flush();
-    h.advance(10_000 - WATCH_TICK_MS);
-    expect(h.events()).toEqual(['input-appeared']);
-    h.advance(WATCH_TICK_MS);
-    h.advance(60_000);
-    // The insert was dispatched: the file may be in the composer, so this is not inject-ignored.
-    expect(h.events()).toEqual(['input-appeared', 'inject-unconfirmed']);
-  });
-
-  it('a refused file is inject-ignored at once, with no insert', async () => {
-    h.setFileReply({ ok: false });
-    h.command({ type: 'agent/watch', readyTimeoutMs: 10_000 });
-    h.command({ type: 'agent/inject' });
-    await flush();
-    expect(h.events()).toEqual(['input-appeared', 'inject-ignored']);
+    expect(h.facts()).toEqual([{ kind: 'insert-failed', why: 'not-armed' }]);
+    expect(h.sent.filter((m) => m.type === 'agent/get-file')).toHaveLength(0);
     expect(h.page.inputs[1]?.events).toEqual([]);
   });
 
-  it('a C6 canvas below half the viewport is not ready', async () => {
-    h.page.canvases.push(canvas(720, 1280, { x: 75, y: 134, w: 360, h: 640 })); // 49.6 % of 511x909
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    h.advance(5000);
-    expect(h.events()).toEqual(['input-appeared']);
+  it('Share on a composer without one Share control is refused, once, and nothing is tapped', async () => {
+    h.raw.location.pathname = '/create/story/';
+    h.page.canvases.push(composerCanvas());
+    h.command({ type: 'agent/drive', step: 'share' });
+    h.command({ type: 'agent/drive', step: 'share' });
+    await flush();
+    expect(h.facts()).toEqual([{ kind: 'share-refused', why: 'controls' }]);
+  });
+
+  it('Share away from the composer is refused as not-composer', async () => {
+    h.command({ type: 'agent/drive', step: 'share' });
+    await flush();
+    expect(h.facts()).toEqual([{ kind: 'share-refused', why: 'not-composer' }]);
+  });
+
+  it('after agent/observe the agent only observes: drive commands are acked and ignored', async () => {
+    expect(h.command({ type: 'agent/observe', from: 'manual' })).toEqual({ ok: true });
+    expect(h.command({ type: 'agent/drive', step: 'insert' })).toEqual({ ok: true });
+    expect(h.command({ type: 'agent/drive', step: 'share' })).toEqual({ ok: true });
+    await flush();
+    expect(h.facts()).toEqual([]);
+    // It watches for the owner's own click (capture, once) and runs the watch.
+    expect(h.docListeners.filter((l) => l.type === 'click')).toHaveLength(1);
+    expect(h.agent.watch.running()).toBe(true);
+  });
+
+  it('an untrusted click, or one outside a Share control, is not the owner’s Share', async () => {
+    h.command({ type: 'agent/observe', from: 'manual' });
+    h.fire('click', { target: {}, isTrusted: false });
+    await flush();
+    h.fire('click', { target: {}, isTrusted: true });
+    await flush();
+    expect(h.facts().filter((f) => f.kind === 'owner-share')).toEqual([]);
+    // It keeps watching after each one.
+    expect(h.docListeners.filter((l) => l.type === 'click')).toHaveLength(1);
+  });
+
+  it('a visibility change is reported as a fact once a hand-off is pinned', () => {
+    h.page.visibility = 'hidden';
+    h.fire('visibilitychange');
+    expect(h.facts()).toEqual([]);
+    h.command({ type: 'agent/probe' });
+    h.fire('visibilitychange');
+    h.page.visibility = 'visible';
+    h.fire('visibilitychange');
+    expect(h.facts()).toEqual([
+      { kind: 'visibility', hidden: true },
+      { kind: 'visibility', hidden: false },
+    ]);
   });
 });
 
 describe('watch', () => {
-  it('a restart re-reports the current state at once', () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    h.page.canvases.push(composerCanvas());
+  it('reports the story input and the account once per run; a restart re-reports the current state', () => {
+    h.command({ type: 'agent/watch' });
+    expect(h.events()).toEqual(['input-appeared']);
+    h.page.links.push(profile());
     h.advance(WATCH_TICK_MS);
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    expect(h.events()).toEqual(['input-appeared', 'composer-ready', 'composer-ready', 'input-appeared']);
-  });
-
-  it('AM24: a canvas already ready when the watch first starts never counts; a new one does', () => {
-    const preview = composerCanvas(); // e.g. a camera preview drawn before any file was chosen
-    h.page.canvases.push(preview);
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
     h.advance(5000);
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 }); // a later restart keeps the document's baseline
-    h.advance(5000);
-    expect(h.events()).not.toContain('composer-ready');
-    h.page.canvases.push(composerCanvas()); // the owner's picked photo
-    h.advance(WATCH_TICK_MS);
-    expect(h.events()).toContain('composer-ready');
+    expect(h.events()).toEqual(['input-appeared', 'account-appeared']);
+    h.command({ type: 'agent/watch' });
+    expect(h.events()).toEqual(['input-appeared', 'account-appeared', 'input-appeared', 'account-appeared']);
   });
 
-  it('AM24: a pre-existing canvas that goes away and comes back counts', () => {
-    const c = composerCanvas();
-    h.page.canvases.push(c);
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    h.page.canvases.length = 0;
-    h.advance(WATCH_TICK_MS);
-    h.page.canvases.push(c);
-    h.advance(WATCH_TICK_MS);
-    expect(h.events()).toContain('composer-ready');
-  });
-
-  it('AM24: in an H1 run, composer-ready waits for the insert', async () => {
-    h.page.inputs.splice(1, 1); // no story input: the insert fails
-    h.command({ type: 'agent/watch', readyTimeoutMs: 10_000 });
-    h.page.canvases.push(composerCanvas()); // a canvas shows up on its own before the insert
+  it('msite mounts its header after hydration: the input is reported when it appears', () => {
+    const story = h.page.inputs.splice(1, 1);
+    h.command({ type: 'agent/watch' });
     h.advance(1000);
-    expect(h.events()).not.toContain('composer-ready');
-    h.command({ type: 'agent/inject' });
-    await flush();
-    h.advance(1000);
-    expect(h.events()).toEqual(['inject-ignored']);
-    // H0 afterwards (a new run without a deadline) reports it.
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    expect(h.events()).toEqual(['inject-ignored', 'composer-ready']);
+    expect(h.events()).toEqual([]);
+    h.page.inputs.push(...story);
+    h.advance(WATCH_TICK_MS);
+    expect(h.events()).toEqual(['input-appeared']);
   });
 
-  it('AM18: after composer-left the watch keeps running; a pick back on the composer is reported', () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    h.raw.location.pathname = '/'; // a client-side redirect home before anything was picked
-    h.advance(WATCH_TICK_MS);
-    expect(h.events().filter((e) => e === 'composer-left')).toHaveLength(1);
-    h.advance(5000);
-    expect(h.events().filter((e) => e === 'composer-left')).toHaveLength(1); // no repeats while home
-    h.raw.location.pathname = '/create/story/'; // + → Story
-    h.page.canvases.push(composerCanvas());
-    h.advance(WATCH_TICK_MS);
-    expect(h.events()).toContain('composer-ready');
-    h.raw.location.pathname = '/'; // Share
-    h.advance(WATCH_TICK_MS);
-    expect(h.events().filter((e) => e === 'composer-left')).toHaveLength(2);
-  });
-
-  it('C9: the path leaving /create/story after being on it', () => {
-    h.raw.location.pathname = '/';
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    h.advance(1000);
-    expect(h.events()).not.toContain('composer-left'); // homeOnly: never on the composer yet
-    h.raw.location.pathname = '/create/story/';
-    h.advance(1000);
-    h.raw.location.pathname = '/';
-    h.advance(WATCH_TICK_MS);
-    expect(h.events().filter((e) => e === 'composer-left')).toHaveLength(1);
-  });
-
-  it('C9: the ready canvas gone for more than 2 s', () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
-    h.page.canvases.push(composerCanvas());
-    h.advance(WATCH_TICK_MS);
-    h.page.canvases.length = 0;
+  it('a post input alone never counts as the story input', () => {
+    h.page.inputs.splice(1, 1);
+    h.command({ type: 'agent/watch' });
     h.advance(2000);
-    expect(h.events()).not.toContain('composer-left');
-    h.advance(2 * WATCH_TICK_MS);
-    expect(h.events()).toContain('composer-left');
+    expect(h.events()).not.toContain('input-appeared');
+  });
+
+  it('a drive command starts the watch when it is not running', () => {
+    expect(h.agent.watch.running()).toBe(false);
+    h.command({ type: 'agent/drive', step: 'insert' });
+    expect(h.agent.watch.running()).toBe(true);
   });
 
   it('reports a service worker taking control', () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.command({ type: 'agent/watch' });
     h.controllerChange();
     expect(h.events()).toContain('sw-controller-change');
   });
@@ -415,14 +462,14 @@ describe('watch', () => {
     h.command({ type: 'agent/probe' });
     h.controllerChange();
     expect(h.events()).toEqual([]);
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.command({ type: 'agent/watch' });
     expect(h.events()).toContain('sw-controller-change');
   });
 
   it('P2: each controllerchange is reported once, never again on a restart (the record counts them)', () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.command({ type: 'agent/watch' });
     h.controllerChange();
-    h.command({ type: 'agent/watch', readyTimeoutMs: 10_000 });
+    h.command({ type: 'agent/watch' });
     h.controllerChange();
     h.advance(1000);
     expect(h.events().filter((e) => e === 'sw-controller-change')).toHaveLength(2);
@@ -466,7 +513,7 @@ describe('P3: the service-worker interception tripwire', () => {
   });
 
   it('the watch reports a request a worker handled after the probe (a late claim), once per run', () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.command({ type: 'agent/watch' });
     h.page.resources.push({ name: 'https://www.instagram.com/api/graphql', workerStart: 0 });
     h.advance(1000);
     expect(h.events()).not.toContain('sw-intercepted');
@@ -478,8 +525,12 @@ describe('P3: the service-worker interception tripwire', () => {
 
   it('past the 250-entry timeline buffer: the observer (from the agent’s start, buffered) still catches it', () => {
     const o = harness({ observer: true });
-    expect(o.observers).toHaveLength(1);
-    expect(o.observers[0]?.options).toEqual({ type: 'resource', buffered: true });
+    // The watch's tripwire observer first, then the request observer (net.ts), both buffered.
+    expect(o.observers).toHaveLength(2);
+    expect(o.observers.map((x) => x.options)).toEqual([
+      { type: 'resource', buffered: true },
+      { type: 'resource', buffered: true },
+    ]);
     // The page's buffer is full: getEntriesByType never shows the late request; the observer does.
     for (let i = 0; i < 250; i++) o.page.resources.push({ name: `https://www.instagram.com/r${i}`, workerStart: 0 });
     o.command({ type: 'agent/probe' });
@@ -491,8 +542,8 @@ describe('P3: the service-worker interception tripwire', () => {
     // The probe reports what the observer saw ...
     o.command({ type: 'agent/probe' });
     expect(o.sent.at(-1)).toMatchObject({ probe: { swIntercepted: true } });
-    // ... and so does the watch, once per run; the observer is done.
-    o.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    // ... and so does the watch, once per run; the tripwire's observer is done.
+    o.command({ type: 'agent/watch' });
     o.advance(WATCH_TICK_MS);
     expect(o.events().filter((e) => e === 'sw-intercepted')).toHaveLength(1);
     expect(o.observers[0]?.connected).toBe(false);
@@ -504,7 +555,7 @@ describe('P3: the service-worker interception tripwire', () => {
       { name: 'https://scontent.cdninstagram.com/x.jpg', workerStart: 4 },
       { name: 'https://www.instagram.com/api/graphql', workerStart: 0 },
     ]);
-    o.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    o.command({ type: 'agent/watch' });
     o.advance(1000);
     expect(o.events()).not.toContain('sw-intercepted');
     o.command({ type: 'agent/probe' });
@@ -512,7 +563,7 @@ describe('P3: the service-worker interception tripwire', () => {
   });
 
   it('a page that clears its resource timings is scanned again from the start', () => {
-    h.command({ type: 'agent/watch', readyTimeoutMs: 0 });
+    h.command({ type: 'agent/watch' });
     h.page.resources.push(
       { name: 'https://www.instagram.com/a', workerStart: 0 },
       { name: 'https://www.instagram.com/b', workerStart: 0 },

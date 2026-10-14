@@ -1,8 +1,8 @@
 /**
- * H1 assisted insert (strategy §3.8, §11 AM3): the export becomes a File, is assigned to the
- * story input through DataTransfer, and the input gets bubbling, composed `input` then `change`
- * events. `change` comes last: it is what fires React's onChange (spike S7). Nothing else is
- * dispatched, and nothing is ever activated on the page.
+ * The insert (strategy §3.8, §11 AM3; ux.md §10): the export becomes a File, is assigned to the story
+ * input that Instagram's Story item armed through DataTransfer, and the input gets bubbling, composed
+ * `input` then `change` events. `change` comes last: it is what fires React's onChange (spike S7). These
+ * are the only events the agent dispatches; its only taps are tap.ts's.
  */
 import { b64ToBytes } from '../shared/b64.ts';
 import type { AgentWindow } from './probes.ts';

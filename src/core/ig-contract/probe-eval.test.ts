@@ -1,5 +1,6 @@
 /**
- * Part of U9 (strategy §7.11): the §3.6 step-7 table, row by row and in order, plus the AM2
+ * Part of U9 (strategy §7.11): the §3.6 step-7 table (rows 6–8 as the autopilot has them, ux.md), row by
+ * row and in order, plus the AM2
  * strict re-probe and the preflight summary (§3.9 item 1) built from the same report. 2026-10-12:
  * P1 (SW control is diagnostics), P3 (row 4b, the interception tripwire), P4 (row 5, msite's
  * 767 CSS px width) and U1 (C4 judged only when the decision reached it). AM37: row 5b (C3b, the
@@ -40,7 +41,6 @@ const input = (over: Partial<ProbeEvalInput> = {}, probe: Partial<ProbeReport> =
   probe: goodProbe(probe),
   guarded: true,
   mode: 'post',
-  assistedInsert: true,
   url: COMPOSER,
   refitUsed: false,
   strict: false,
@@ -59,7 +59,7 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
       { marker: false, isMobile: false, portrait: false },
       { kind: 'fail', code: 'GUARD_NOT_FAKE' },
     ],
-    ['row 2: live without marker carries on', { guarded: false }, { marker: false }, { kind: 'h1' }],
+    ['row 2: live without marker carries on', { guarded: false }, { marker: false }, { kind: 'proceed' }],
     [
       'row 3: login URL',
       { url: 'https://www.instagram.com/accounts/login/' },
@@ -74,8 +74,8 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
     ],
     ['row 4: is_mobile false', {}, { isMobile: false }, { kind: 'fail', code: 'DESKTOP_SHELL' }],
     // P1: Instagram's worker claims every logged-in page (F2): control alone never fails.
-    ['row 4: SW-controlled is diagnostics only (P1)', {}, { swControlled: true }, { kind: 'h1' }],
-    ['row 4: SW-controlled on a re-probe too', { strict: true }, { swControlled: true }, { kind: 'h1' }],
+    ['row 4: SW-controlled is diagnostics only (P1)', {}, { swControlled: true }, { kind: 'proceed' }],
+    ['row 4: SW-controlled on a re-probe too', { strict: true }, { swControlled: true }, { kind: 'proceed' }],
     ['row 4b: a worker intercepted requests', {}, { swIntercepted: true }, { kind: 'fail', code: 'SW_INTERCEPTS' }],
     [
       'row 4b also on a controlled page',
@@ -83,17 +83,17 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
       { swIntercepted: true, swControlled: true },
       { kind: 'fail', code: 'SW_INTERCEPTS' },
     ],
-    ['row 4b: interception unknown never fails', {}, { swIntercepted: 'unknown' }, { kind: 'h1' }],
+    ['row 4b: interception unknown never fails', {}, { swIntercepted: 'unknown' }, { kind: 'proceed' }],
     ['row 4 before row 4b', {}, { isMobile: false, swIntercepted: true }, { kind: 'fail', code: 'DESKTOP_SHELL' }],
     ['row 4b before row 5', {}, { swIntercepted: true, portrait: false }, { kind: 'fail', code: 'SW_INTERCEPTS' }],
-    ['row 4: unknown passes the first probe', {}, { isMobile: 'unknown' }, { kind: 'h1' }],
+    ['row 4: unknown passes the first probe', {}, { isMobile: 'unknown' }, { kind: 'proceed' }],
     [
       'row 4: unknown fails a re-probe (AM2)',
       { strict: true },
       { isMobile: 'unknown' },
       { kind: 'fail', code: 'DESKTOP_SHELL' },
     ],
-    ['row 4: SW unknown never fails', { strict: true }, { swControlled: 'unknown' }, { kind: 'h1' }],
+    ['row 4: SW unknown never fails', { strict: true }, { swControlled: 'unknown' }, { kind: 'proceed' }],
     ['row 4 before row 5', {}, { isMobile: false, portrait: false }, { kind: 'fail', code: 'DESKTOP_SHELL' }],
     ['row 5: landscape refits once', {}, { portrait: false }, { kind: 'refit' }],
     [
@@ -103,7 +103,7 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
       { kind: 'fail', code: 'LANDSCAPE' },
     ],
     // P4: msite has the + → Story entry only at ≤ 767 CSS px (F3).
-    ['row 5: 767 wide and portrait is fine', {}, { inner: { w: 767, h: 1200 } }, { kind: 'h1' }],
+    ['row 5: 767 wide and portrait is fine', {}, { inner: { w: 767, h: 1200 } }, { kind: 'proceed' }],
     ['row 5: wider than 767 refits once', {}, { inner: { w: 768, h: 1200 } }, { kind: 'refit' }],
     [
       'row 5: still wider than 767 → LAYOUT_TOO_WIDE',
@@ -140,13 +140,13 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
       'row 5b: the shim installed → portrait-primary passes',
       {},
       { orientation: { type: 'portrait-primary', shim: 'installed' } },
-      { kind: 'h1' },
+      { kind: 'proceed' },
     ],
     [
       'row 5b: no orientation reported never fails',
       {},
       { orientation: { type: null, shim: 'absent' } },
-      { kind: 'h1' },
+      { kind: 'proceed' },
     ],
     // SH-2: an unreadable reading (the shim threw, or its result was malformed) fails closed there.
     [
@@ -159,7 +159,7 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
       'row 5b: an unreadable reading on home is only recorded',
       { url: 'https://www.instagram.com/' },
       { orientation: { type: null, shim: 'failed' } },
-      { kind: 'h1' },
+      { kind: 'proceed' },
     ],
     // SH-1: the shim installed itself after the composer had mounted (the reducer marks the reading).
     [
@@ -172,11 +172,11 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
       'row 5b: on home the composer is not mounted yet: only recorded',
       { url: 'https://www.instagram.com/' },
       { orientation: { type: 'landscape-primary', shim: 'off' } },
-      { kind: 'h1' },
+      { kind: 'proceed' },
     ],
     [
-      'row 5b: probe mode on the composer fails too (a post would be blocked)',
-      { mode: 'probe' },
+      'row 5b: a check on the composer fails too (a post would be blocked)',
+      { mode: 'check' },
       { orientation: { type: 'landscape-primary', shim: 'failed' } },
       { kind: 'fail', code: 'SCREEN_LANDSCAPE' },
     ],
@@ -192,14 +192,15 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
       { swIntercepted: true, orientation: { type: 'landscape-primary', shim: 'off' } },
       { kind: 'fail', code: 'SW_INTERCEPTS' },
     ],
-    ['row 6: probe mode is done', { mode: 'probe' }, {}, { kind: 'probe-done' }],
-    ['row 6 before row 7', { mode: 'probe' }, { storyInput: 'absent' }, { kind: 'probe-done' }],
-    ['row 7: H1 disabled', { assistedInsert: false }, {}, { kind: 'h0', reason: null }],
-    ['row 7: H1 disabled hides drift', { assistedInsert: false }, { acceptOk: false }, { kind: 'h0', reason: null }],
-    ['row 7: input missing', {}, { storyInput: 'absent', acceptOk: false }, { kind: 'h0', reason: 'INPUT_MISSING' }],
-    ['row 7: accept drift', {}, { acceptOk: false }, { kind: 'h0', reason: 'ACCEPT_DRIFT' }],
-    ['row 8: H1', {}, {}, { kind: 'h1' }],
-    ['URL unknown skips row 3', { url: undefined }, {}, { kind: 'h1' }],
+    ['row 6: the check is done (it taps nothing)', { mode: 'check' }, {}, { kind: 'check-done' }],
+    ['row 6 before row 7', { mode: 'check' }, { storyInput: 'absent' }, { kind: 'check-done' }],
+    ['row 7: input missing', {}, { storyInput: 'absent', acceptOk: false }, { kind: 'fail', code: 'INPUT_MISSING' }],
+    ['row 7: accept drift', {}, { acceptOk: false }, { kind: 'fail', code: 'ACCEPT_DRIFT' }],
+    ['row 7 for a test run too', { mode: 'test' }, { acceptOk: false }, { kind: 'fail', code: 'ACCEPT_DRIFT' }],
+    ['row 8: proceed (account, then + → Story)', {}, {}, { kind: 'proceed' }],
+    ['row 8 for a test run', { mode: 'test' }, {}, { kind: 'proceed' }],
+    ['row 8 for a Share test', { mode: 'shareTest' }, {}, { kind: 'proceed' }],
+    ['URL unknown skips row 3', { url: undefined }, {}, { kind: 'proceed' }],
   ])('%s', (_name, over, probe, decision) => {
     expect(decide(over, probe)).toEqual(decision);
   });
@@ -220,9 +221,10 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
     const reached = (over: Partial<ProbeEvalInput>, probe: Partial<ProbeReport>) =>
       evaluateProbe(input(over, probe)).c4Reached;
     expect(reached({}, {})).toBe(true);
-    expect(reached({ mode: 'probe' }, {})).toBe(true);
-    expect(reached({ assistedInsert: false }, { storyInput: 'absent' })).toBe(true);
+    expect(reached({ mode: 'check' }, {})).toBe(true);
+    expect(reached({ mode: 'check' }, { storyInput: 'absent' })).toBe(true);
     expect(reached({}, { storyInput: 'absent' })).toBe(true);
+    expect(reached({}, { acceptOk: false })).toBe(true);
     expect(reached({}, { marker: false })).toBe(false);
     expect(reached({ url: 'https://www.instagram.com/accounts/login/' }, {})).toBe(false);
     expect(reached({}, { isMobile: false })).toBe(false);
@@ -260,11 +262,11 @@ describe('U9 probe evaluation (§3.6 step 7)', () => {
     expect(swIntercepts(goodProbe({ swIntercepted: 'unknown' }))).toBe(false);
   });
 
-  it('probe mode never yields an injection, whatever the report says', () => {
+  it('a check never proceeds to the autopilot, whatever the report says', () => {
     for (const storyInput of ['present', 'absent'] as const) {
       for (const acceptOk of [true, false]) {
-        const d = decide({ mode: 'probe' }, { storyInput, acceptOk });
-        expect(d.kind).not.toBe('h1');
+        const d = decide({ mode: 'check' }, { storyInput, acceptOk });
+        expect(d.kind).not.toBe('proceed');
       }
     }
   });

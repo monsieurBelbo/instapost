@@ -1,8 +1,8 @@
 /**
  * Probe → decision (strategy §3.6 step 7, §11 AM2; P1, P3, P4 of 2026-10-12; AM37). Pure. The rows are
  * evaluated in the table's order and no row retries; the single refit is granted by the caller
- * through `refitUsed`. The hand-off reducer adds what depends on session history (one inject per
- * hand-off, re-probes never upgrading H0 to H1, the one wait for a late story input).
+ * through `refitUsed`. The hand-off reducer adds what depends on session history (the one wait for a
+ * late story input or account link, the account decision, the autopilot's one open-entry and one Share).
  *
  * | Row | Condition                                                | Decision                          |
  * |-----|----------------------------------------------------------|-----------------------------------|
@@ -14,9 +14,10 @@
  * | 5   | inner.w > MSITE_MAX_CSS_WIDTH or not portrait            | refit once, else LAYOUT_TOO_WIDE  |
  * |     |                                                          | (still too wide) or LANDSCAPE     |
  * | 5b  | on /create/story and the page may read a landscape screen| fail SCREEN_LANDSCAPE             |
- * | 6   | mode 'probe'                                             | probe-done (never injects)        |
- * | 7   | H1 disabled / input absent / accept drift                | H0 (reason null / code)           |
- * | 8   | otherwise                                                | H1                                |
+ * | 6   | mode 'check'                                             | check-done (taps nothing)         |
+ * | 7   | story input absent / accept drift                        | fail INPUT_MISSING / ACCEPT_DRIFT |
+ * |     |                                                          | (offer-manual: Finish by hand)    |
+ * | 8   | otherwise                                                | proceed (account, then + → Story) |
  *
  * P1: `swControlled` decides nothing any more. Instagram's worker claims every logged-in page within
  * about 1 s and has no fetch handler (F2), so being controlled is normal; row 4b's tripwire is what
@@ -50,26 +51,24 @@ export type ProbeFailCode =
   | 'SW_INTERCEPTS'
   | 'LAYOUT_TOO_WIDE'
   | 'LANDSCAPE'
-  | 'SCREEN_LANDSCAPE';
-/** Why H0 replaced H1 (§3.10 "degrade to H0"). null: H1 is simply disabled. */
-export type H0Reason = 'INPUT_MISSING' | 'ACCEPT_DRIFT';
+  | 'SCREEN_LANDSCAPE'
+  | 'INPUT_MISSING'
+  | 'ACCEPT_DRIFT';
 
 export type ProbeDecision =
   | { kind: 'fail'; code: ProbeFailCode }
   /** Not portrait and the refit is still unused: refit the window once and probe again. */
   | { kind: 'refit' }
-  /** mode 'probe': store the report, close, done. */
-  | { kind: 'probe-done' }
-  | { kind: 'h0'; reason: H0Reason | null }
-  | { kind: 'h1' };
+  /** mode 'check': read the account, store the report, close. Never taps. */
+  | { kind: 'check-done' }
+  /** The page has the story input (C4): carry on to the account decision, then + → Story. */
+  | { kind: 'proceed' };
 
 export interface ProbeEvalInput {
   probe: ProbeReport;
   /** MODE !== 'live'. */
   guarded: boolean;
-  mode: 'post' | 'probe';
-  /** H1 is enabled for this hand-off (settings snapshot, and a file exists to insert). */
-  assistedInsert: boolean;
+  mode: 'post' | 'test' | 'shareTest' | 'check';
   /** The composer tab's current URL (tab.url); undefined skips row 3. */
   url: string | undefined;
   /** The single landscape refit was already used. */
@@ -135,7 +134,10 @@ export function evaluateProbe(input: ProbeEvalInput): ProbeEvaluation {
   const out = (decision: ProbeDecision): ProbeEvaluation => ({
     decision,
     banner,
-    c4Reached: decision.kind === 'probe-done' || decision.kind === 'h0' || decision.kind === 'h1',
+    c4Reached:
+      decision.kind === 'check-done' ||
+      decision.kind === 'proceed' ||
+      (decision.kind === 'fail' && (decision.code === 'INPUT_MISSING' || decision.code === 'ACCEPT_DRIFT')),
   });
 
   if (input.url !== undefined && classifyComposerUrl(input.url).kind === 'stop') {
@@ -148,9 +150,8 @@ export function evaluateProbe(input: ProbeEvalInput): ProbeEvaluation {
     return out({ kind: 'fail', code: probe.inner.w > MSITE_MAX_CSS_WIDTH ? 'LAYOUT_TOO_WIDE' : 'LANDSCAPE' });
   }
   if (composerMayReadLandscape(probe.orientation, input.url)) return out({ kind: 'fail', code: 'SCREEN_LANDSCAPE' });
-  if (input.mode === 'probe') return out({ kind: 'probe-done' });
-  if (!input.assistedInsert) return out({ kind: 'h0', reason: null });
-  if (probe.storyInput === 'absent') return out({ kind: 'h0', reason: 'INPUT_MISSING' });
-  if (!probe.acceptOk) return out({ kind: 'h0', reason: 'ACCEPT_DRIFT' });
-  return out({ kind: 'h1' });
+  if (input.mode === 'check') return out({ kind: 'check-done' });
+  if (probe.storyInput === 'absent') return out({ kind: 'fail', code: 'INPUT_MISSING' });
+  if (!probe.acceptOk) return out({ kind: 'fail', code: 'ACCEPT_DRIFT' });
+  return out({ kind: 'proceed' });
 }

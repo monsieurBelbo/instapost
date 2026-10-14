@@ -9,8 +9,13 @@
  *   silent, S10); its ID must equal the key-derived ID and its manifest name the artifact's mode.
  * - **Exposes:** `extension` (id, mode, service worker), `editor()`, `composer()`, `fake`,
  *   `human`, `exportBytes(id)`, `handoffRecords()`, `downloadsSearch()`, `sessionRules()`,
- *   `handoffState()`, `storedSettings()` and `clearRateLog()` (all in the service worker), and
- *   `tripwire`.
+ *   `handoffState()`, `storedSettings()`, `localKeys()`, `clearRateLog()`, `ageRateLog(ms)` and
+ *   `seed(opts)` (all in the service worker), and `tripwire`.
+ * - **Seeded by default** (ux.md §4.2, OD10, OD11): before the test body, storage.local says the setup
+ *   test passed, the expected account is the fake's (`fake_owner`), the onboarding card was dismissed and,
+ *   in guarded builds, the human-pace dwell is off (`__e2eDwellScale: 0`; live builds compile the hook
+ *   out and keep their real dwell). A test that needs a fresh install uses `test.use({ seeded: false })`
+ *   or calls `seed()` itself.
  * - **`clearRateLog()`** empties the rate guard's open log in storage.local. Only the specs that
  *   need a second composer open within 60 s in one test call it (E9, E12 d/l/m, E15); E14 proves
  *   the guard itself. It never touches the guard's code or caps.
@@ -31,11 +36,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { type BrowserContext, test as base, chromium, expect, type Page, type Worker } from '@playwright/test';
 import type { WxtBrowser } from 'wxt/browser';
-import type { HandoffRecord, HandoffState, Settings } from '../../src/core/handoff/state.ts';
+import type { HandoffRecord, HandoffState, MenuFingerprint, Settings } from '../../src/core/handoff/state.ts';
 import type { DnrRule } from '../../src/core/ig-contract/rules.ts';
 import { extIdForMode } from '../../tools/chrome/ext-id.ts';
 import { assertSealed, type HeadlessScreens, readSpki, sealedPlaywrightArgs } from '../../tools/chrome/flags.ts';
-import { DEFAULT_KNOBS } from '../../tools/fake-ig/knobs.ts';
+import { DEFAULT_KNOBS, FAKE_ACCOUNT } from '../../tools/fake-ig/knobs.ts';
 import { type ArtifactMode, artifactMode, MANIFEST_NAMES } from './helpers/artifacts.ts';
 import { createFakeClient, type FakeClient } from './helpers/fake-client.ts';
 import { type Human, human } from './helpers/human.ts';
@@ -64,6 +69,24 @@ export interface E2eTestOptions {
    * run, the MacBook plus the ultrawide at (1512,-428) (`ownerDual`, S11, AM29).
    */
   screens: HeadlessScreens;
+  /** Seed storage.local as an install that passed its setup test (see the header). Default true. */
+  seeded: boolean;
+}
+
+/** What `seed()` writes in storage.local (the header lists the defaults). */
+export interface SeedOptions {
+  /** `expectedAccount`; null removes it (a post then asks first, §4.8). */
+  account?: string | null;
+  /** `lastTestPassAt` (OD10); false removes it (K6: the setup test first). */
+  testPassed?: boolean;
+  /** `settings.onboardedAt`; false shows the onboarding card. */
+  onboarded?: boolean;
+  /** Guarded builds: `__e2eDwellScale` (0 = no dwell); null removes it (the real dwell). */
+  dwellScale?: number | null;
+  /** `menuFingerprint` (C10); null removes it; undefined leaves it alone. */
+  fingerprint?: MenuFingerprint | null;
+  /** `settings.accountLock` (OD11); undefined leaves it alone. */
+  accountLock?: boolean;
 }
 
 export const IG_ORIGIN = 'https://www.instagram.com';
@@ -142,6 +165,15 @@ interface Fixtures {
   storedSettings: () => Promise<Partial<Settings> | undefined>;
   /** Empties the rate guard's open log (storage.local `rateLog`). See the header. */
   clearRateLog: () => Promise<void>;
+  /**
+   * Moves every open in the rate guard's log `ms` into the past, so the 60 s spacing ends sooner (E39's
+   * queue waits seconds, not a minute). Like clearRateLog, it never touches the guard's code or caps.
+   */
+  ageRateLog: (ms: number) => Promise<void>;
+  /** Writes the seed (see SeedOptions); the auto fixture already wrote the defaults when `seeded`. */
+  seed: (opts?: SeedOptions) => Promise<void>;
+  /** storage.local values by key (the background-owned keys: expectedAccount, lastTestPassAt, menuFingerprint, lastResult, …). */
+  localKeys: (keys: string[]) => Promise<Record<string, unknown>>;
   tripwire: Tripwire;
   invariants: Invariants;
 }
@@ -190,6 +222,13 @@ export async function checkInvariants(o: {
       );
     }
   }
+  // IF9: the menu's Post item (the autopilot's one trial without a fingerprint) at most once per page load.
+  const posts = new Map<string, number>();
+  for (const l of await fake.log()) {
+    if (l.step === 'post_session_started') posts.set(l.doc, (posts.get(l.doc) ?? 0) + 1);
+  }
+  const repeated = [...posts].filter(([, n]) => n > 1);
+  if (repeated.length > 0) problems.push(`more than one post session in one page: ${JSON.stringify(repeated)}`);
   const leaks = tripwire.leaks();
   if (leaks.length > 0)
     problems.push(`undeclared requests outside the seal or from the extension: ${leaks.join(', ')}`);
@@ -225,13 +264,14 @@ export async function installFakeSw(context: BrowserContext, fake: FakeClient): 
 }
 
 export const test = base.extend<
-  Fixtures & E2eTestOptions & { _autoInvariants: undefined; _preinstalledSw: undefined },
+  Fixtures & E2eTestOptions & { _autoInvariants: undefined; _preinstalledSw: undefined; _seeded: undefined },
   E2eOptions
 >({
   artifact: ['.output/chrome-mv3-mock', { option: true, scope: 'worker' }],
   executablePath: [undefined, { option: true, scope: 'worker' }],
   preinstallFakeSw: [DEFAULT_KNOBS.sw === 'desktopShell', { option: true }],
   screens: ['owner', { option: true }],
+  seeded: [true, { option: true }],
 
   // biome-ignore lint/correctness/noEmptyPattern: Playwright fixtures take a destructured first argument
   spki: async ({}, use) => {
@@ -344,17 +384,18 @@ export const test = base.extend<
       const page = await context.newPage();
       opened.push(page);
       await page.goto(`chrome-extension://${extension.id}/editor.html${hash ? `#${hash.replace(/^#/, '')}` : ''}`);
-      await expect(page.locator('.conn')).toHaveText('connected');
+      // The hand-off port is up (the background pushed its first lane and status).
+      await expect(page.locator('.app')).toHaveAttribute('data-connected', 'true');
       return page;
     });
     if (testInfo.status === testInfo.expectedStatus) return;
     for (const [i, page] of opened.entries()) {
       if (page.isClosed()) continue;
       const text = await page
-        .locator('.side')
+        .locator('.app')
         .innerText({ timeout: 2000 })
         .catch((err: Error) => `(unreadable: ${err.message})`);
-      await testInfo.attach(`editor-${i}-side.txt`, { body: text, contentType: 'text/plain' });
+      await testInfo.attach(`editor-${i}.txt`, { body: text, contentType: 'text/plain' });
     }
   },
 
@@ -494,6 +535,56 @@ export const test = base.extend<
     await use(() => extension.sw.evaluate(() => (globalThis as ExtGlobal).chrome.storage.local.remove('rateLog')));
   },
 
+  ageRateLog: async ({ extension }, use) => {
+    await use((ms) =>
+      extension.sw.evaluate(async (by) => {
+        const { chrome } = globalThis as ExtGlobal;
+        const log = (await chrome.storage.local.get('rateLog')).rateLog as number[] | undefined;
+        await chrome.storage.local.set({ rateLog: (log ?? []).map((t) => t - by) });
+      }, ms),
+    );
+  },
+
+  seed: async ({ extension }, use) => {
+    await use((opts = {}) =>
+      extension.sw.evaluate(
+        async ([o, fallback]) => {
+          const { chrome } = globalThis as ExtGlobal;
+          const now = Date.now();
+          const account = o.account === undefined ? fallback : o.account;
+          if (account === null) await chrome.storage.local.remove('expectedAccount');
+          else await chrome.storage.local.set({ expectedAccount: { handle: account, detectedAt: now } });
+          if (o.testPassed === false) await chrome.storage.local.remove('lastTestPassAt');
+          else await chrome.storage.local.set({ lastTestPassAt: now });
+          const dwell = o.dwellScale === undefined ? 0 : o.dwellScale;
+          if (dwell === null) await chrome.storage.local.remove('__e2eDwellScale');
+          else await chrome.storage.local.set({ __e2eDwellScale: dwell });
+          if (o.fingerprint === null) await chrome.storage.local.remove('menuFingerprint');
+          else if (o.fingerprint !== undefined) await chrome.storage.local.set({ menuFingerprint: o.fingerprint });
+          const settings = ((await chrome.storage.local.get('settings')).settings ?? {}) as Record<string, unknown>;
+          await chrome.storage.local.set({
+            settings: {
+              ...settings,
+              onboardedAt: o.onboarded === false ? null : now,
+              ...(o.accountLock === undefined ? {} : { accountLock: o.accountLock }),
+            },
+          });
+        },
+        [opts, FAKE_ACCOUNT] as const,
+      ),
+    );
+  },
+
+  localKeys: async ({ extension }, use) => {
+    await use(
+      async (keys) =>
+        (await extension.sw.evaluate((k) => (globalThis as ExtGlobal).chrome.storage.local.get(k), keys)) as Record<
+          string,
+          unknown
+        >,
+    );
+  },
+
   invariants: async ({ fake, tripwire, extension }, use) => {
     let violationsAllowed = false;
     let landscapeAllowed = false;
@@ -515,6 +606,14 @@ export const test = base.extend<
   _autoInvariants: [
     async ({ invariants }, use) => {
       void invariants;
+      await use(undefined);
+    },
+    { auto: true },
+  ],
+
+  _seeded: [
+    async ({ seeded, seed }, use) => {
+      if (seeded) await seed();
       await use(undefined);
     },
     { auto: true },

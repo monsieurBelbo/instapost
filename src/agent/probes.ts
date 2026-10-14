@@ -8,7 +8,7 @@ import {
   acceptSetEquals,
   C6_MIN_VIEWPORT_AREA,
   FAKE_MARKER_META,
-  isImageOnlyAccept,
+  isStoryCandidateAccept,
   NAV_TYPES,
   type NavType,
   type ProbeReport,
@@ -27,14 +27,14 @@ export function fileInputs(doc: Document): HTMLInputElement[] {
 }
 
 /**
- * C4 candidate: a file input whose accept list names image types only. The post input also
- * accepts video, so it never counts; an input without an accept list never counts either.
+ * C4 candidate: a file input whose accept list names image types only and is not the post input's
+ * (`image/jpeg` alone, POST_ACCEPT); an input without an accept list never counts.
  */
 export function isStoryCandidate(input: HTMLInputElement): boolean {
-  return isImageOnlyAccept(input.accept);
+  return isStoryCandidateAccept(input.accept);
 }
 
-/** C4: the first candidate whose accept list set-equals STORY_ACCEPT, or null. H1 inserts into it. */
+/** C4: the first candidate whose accept list set-equals STORY_ACCEPT, or null. The autopilot arms and fills it. */
 export function findStoryInput(doc: Document): HTMLInputElement | null {
   return fileInputs(doc).find((el) => isStoryCandidate(el) && acceptSetEquals(el.accept, STORY_ACCEPT)) ?? null;
 }
@@ -65,7 +65,8 @@ export interface CanvasSeen {
   visibleArea: number;
 }
 
-function shown(win: AgentWindow, el: Element): boolean {
+/** Rendered and not hidden by CSS (display, visibility, opacity). */
+export function isShown(win: AgentWindow, el: Element): boolean {
   if (typeof el.checkVisibility === 'function') {
     return el.checkVisibility({ opacityProperty: true, visibilityProperty: true });
   }
@@ -78,7 +79,7 @@ export function visibleCanvases(win: AgentWindow): CanvasSeen[] {
   const out: CanvasSeen[] = [];
   for (const el of Array.from(win.document.querySelectorAll('canvas'))) {
     const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0 || !shown(win, el)) continue;
+    if (r.width <= 0 || r.height <= 0 || !isShown(win, el)) continue;
     const w = Math.min(r.right, win.innerWidth) - Math.max(r.left, 0);
     const h = Math.min(r.bottom, win.innerHeight) - Math.max(r.top, 0);
     if (w <= 0 || h <= 0) continue;
@@ -173,8 +174,15 @@ export function swInterception(win: AgentWindow): { swIntercepted: ProbeReport['
   return { swIntercepted: intercepted, navType };
 }
 
-/** The full report for `agent/probe` (strategy §3.5). */
-export function probeComposer(win: AgentWindow): ProbeReport {
+/** IA5: navigator.userActivation as the page has it (the isolated world shares the window's state). */
+export function activationOf(win: AgentWindow): { isActive: boolean; hasBeenActive: boolean } {
+  const ua = (win.navigator as Navigator & { userActivation?: { isActive: boolean; hasBeenActive: boolean } })
+    .userActivation;
+  return { isActive: ua?.isActive === true, hasBeenActive: ua?.hasBeenActive === true };
+}
+
+/** The full report for `agent/probe` (strategy §3.5, ux.md IA5). */
+export function probeComposer(win: AgentWindow, extra: Partial<ProbeReport> = {}): ProbeReport {
   const doc = win.document;
   const inputs = fileInputs(doc);
   const canvas = largestCanvas(win);
@@ -191,5 +199,8 @@ export function probeComposer(win: AgentWindow): ProbeReport {
     acceptSeen: inputs.slice(0, PROBE_LIMITS.acceptEntries).map((el) => el.accept.slice(0, PROBE_LIMITS.acceptLength)),
     ...(canvas ? { canvas: { w: canvas.el.width, h: canvas.el.height, css: canvas.rect } } : {}),
     lang: (doc.documentElement.lang || '').slice(0, PROBE_LIMITS.lang),
+    activation: activationOf(win),
+    visibility: doc.visibilityState === 'hidden' ? 'hidden' : 'visible',
+    ...extra,
   };
 }

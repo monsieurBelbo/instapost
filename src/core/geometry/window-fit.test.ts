@@ -45,21 +45,16 @@ describe('U13 window fit', () => {
     expect(r.outer.width).toBe(492);
   });
 
-  it('S8, owner screen: avail 1512x949 at top 33, delta 0x32 → inner 511x909, centred', () => {
+  it('S8, owner screen: avail 1512x949 at top 33, delta 0x32 → inner 511x909, docked right (ux.md §4.6)', () => {
     const r = ok(windowFit(screen(1512, 949, 0, 33), { w: 0, h: 32 }));
     expect(r.inner).toEqual({ w: 511, h: 909 });
-    expect(r.outer).toEqual({ left: 501, top: 37, width: 511, height: 941 });
+    expect(r.outer).toEqual({ left: 1512 - 511, top: 33, width: 511, height: 941 });
   });
 
   it('caps the inner height at the default 932 on a tall screen', () => {
     const r = ok(windowFit(screen(2560, 1400, 100, 25), { w: 2, h: 32 }));
     expect(r.inner).toEqual({ w: 524, h: DEFAULT_INNER_H });
-    expect(r.outer).toEqual({
-      left: 100 + Math.round((2560 - 526) / 2),
-      top: 25 + Math.round((1400 - 964) / 2),
-      width: 526,
-      height: 964,
-    });
+    expect(r.outer).toEqual({ left: 100 + 2560 - 526, top: 25, width: 526, height: 964 });
   });
 
   it('is always portrait, on wide-short screens and with a landscape profile', () => {
@@ -165,7 +160,7 @@ describe('U13 window fit', () => {
       expect(ok(windowFit(uw, { w: 0, h: 47 }))).toEqual({
         ok: true,
         inner: { w: 524, h: 932 },
-        outer: { left: 2970, top: -212, width: 524, height: 979 },
+        outer: { left: 1512 + 3440 - 524, top: -428, width: 524, height: 979 },
       });
       expect(ok(firstGuess(uw)).inner.w).toBeLessThanOrEqual(MSITE_MAX_CSS_WIDTH);
     });
@@ -198,5 +193,34 @@ describe('U13 window fit', () => {
       expect(isUsableInner({ w: 700, h: 900 }, 0.9)).toBe(false);
       expect(isUsableInner({ w: 690, h: 900 }, 0.9)).toBe(true);
     });
+  });
+});
+
+describe('U23 docked() (ux.md §4.6): the window sits at the right edge of the editor’s screen, at its top', () => {
+  it('the owner’s MacBook: right edge, top of the available area', () => {
+    const r = ok(windowFit(screen(1512, 949, 0, 33), { w: 0, h: 47 }));
+    expect(r.outer.left + r.outer.width).toBe(1512);
+    expect(r.outer.top).toBe(33);
+  });
+
+  it('a secondary display at negative offsets keeps its own right edge and top', () => {
+    const uw = screen(3440, 1410, -3440, -428);
+    const r = ok(windowFit(uw, { w: 0, h: 47 }));
+    expect(r.outer.left + r.outer.width).toBe(0);
+    expect(r.outer.top).toBe(-428);
+    const g = ok(firstGuess(uw));
+    expect(g.outer.left + g.outer.width).toBe(0);
+  });
+
+  it('a small screen: still inside the area, never left of it', () => {
+    const r = ok(windowFit(screen(700, 760), { w: 0, h: 32 }));
+    expect(r.outer.left).toBeGreaterThanOrEqual(0);
+    expect(r.outer.left + r.outer.width).toBe(700);
+  });
+
+  it('at a zoom other than 1 the box is still docked (the width cap is zoom-aware, W4)', () => {
+    const r = ok(windowFit(screen(1512, 1400), { w: 0, h: 32 }, null, 2));
+    expect(r.outer.left + r.outer.width).toBe(1512);
+    expect(r.inner.w).toBeLessThanOrEqual(maxMsiteInnerW(2));
   });
 });

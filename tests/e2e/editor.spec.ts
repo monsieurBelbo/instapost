@@ -1,7 +1,8 @@
 /**
- * E3 (strategy §7.11, §7.10): the walking-skeleton editor end to end, inside the loaded artifact.
+ * E3 (strategy §7.11, §7.10; ux.md §4.5): the editor end to end, inside the loaded artifact. Since the
+ * autopilot UI (AM41) the copy comes from the Post card's Save copy: the exact PNG a post would upload.
  */
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { expect, test } from './fixtures.ts';
 import { decodeSize, syntheticImage } from './helpers/psnr.ts';
 
@@ -12,10 +13,9 @@ interface XfAttr {
   rotDeg: number;
 }
 
-test('E3 load a 4000x3000 JPEG, pan, zoom, add text, toggle safe zones, download a 1080x1920 JPEG', async ({
+test('E3 load a 4000x3000 JPEG, pan, zoom, add text, toggle safe zones, Save copy: a 1080x1920 PNG', async ({
   context,
   editor,
-  exportBytes,
   downloadsSearch,
 }, testInfo) => {
   const src = testInfo.outputPath('photo-4000x3000.jpg');
@@ -63,19 +63,19 @@ test('E3 load a 4000x3000 JPEG, pan, zoom, add text, toggle safe zones, download
   await safe.check();
   await expect(safe).toBeChecked();
 
-  // Download JPEG.
-  await page.getByTestId('editor-download').click();
+  // Save copy: the upload's PNG in Downloads/instapost.
+  await expect(page.getByTestId('post-thumb')).toHaveAttribute('data-stale', 'false', { timeout: 15_000 });
+  await page.getByTestId('post-save').click();
   await expect(page.getByTestId('editor-notice')).toContainText('Saved Downloads/instapost/', { timeout: 30_000 });
-  const exportId = await page.locator('.panel').getAttribute('data-export-id');
-  expect(exportId).toBeTruthy();
-
-  const bytes = await exportBytes(exportId as string);
-  expect([...bytes.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
-  expect(await decodeSize(context, bytes)).toEqual({ w: 1080, h: 1920 });
 
   const items = await downloadsSearch();
   const done = items.filter((d) => d.state === 'complete');
   expect(done, JSON.stringify(items)).toHaveLength(1);
-  expect(Math.max(done[0]?.fileSize ?? 0, done[0]?.bytesReceived ?? 0)).toBeGreaterThan(0);
-  expect(done[0]?.mime).toBe('image/jpeg');
+  const item = done[0];
+  if (!item) throw new Error('no download');
+  expect(Math.max(item.fileSize, item.bytesReceived)).toBeGreaterThan(0);
+  expect(item.mime).toBe('image/png');
+  const bytes = await readFile(item.filename);
+  expect([...bytes.subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+  expect(await decodeSize(context, bytes)).toEqual({ w: 1080, h: 1920 });
 });

@@ -50,13 +50,20 @@ export const EVERY_BUNDLE: readonly Pattern[] = [
 ];
 
 /**
- * Banned in composer-agent.js: no clicks of any kind (method, string-keyed, synthetic `click`
- * event, form submission), no synthetic pointer/keyboard/drag events, no network, no storage of
- * the page or the extension, no fake hooks (§1: the agent never clicks anything in Instagram's page).
+ * Banned in composer-agent.js (ux.md IT1, AM39): no click other than the audited helper's (agentClickProblems
+ * checks that one), no string-keyed or borrowed clicks, no file chooser, no focus, no navigation, no form
+ * submission, no synthetic pointer/keyboard/drag events, no network, no storage of the page or the
+ * extension, no fake hooks. The agent taps Instagram's own +, Story and Share through tap.ts, and nothing else.
  */
 export const AGENT_ONLY: readonly Pattern[] = [
-  { label: '.click', re: /\.click\b/ },
-  { label: '"click"', re: /["'`]click["'`]/ },
+  { label: '["click"]', re: /\[\s*["'`]click["'`]\s*\]/ },
+  { label: '.click.call/apply/bind', re: /\.click\s*\.\s*(?:call|apply|bind)\b/ },
+  { label: 'prototype.click', re: /prototype\s*\.\s*click\b/ },
+  { label: 'showPicker', re: /showPicker/ },
+  { label: '.focus(', re: /\.focus\(/ },
+  { label: 'location.assign/replace', re: /location\s*\.\s*(?:assign|replace)\b/ },
+  { label: 'location.href=', re: /location\s*\.\s*href\s*=(?!=)/ },
+  { label: 'history.pushState/replaceState', re: /history\s*\.\s*(?:pushState|replaceState)\b/ },
   { label: 'requestSubmit/submit()', re: /requestSubmit|\.submit\(/ },
   { label: 'MouseEvent', re: /MouseEvent/ },
   { label: 'PointerEvent', re: /PointerEvent/ },
@@ -78,8 +85,9 @@ export const AGENT_ONLY: readonly Pattern[] = [
   { label: 'createElement("script")', re: /createElement\(\s*["'`]script["'`]/i },
 ];
 
-/** Banned in background.js (SG11): the background never makes network requests of its own. */
+/** Banned in background.js (SG11, ux.md IT2): no network requests of its own, and no clicks. */
 export const BACKGROUND_ONLY: readonly Pattern[] = [
+  { label: '.click(', re: /\.click\(/ },
   { label: 'fetch(', re: /fetch\(/ },
   { label: 'XMLHttpRequest', re: /XMLHttpRequest/ },
   { label: 'sendBeacon', re: /sendBeacon/ },
@@ -120,7 +128,13 @@ export const E2E_HOOKS: readonly Pattern[] = [
   { label: 'quirk ignoreAll', re: /ignoreAll/ },
 ];
 /** What the mock background.js must contain (the shim is there, so the live check is meaningful). */
-export const E2E_HOOK_MARKERS: readonly string[] = ['__e2eWindowQuirk', '__e2eResizeTimeoutMs', '__e2ePortraitShimOff'];
+export const E2E_HOOK_MARKERS: readonly string[] = [
+  '__e2eWindowQuirk',
+  '__e2eResizeTimeoutMs',
+  '__e2ePortraitShimOff',
+  '__e2eDwellScale',
+  '__e2eBudgetScale',
+];
 
 /** The fake's test hooks (`fake-…` test ids) in extension source. */
 export const FAKE_TESTID = /testid\W{0,8}fake-/i;
@@ -289,6 +303,96 @@ export function portraitShimRunProblems(source: string): string[] {
   check('portrait screen', 'portrait', '__shim(true)', { type: 'portrait-primary', shim: 'portrait' });
   check('no screen.orientation', 'none', '__shim(true)', { type: null, shim: 'absent' });
   check('a getter that throws', 'throwing', '__shim(true)', { type: null, shim: 'failed' });
+  return problems;
+}
+
+/** ux.md IT1: the audited tap helper's marker, the string its one click is returned with. */
+export const TAP_MARKER = 'instapost:tap';
+
+/**
+ * Skips a quoted string or a comment starting at `i` in `text`; returns the index after it, or `i` when
+ * none starts there. Regex literals are not tracked (the agent bundle has none that contain quotes).
+ */
+function skipQuoted(text: string, i: number): number {
+  const ch = text[i];
+  if (ch === '"' || ch === "'" || ch === '`') {
+    for (let j = i + 1; j < text.length; j++) {
+      if (text[j] === '\\') j++;
+      else if (text[j] === ch) return j + 1;
+    }
+    return text.length;
+  }
+  if (ch === '/' && text[i + 1] === '/') {
+    const end = text.indexOf('\n', i);
+    return end < 0 ? text.length : end + 1;
+  }
+  if (ch === '/' && text[i + 1] === '*') {
+    const end = text.indexOf('*/', i + 2);
+    return end < 0 ? text.length : end + 2;
+  }
+  return i;
+}
+
+/**
+ * Whether `to` is inside the same block as `from` (from < to): scanning forward from `from`, no `}` closes
+ * the block `from` sits in before `to` (strings and comments skipped).
+ */
+export function sameBlock(text: string, from: number, to: number): boolean {
+  let depth = 0;
+  for (let i = from; i < to; i++) {
+    const skip = skipQuoted(text, i);
+    if (skip !== i) {
+      i = skip - 1;
+      continue;
+    }
+    const ch = text[i];
+    if (ch === '{' || ch === '(' || ch === '[') depth++;
+    else if (ch === '}' || ch === ')' || ch === ']') {
+      depth--;
+      if (depth < 0) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * ux.md IT1, composer-agent.js only: exactly one `.click()` call, inside the block that returns the audited
+ * helper's marker (TAP_MARKER, present once); exactly one `click` string, as the first argument of an
+ * `addEventListener(` whose options set `capture`; no other occurrence of `.click` at all. An empty list
+ * means the bundle's only click is tap.ts's and its only click listener is observeClick's.
+ */
+export function agentClickProblems(text: string): string[] {
+  const problems: string[] = [];
+  const calls = [...text.matchAll(/\.click\s*\(\s*\)/g)].map((m) => m.index ?? 0);
+  const any = [...text.matchAll(/\.click\b/g)].length;
+  if (calls.length !== 1) problems.push(`expected exactly one .click() call (the tap helper's), found ${calls.length}`);
+  if (any !== calls.length) problems.push(`.click used other than as a call ${any - calls.length} time(s)`);
+  const markers = text.split(TAP_MARKER).length - 1;
+  if (markers !== 1) problems.push(`expected the tap helper's marker (${TAP_MARKER}) once, found ${markers}`);
+  const at = calls[0];
+  const marker = text.indexOf(TAP_MARKER);
+  if (calls.length === 1 && at !== undefined && markers === 1 && !(marker > at && sameBlock(text, at, marker))) {
+    problems.push(`the .click() is not in the tap helper (the block that returns ${TAP_MARKER})`);
+  }
+  const literals = [...text.matchAll(/["'`]click["'`]/g)].map((m) => m.index ?? 0);
+  if (literals.length !== 1) {
+    problems.push(`expected exactly one "click" string (observeClick's listener), found ${literals.length}`);
+  }
+  for (const i of literals) {
+    const before = text.slice(Math.max(0, i - 40), i);
+    const open = before.search(/addEventListener\(\s*$/);
+    if (open < 0) {
+      problems.push(
+        `a "click" string that is not addEventListener's first argument: …${text.slice(Math.max(0, i - 40), i + 30)}…`,
+      );
+      continue;
+    }
+    const callOpen = i - (before.length - open) + 'addEventListener'.length;
+    const call = callText(text, callOpen);
+    if (call === null || !/capture["']?\s*:\s*(?:!0|true)/.test(call)) {
+      problems.push(`the click listener does not set capture: ${call ?? text.slice(i, i + 60)}`);
+    }
+  }
   return problems;
 }
 

@@ -44,11 +44,17 @@ function describe(e: CoreEvent): string {
   switch (e.kind) {
     case 'write':
       return `fake-ig: WRITE_PATH_REACHED ${e.write.method} ${e.write.host}${e.write.path} (${e.write.filter})`;
+    case 'upload':
+      return `fake-ig: upload fb_uploader_${e.upload.uploadId} ${e.upload.bytes} B → ${e.upload.answer}`;
     case 'story': {
       const size = e.story.size ? `${e.story.size.w}x${e.story.size.h}` : 'not-jpeg';
       const session = e.story.meta ? ` sessionStarted=${e.story.meta.sessionStarted}` : '';
-      return `fake-ig: story ${e.story.id} ${size} ${e.story.bytes} B isTrusted=${e.story.isTrusted}${session}`;
+      return `fake-ig: story ${e.story.id} ${size} ${e.story.bytes} B isTrusted=${e.story.isTrusted}${session}${e.story.shareToFacebook ? ' +facebook' : ''}`;
     }
+    case 'publish':
+      return `fake-ig: publish upload_id=${e.uploadId ?? '?'} → ${e.answer} (${e.status || 'no answer'})`;
+    case 'log':
+      return `fake-ig: log ${e.log.step} ${JSON.stringify(e.log.fields)}`;
     case 'violation':
       return `fake-ig: VIOLATION ${e.violation.kind} story=${e.violation.storyId}: ${e.violation.detail}`;
     case 'composerView': {
@@ -85,6 +91,15 @@ async function serve(core: FakeCore, req: IncomingMessage, res: ServerResponse):
     headers,
     body: Buffer.concat(chunks),
   });
+  // IF5: `reset` drops the connection (the page sees status 0), `hang` never answers (the socket stays
+  // open until the browser goes away or the server closes), `slow:<ms>` answers late.
+  if (out.wire?.drop === 'reset') {
+    req.socket.destroy();
+    return;
+  }
+  if (out.wire?.drop === 'hang') return;
+  if (out.wire?.delayMs) await new Promise((ok) => setTimeout(ok, out.wire?.delayMs));
+  if (res.destroyed || req.socket.destroyed) return;
   res.writeHead(out.status, out.headers);
   res.end(req.method === 'HEAD' ? undefined : out.body);
 }

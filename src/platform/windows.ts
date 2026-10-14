@@ -21,7 +21,10 @@ export interface WindowUpdate extends Partial<WindowBox> {
 }
 
 export interface WindowsPort {
-  /** popup at about:blank, focused, `state:'normal'` with the bounds (W1); resolves with the window and its only tab. */
+  /**
+   * popup at about:blank, focused, `state:'normal'` with the bounds (W1; ux.md §4.6: docked right, in front);
+   * resolves with the window and its only tab.
+   */
   createPopup(box: WindowBox): Promise<{ windowId: number; tabId: number }>;
   update(windowId: number, update: WindowUpdate): Promise<void>;
   /** Outer box of a window. */
@@ -32,6 +35,8 @@ export interface WindowsPort {
    */
   describe(windowId: number): Promise<{ type: string | undefined; tabUrls: (string | undefined)[] } | null>;
   remove(windowId: number): Promise<void>;
+  /** ux.md §4.6: the id of the window that was last focused (the editor refocus), or null. */
+  lastFocusedId(): Promise<number | null>;
   onRemoved(listener: (windowId: number) => void): () => void;
   /** W3: windows.onBoundsChanged (no permission needed). */
   onBoundsChanged(listener: (windowId: number) => void): () => void;
@@ -67,6 +72,13 @@ export const chromeWindows: WindowsPort = {
   },
   async remove(windowId) {
     await browser.windows.remove(windowId);
+  },
+  async lastFocusedId() {
+    try {
+      return (await browser.windows.getLastFocused()).id ?? null;
+    } catch {
+      return null;
+    }
   },
   onRemoved(listener) {
     browser.windows.onRemoved.addListener(listener);

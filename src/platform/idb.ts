@@ -109,3 +109,21 @@ export async function putExport(record: ExportRecord): Promise<void> {
 export async function getExport(id: ExportId): Promise<ExportRecord | undefined> {
   return await (await db()).get('exports', id);
 }
+
+export async function getDoc(id: string): Promise<StoryDoc | undefined> {
+  return await (await db()).get('docs', id);
+}
+
+/** ux.md §4.3 Recent photos: the newest originals first (at most `limit`). */
+export async function recentAssets(limit: number): Promise<AssetRecord[]> {
+  const all = await (await db()).getAll('assets');
+  return all.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+}
+
+/** ux.md §4.3: originals are kept 30 days or 50 items, whichever is fewer. */
+export async function pruneAssets(now: number, keepMs: number, keep: number): Promise<void> {
+  const tx = (await db()).transaction('assets', 'readwrite');
+  const all = (await tx.store.getAll()).sort((a, b) => b.createdAt - a.createdAt);
+  for (const [i, a] of all.entries()) if (i >= keep || a.createdAt < now - keepMs) await tx.store.delete(a.id);
+  await tx.done;
+}

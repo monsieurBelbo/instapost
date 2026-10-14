@@ -11,8 +11,10 @@ import { CERT_PATHS } from '../../../tools/fake-ig/cert.ts';
 import type { Knobs } from '../../../tools/fake-ig/knobs.ts';
 import type {
   ComposerViewRecord,
+  LogRecord,
   RequestRecord,
   StoryRecord,
+  UploadRecord,
   ViolationRecord,
   WriteRecord,
 } from '../../../tools/fake-ig/store.ts';
@@ -20,7 +22,16 @@ import type {
 /** server.ts listens here (not imported: it would pull esbuild into the test runner). */
 const FAKE_LISTEN_HOST = '127.0.0.1';
 
-export type { ComposerViewRecord, Knobs, RequestRecord, StoryRecord, ViolationRecord, WriteRecord };
+export type {
+  ComposerViewRecord,
+  Knobs,
+  LogRecord,
+  RequestRecord,
+  StoryRecord,
+  UploadRecord,
+  ViolationRecord,
+  WriteRecord,
+};
 
 /** A knob patch as the API accepts it (`insets` also as "top,bottom"). */
 export type KnobPatch = Partial<Omit<Knobs, 'insets'>> & { insets?: Knobs['insets'] | string };
@@ -38,6 +49,10 @@ export interface FakeClient {
   violations(): Promise<ViolationRecord[]>;
   /** AM37: what the composer page showed (its landscape gate), oldest first. */
   composerViews(): Promise<ComposerViewRecord[]>;
+  /** IF5: the photo uploads the server received (answered or not), oldest first. */
+  uploads(): Promise<UploadRecord[]>;
+  /** IF8: the page's telemetry and control taps (`tap:<control>`), with seq > since, oldest first. */
+  log(since?: number): Promise<LogRecord[]>;
   /** `sourceHash`: fakeSourceHash() when the server started (FID-7). */
   health(): Promise<{ ok: boolean; fake: boolean; certValidTo: string | null; sourceHash?: string | null }>;
 }
@@ -100,6 +115,8 @@ export function createFakeClient(caPem: string = readFileSync(CERT_PATHS.cert, '
     writes: () => json<WriteRecord[]>('GET', '/__fake__/api/writes'),
     violations: () => json<ViolationRecord[]>('GET', '/__fake__/api/violations'),
     composerViews: () => json<ComposerViewRecord[]>('GET', '/__fake__/api/composer-views'),
+    uploads: () => json<UploadRecord[]>('GET', '/__fake__/api/uploads'),
+    log: (since = 0) => json<LogRecord[]>('GET', `/__fake__/api/log?since=${since}`),
     health: () => json('GET', '/__fake__/health'),
   };
 }

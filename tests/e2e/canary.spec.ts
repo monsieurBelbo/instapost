@@ -1,96 +1,66 @@
 /**
- * Canaries for the write blocks (strategy §7.11 E8/E9, SG3, SG5, §11 AM5/AM6). The fake's
- * `share=real-paths` knob makes its Share also fire real-shaped subresource POSTs: one to
- * `i.instagram.com/rupload_igphoto/fb_uploader_<t>` and one to
- * `www.instagram.com/api/v1/media/configure_to_story/`.
+ * Canaries for the write blocks (strategy §7.11 E8/E9, SG3, SG5, §11 AM5/AM6/AM41), on Instagram's own
+ * write requests: since AM39 the fake's composer uploads as Instagram's client does (an XHR to
+ * `i.instagram.com/rupload_igphoto/fb_uploader_<id>`, then `www.instagram.com/api/v1/media/configure_to_story/`
+ * only after a 2xx upload), and the autopilot presses Share, so the canaries need no special Share knob.
  *
- * - **E8 (mock only):** the static `block_ig_writes` ruleset stops both, from the composer tab, from
- *   any other tab and from the extension's own service worker (tabId -1); `onRuleMatchedDebug`
- *   (unpacked, `declarativeNetRequestFeedback`) names the ruleset. Rehearsal is switched off, so
- *   no session rule can take the credit.
- * - **E9 (live only):** live has no static ruleset. The tab-scoped rehearsal rules 1002–1019
- *   (`tabIds: [tab, -1]`) stop both writes and an extension-service-worker request during the
- *   session; after close, a non-rehearsal session installs no block at all and both writes
- *   arrive. Live has no `onRuleMatchedDebug`, so E9 asserts through the fake's writes log and
+ * - **E8 (mock only):** a Post story in a guarded build. The static `block_ig_writes` ruleset stops
+ *   Instagram's upload from the composer tab (no session block rule exists for a post: only rule 1001),
+ *   `onRuleMatchedDebug` (unpacked, `declarativeNetRequestFeedback`) names the ruleset, Instagram never
+ *   publishes, and the run ends as a Share test, never "Posted". Both write paths are also blocked from
+ *   any other tab and from the extension's own service worker (tabId -1).
+ * - **E9 (live only):** live has no static ruleset. A Share test installs the tab-scoped rules 1002–1019
+ *   (`tabIds: [tab, -1]`): they stop Instagram's upload and an extension-service-worker request during the
+ *   run. After it, a Post story installs no block at all: both of Instagram's writes arrive and the story
+ *   is posted. Live has no `onRuleMatchedDebug`, so E9 asserts through the fake's writes log and
  *   `requestfailed` (AM5).
  */
 import type { Page, Request } from '@playwright/test';
-import { CLOSE_DELAY_MS } from '../../src/core/handoff/state.ts';
 import { SESSION_RULE_IDS } from '../../src/core/ig-contract/rules.ts';
 import { type Extension, type ExtGlobal, expect, IG_ORIGIN, test, whenClosed } from './fixtures.ts';
-import {
-  answerPosted,
-  loadPhoto,
-  photoFile,
-  postFromDesktop,
-  setSwitches,
-  waitPhase,
-  waitSeen,
-} from './helpers/editor-flow.ts';
-import type { Human } from './helpers/human.ts';
+import { lastRecord, loadPhoto, photoFile, postStory, shareTest, waitResult } from './helpers/editor-flow.ts';
 
 const BLOCKED = 'net::ERR_BLOCKED_BY_CLIENT';
 const RUPLOAD = 'https://i.instagram.com/rupload_igphoto/';
 const CONFIGURE = 'https://www.instagram.com/api/v1/media/configure_to_story/';
 
-/** A no-cors POST to a real-shaped upload path from the extension's service worker (tabId -1). */
-function swWrite(extension: Extension, tag: string): Promise<string> {
+/** A no-cors POST to a real-shaped write path from the extension's service worker (tabId -1). */
+function swWrite(extension: Extension, url: string): Promise<string> {
   return extension.sw.evaluate(
-    (url) =>
-      fetch(url, { method: 'POST', mode: 'no-cors', body: 'canary' }).then(
+    (u) =>
+      fetch(u, { method: 'POST', mode: 'no-cors', body: 'canary' }).then(
         () => 'reached',
         (err: Error) => err.name,
       ),
-    `${RUPLOAD}e2e_canary_${tag}`,
+    url,
   );
 }
 
 /** The same POST from a web page. */
-function pageWrite(page: Page, tag: string): Promise<string> {
+function pageWrite(page: Page, url: string): Promise<string> {
   return page.evaluate(
-    (url) =>
-      fetch(url, { method: 'POST', mode: 'no-cors', body: 'canary' }).then(
+    (u) =>
+      fetch(u, { method: 'POST', mode: 'no-cors', body: 'canary' }).then(
         () => 'reached',
         (err: Error) => err.name,
       ),
-    `${RUPLOAD}e2e_canary_${tag}`,
+    url,
   );
 }
 
-/**
- * Shares in the composer and waits until the session is over. Rehearsal on: C9, close after 3 s.
- * Rehearsal off (`heldOpen`, §11 AM19): the popup stays open past the 3 s so an upload can finish,
- * until the owner answers "Posted?".
- */
-async function shareAndFinish(editorPage: Page, popup: Page, human: Human, heldOpen = false): Promise<void> {
-  const closed = whenClosed(popup);
-  await human.share(popup);
-  await waitSeen(editorPage, 'finished');
-  if (heldOpen) {
-    await expect(editorPage.getByTestId('handoff-hold-open')).toBeVisible();
-    await editorPage.waitForTimeout(CLOSE_DELAY_MS + 750);
-    expect(popup.isClosed(), 'the popup must stay open until the owner answers').toBe(false);
-    await answerPosted(editorPage, true);
-  }
-  await closed;
-  await waitPhase(editorPage, 'idle');
-}
-
-test('E8 @smoke canary (mock): real-shaped writes are blocked everywhere; the story is still recorded', async ({
+test('E8 @smoke canary (mock): the static ruleset blocks Instagram’s upload in a Post story, and every write elsewhere', async ({
   context,
   extension,
   editor,
   composer,
   fake,
-  human,
-  handoffState,
+  handoffRecords,
   sessionRules,
   tripwire,
 }, testInfo) => {
   test.skip(extension.mode !== 'mock', 'the static block ruleset exists only in guarded builds; E9 covers live');
   // The canary's own write from the extension's service worker is deliberate.
   tripwire.expectFromExtension(`${RUPLOAD}e2e_canary_`);
-  await fake.setKnobs({ share: 'real-paths' });
   const failed: { url: string; error: string }[] = [];
   context.on('requestfailed', (r: Request) => failed.push({ url: r.url(), error: r.failure()?.errorText ?? '' }));
   // onRuleMatchedDebug, collected inside the extension's service worker.
@@ -98,11 +68,7 @@ test('E8 @smoke canary (mock): real-shaped writes are blocked everywhere; the st
     const g = globalThis as ExtGlobal & { __e2eMatches?: unknown[] };
     g.__e2eMatches = [];
     g.chrome.declarativeNetRequest.onRuleMatchedDebug.addListener((info) => {
-      g.__e2eMatches?.push({
-        rulesetId: info.rule.rulesetId,
-        url: info.request.url,
-        tabId: info.request.tabId,
-      });
+      g.__e2eMatches?.push({ rulesetId: info.rule.rulesetId, url: info.request.url, tabId: info.request.tabId });
     });
   });
   const matches = () =>
@@ -111,102 +77,100 @@ test('E8 @smoke canary (mock): real-shaped writes are blocked everywhere; the st
     >;
 
   const page = await editor();
-  // Rehearsal off: its session rules would block the same writes, and E8 is the static ruleset's canary.
-  await setSwitches(page, { assisted: true, rehearsal: false });
   await loadPhoto(page, await photoFile(context, testInfo));
-  await postFromDesktop(page);
+  await postStory(page);
   const popup = await composer();
-  await waitPhase(page, 'awaitingShare');
-  const state = await handoffState();
-  if (state?.phase !== 'awaitingShare') throw new Error(`unexpected state ${state?.phase}`);
-  const composerTab = state.tabId;
-  expect((await sessionRules()).map((r) => r.id)).toEqual([1001]);
-  await shareAndFinish(page, popup, human, true);
+  // A post installs no session block: the static ruleset is the only one in force.
+  await expect.poll(async () => (await sessionRules()).map((r) => r.id)).toEqual([1001]);
+  const card = await waitResult(page, 'shareTested');
+  await expect(card).not.toContainText('Posted');
+  await whenClosed(popup);
+  const rec = await lastRecord(handoffRecords);
+  expect(rec).toMatchObject({ mode: 'post', outcome: 'share-tested' });
 
-  // The story went through; neither real-shaped write reached the fake.
-  expect(await fake.stories()).toHaveLength(1);
+  // Instagram's upload went out from the composer tab and was blocked by the static ruleset; Instagram
+  // never published, and nothing reached the fake.
   expect(await fake.writes()).toEqual([]);
-  // Rule 1001 (modifyHeaders) also reports every composer request; the writes must be the static ruleset's.
-  const isWrite = (url: string) => url.startsWith(RUPLOAD) || url.startsWith(CONFIGURE);
+  expect(await fake.stories()).toEqual([]);
+  expect(failed.find((f) => f.url.startsWith(RUPLOAD))?.error).toBe(BLOCKED);
+  expect(failed.some((f) => f.url.startsWith(CONFIGURE))).toBe(false);
   await expect
-    .poll(async () =>
-      (await matches()).filter((m) => m.tabId === composerTab && isWrite(m.url)).map((m) => m.url.split('fb_')[0]),
-    )
-    .toEqual(expect.arrayContaining([RUPLOAD, CONFIGURE]));
-  for (const m of (await matches()).filter((x) => isWrite(x.url))) expect(m.rulesetId).toBe('block_ig_writes');
-  for (const url of [RUPLOAD, CONFIGURE]) {
-    expect(failed.find((f) => f.url.startsWith(url))?.error, url).toBe(BLOCKED);
-  }
+    .poll(async () => (await matches()).filter((m) => m.url.startsWith(RUPLOAD)).map((m) => m.rulesetId))
+    .toEqual(['block_ig_writes']);
 
-  // From the extension's own service worker (tabId -1) and from an ordinary page.
-  expect(await swWrite(extension, 'sw')).toBe('TypeError');
+  // From an ordinary page, both write paths; from the extension's own service worker (tabId -1).
   const tab = await context.newPage();
   await tab.goto(`${IG_ORIGIN}/`);
-  expect(await pageWrite(tab, 'page')).toBe('TypeError');
+  expect(await pageWrite(tab, `${RUPLOAD}e2e_canary_page`)).toBe('TypeError');
+  expect(await pageWrite(tab, `${CONFIGURE}?e2e_canary_page`)).toBe('TypeError');
+  expect(await swWrite(extension, `${RUPLOAD}e2e_canary_sw`)).toBe('TypeError');
   await expect.poll(async () => (await matches()).find((m) => m.url.endsWith('e2e_canary_sw'))?.tabId).toBe(-1);
-  await expect.poll(() => failed.find((f) => f.url.endsWith('e2e_canary_page'))?.error).toBe(BLOCKED);
+  for (const m of (await matches()).filter((x) => x.url.includes('e2e_canary'))) {
+    expect(m.rulesetId).toBe('block_ig_writes');
+  }
+  await expect
+    .poll(() => failed.filter((f) => f.url.includes('e2e_canary_page')).map((f) => f.error))
+    .toEqual([BLOCKED, BLOCKED]);
   expect(await fake.writes()).toEqual([]);
-  expect(await sessionRules()).toEqual([]);
+  await expect.poll(sessionRules).toEqual([]);
 });
 
-test('E9 @smoke canary (live): rehearsal blocks writes, tabId -1 included; no stale block after close', async ({
+test('E9 @smoke canary (live): a Share test blocks writes, tabId -1 included; the next Post story has no stale block', async ({
   context,
   extension,
   editor,
   composer,
   fake,
-  human,
   handoffState,
+  handoffRecords,
   sessionRules,
   clearRateLog,
   tripwire,
 }, testInfo) => {
-  test.skip(extension.mode !== 'live', 'rehearsal is the live build’s only block; E8 covers the guarded ruleset');
+  test.skip(extension.mode !== 'live', 'the test rules are the live build’s only block; E8 covers the guarded ruleset');
   tripwire.expectFromExtension(`${RUPLOAD}e2e_canary_`);
-  await fake.setKnobs({ share: 'real-paths' });
   const failed: { url: string; error: string }[] = [];
   context.on('requestfailed', (r: Request) => failed.push({ url: r.url(), error: r.failure()?.errorText ?? '' }));
   const page = await editor();
-  await setSwitches(page, { assisted: true, rehearsal: true });
   await loadPhoto(page, await photoFile(context, testInfo));
 
-  // 1. Rehearsal ON.
-  await postFromDesktop(page);
+  // 1. A Share test: the write-block rules for the tab and for service workers.
+  await shareTest(page);
   const first = await composer();
-  await waitPhase(page, 'awaitingShare');
+  await expect
+    .poll(async () => (await sessionRules()).filter((r) => r.action.type === 'block').length, { timeout: 20_000 })
+    .toBeGreaterThan(0);
   const state = await handoffState();
-  if (state?.phase !== 'awaitingShare') throw new Error(`unexpected state ${state?.phase}`);
-  const rules = await sessionRules();
-  const blocks = rules.filter((r) => r.action.type === 'block');
-  expect(blocks.length).toBeGreaterThan(0);
-  for (const r of blocks) {
+  const tabId = state && 'tabId' in state ? state.tabId : null;
+  for (const r of (await sessionRules()).filter((x) => x.action.type === 'block')) {
     expect(SESSION_RULE_IDS).toContain(r.id);
-    expect(r.condition.tabIds).toEqual([state.tabId, -1]);
+    expect(r.condition.tabIds).toEqual([tabId, -1]);
   }
-  // An extension-service-worker upload (tabId -1) is blocked while the session runs.
-  expect(await swWrite(extension, 'rehearsal')).toBe('TypeError');
-  await shareAndFinish(page, first, human);
-  expect(await fake.stories()).toHaveLength(1);
+  // An extension-service-worker upload (tabId -1) is blocked while the run lasts.
+  expect(await swWrite(extension, `${RUPLOAD}e2e_canary_test`)).toBe('TypeError');
+  await waitResult(page, 'shareTested');
+  await whenClosed(first);
+  expect(failed.find((f) => f.url.startsWith(RUPLOAD) && !f.url.includes('e2e_canary'))?.error).toBe(BLOCKED);
   expect(await fake.writes()).toEqual([]);
-  for (const url of [RUPLOAD, CONFIGURE]) {
-    expect(failed.find((f) => f.url.startsWith(url))?.error, url).toBe(BLOCKED);
-  }
-  expect(await sessionRules()).toEqual([]);
+  expect(await fake.stories()).toEqual([]);
+  await expect.poll(sessionRules).toEqual([]);
 
-  // 2. Rehearsal OFF, in a new session: no block rule at all, and both writes arrive.
-  await setSwitches(page, { rehearsal: false });
+  // 2. A Post story in a new run: no block rule at all, and both of Instagram's writes arrive.
   await clearRateLog();
-  await postFromDesktop(page);
+  await page.getByTestId('result-done').click();
+  await postStory(page);
   const second = await composer({ not: [first] });
-  await waitPhase(page, 'awaitingShare');
-  expect((await sessionRules()).map((r) => r.id)).toEqual([1001]);
-  await shareAndFinish(page, second, human, true);
-  expect(await fake.stories()).toHaveLength(2);
-  const writes = await fake.writes();
-  expect(writes.map((w) => `${w.host}${w.path.split('fb_')[0]}`).sort()).toEqual([
+  await expect.poll(async () => (await sessionRules()).map((r) => r.id)).toEqual([1001]);
+  await waitResult(page, 'posted');
+  await whenClosed(second);
+  expect(await fake.stories()).toHaveLength(1);
+  // The upload's CORS preflight (OPTIONS) reaches the same path; the writes are the two POSTs.
+  const writes = (await fake.writes()).filter((w) => w.method === 'POST');
+  expect(writes.map((w) => `${w.host}${w.path.split('fb_')[0]}`)).toEqual([
     'i.instagram.com/rupload_igphoto/',
     'www.instagram.com/api/v1/media/configure_to_story/',
   ]);
   for (const w of writes) expect(w.origin).toBe(IG_ORIGIN);
-  expect(await sessionRules()).toEqual([]);
+  expect((await handoffRecords()).map((r) => r.outcome)).toEqual(['share-tested', 'posted']);
+  await expect.poll(sessionRules).toEqual([]);
 });

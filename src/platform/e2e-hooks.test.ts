@@ -9,6 +9,9 @@ import {
   ARC_CREATED,
   ARC_LATE_MS,
   ARC_UPDATE_GRACE_MS,
+  arcPlacement,
+  BUDGET_SCALE_KEY,
+  DWELL_SCALE_KEY,
   e2eRunnerHooks,
   PORTRAIT_SHIM_OFF_KEY,
   type QuirkDeps,
@@ -35,6 +38,7 @@ function harness(quirk: WindowQuirk) {
     },
     getBox: async () => BOX,
     describe: async () => null,
+    lastFocusedId: async () => null,
     remove: async () => undefined,
     onRemoved: () => () => undefined,
     onBoundsChanged: () => () => undefined,
@@ -68,7 +72,9 @@ describe('F2 window-quirk shim (guarded builds only)', () => {
   it('arc: the create ignores the bounds; updates without state normal, or within 400 ms, are dropped', async () => {
     const h = harness('arc');
     await h.port.createPopup(BOX);
-    expect(h.created).toEqual([{ left: BOX.left, top: BOX.top, ...ARC_CREATED }]);
+    expect(h.created).toEqual([arcPlacement(BOX)]);
+    // Right edge and top kept, so a popup docked at the screen's right edge stays on screen.
+    expect(arcPlacement(BOX).left + ARC_CREATED.width).toBe(BOX.left + BOX.width);
     await h.port.update(7, { state: 'normal', ...BOX }); // ~280 ms in the failed run: too early
     h.advance(ARC_UPDATE_GRACE_MS);
     await h.port.update(7, { ...BOX }); // no state: dropped
@@ -99,7 +105,7 @@ describe('F2 window-quirk shim (guarded builds only)', () => {
     h.advance(ARC_LATE_MS);
     expect(h.applied).toEqual([
       [7, { state: 'normal', ...BOX }],
-      [7, { state: 'normal', ...ARC_CREATED }],
+      [7, { state: 'normal', ...arcPlacement(BOX) }],
     ]);
   });
 
@@ -109,6 +115,9 @@ describe('F2 window-quirk shim (guarded builds only)', () => {
     h.advance(10_000);
     await h.port.update(7, { state: 'normal', ...BOX });
     expect(h.applied).toEqual([]);
+    // Raising the popup (ux.md §4.6) is not a bounds update: it always goes through.
+    await h.port.update(7, { focused: true });
+    expect(h.applied).toEqual([[7, { focused: true }]]);
     expect(quirkDrops('ignoreAll', { state: 'normal' }, 0, 1e9)).toBe(true);
     expect(quirkDrops('none', {}, 0, 0)).toBe(false);
   });
@@ -125,6 +134,32 @@ describe('AM37 / SH-1 the portrait shim’s E2E flag (guarded builds only)', () 
     for (const v of ['yes', 1, false, 'HOME']) {
       await fakeBrowser.storage.local.set({ [PORTRAIT_SHIM_OFF_KEY]: v });
       expect(await e2eRunnerHooks.portraitShimOff(), String(v)).toBe(false);
+    }
+  });
+});
+
+describe('ux.md IB6: the dwell and outcome-budget scales (guarded builds only)', () => {
+  it('a dwell scale in [0, 1) is read; anything else is no scale', async () => {
+    fakeBrowser.reset();
+    expect(await e2eRunnerHooks.dwellScale()).toBeUndefined();
+    for (const v of [0, 0.01, 0.5]) {
+      await fakeBrowser.storage.local.set({ [DWELL_SCALE_KEY]: v });
+      expect(await e2eRunnerHooks.dwellScale(), String(v)).toBe(v);
+    }
+    for (const v of [1, 2, -0.1, Number.NaN, '0.1', null]) {
+      await fakeBrowser.storage.local.set({ [DWELL_SCALE_KEY]: v });
+      expect(await e2eRunnerHooks.dwellScale(), String(v)).toBeUndefined();
+    }
+  });
+
+  it('an outcome-budget scale in (0, 1) is read; zero never shrinks the budgets to nothing', async () => {
+    fakeBrowser.reset();
+    expect(await e2eRunnerHooks.budgetScale()).toBeUndefined();
+    await fakeBrowser.storage.local.set({ [BUDGET_SCALE_KEY]: 0.02 });
+    expect(await e2eRunnerHooks.budgetScale()).toBe(0.02);
+    for (const v of [0, 1, -1, 'x']) {
+      await fakeBrowser.storage.local.set({ [BUDGET_SCALE_KEY]: v });
+      expect(await e2eRunnerHooks.budgetScale(), String(v)).toBeUndefined();
     }
   });
 });

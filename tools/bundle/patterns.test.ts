@@ -2,10 +2,13 @@
  * T3 self-test (§11 AM26, FID-2/FID-3): every forbidden pattern check-bundle.ts relies on fires on
  * the code it is meant to catch, and stays silent on what the built bundles legitimately contain.
  */
+import { readFileSync } from 'node:fs';
+import { transformSync } from 'esbuild';
 import { describe, expect, it } from 'vitest';
 import { portraitShim } from '../../src/agent/portrait-shim.ts';
 import {
   AGENT_ONLY,
+  agentClickProblems,
   BACKGROUND_ONLY,
   backgroundMainWorldProblems,
   E2E_HOOK_MARKERS,
@@ -22,15 +25,27 @@ import {
   PORTRAIT_SHIM_MARKER,
   portraitShimRunProblems,
   portraitShimSource,
+  sameBlock,
+  TAP_MARKER,
   WRITE_STRINGS,
 } from './patterns.ts';
 
 describe('T3 patterns: composer-agent.js', () => {
   it.each([
-    ['el.click()', '.click'],
-    ['HTMLElement.prototype.click.call(el)', '.click'],
-    ['e["click"]()', '"click"'],
-    ["el.dispatchEvent(new Event('click',{bubbles:true}))", '"click"'],
+    // ux.md IT1: clicks other than the audited helper's own `.click()` (agentClickProblems checks that one).
+    ['HTMLElement.prototype.click.call(el)', '.click.call/apply/bind'],
+    ['HTMLElement.prototype.click.call(el)', 'prototype.click'],
+    ['el.click.apply(el)', '.click.call/apply/bind'],
+    ['e["click"]()', '["click"]'],
+    ['e[`click`]()', '["click"]'],
+    // No file chooser, no focus, no navigation of Instagram's page.
+    ['input.showPicker()', 'showPicker'],
+    ['el.focus()', '.focus('],
+    ['location.assign(u)', 'location.assign/replace'],
+    ['window.location.replace(u)', 'location.assign/replace'],
+    ['location.href="/create/story/"', 'location.href='],
+    ['history.pushState({},"",u)', 'history.pushState/replaceState'],
+    ['history.replaceState(null,"")', 'history.pushState/replaceState'],
     ['form.requestSubmit()', 'requestSubmit/submit()'],
     ['form.submit()', 'requestSubmit/submit()'],
     ['new MouseEvent("mousedown")', 'MouseEvent'],
@@ -67,6 +82,9 @@ describe('T3 patterns: composer-agent.js', () => {
       'e.runtime.sendMessage(t)',
       'e.navigator.serviceWorker?.addEventListener(`controllerchange`,()=>n.controllerChanged())',
       'el.checkVisibility({opacityProperty:!0,visibilityProperty:!0})',
+      // Reading where the page is (never changing it).
+      'e.location.pathname===`/`',
+      'n.location.href===r',
     ].join(';');
     expect(hits(allowed, AGENT_ONLY)).toEqual([]);
     expect(forbiddenDispatches(allowed)).toEqual([]);
@@ -78,6 +96,79 @@ describe('T3 patterns: composer-agent.js', () => {
     expect(forbiddenDispatches('el.dispatchEvent(new e.CustomEvent(`input`))')).toHaveLength(1);
     expect(forbiddenDispatches('el.dispatchEvent(ev)')).toHaveLength(1);
     expect(forbiddenDispatches("el.dispatchEvent(new FocusEvent('focus'))")).toHaveLength(1);
+  });
+});
+
+/** The audited helper as the agent bundle ships it: tap.ts, minified by esbuild. */
+const shippedTap = (): string =>
+  transformSync(readFileSync(new URL('../../src/agent/tap.ts', import.meta.url), 'utf8'), {
+    loader: 'ts',
+    minify: true,
+  }).code;
+
+/** A minified stand-in for the bundle around the helper. */
+const HELPER =
+  'function tp(e,t,n){if(n.b[e]>=3)return{ok:!1};n.b[e]++;t.click();return{ok:!0,kind:e,via:`instapost:tap`}}';
+const LISTENER =
+  'function oc(e,t,n){let r=new e.AbortController;t.addEventListener(`click`,i=>{r.abort()},{capture:!0,once:!0,signal:r.signal})}';
+
+describe('T3 the one audited click (ux.md IT1, agentClickProblems)', () => {
+  it('passes the shipped tap.ts: one .click() returning the marker, one capture-phase click listener', () => {
+    const code = shippedTap();
+    expect(code).toContain(TAP_MARKER);
+    expect(agentClickProblems(code)).toEqual([]);
+    expect(hits(code, AGENT_ONLY)).toEqual([]);
+  });
+
+  it('passes the minified helper and listener in a larger bundle', () => {
+    expect(agentClickProblems(`var a=1;${HELPER};x();${LISTENER};y()`)).toEqual([]);
+  });
+
+  it('a second click site fails, wherever it is', () => {
+    expect(agentClickProblems(`${HELPER};${LISTENER};function z(e){e.click()}`)).toEqual([
+      expect.stringContaining('exactly one .click() call'),
+    ]);
+  });
+
+  it('the one .click() outside the helper’s block fails', () => {
+    const moved = 'function z(e){e.click()}function tp(e){return{ok:!0,kind:e,via:`instapost:tap`}}';
+    expect(agentClickProblems(`${moved};${LISTENER}`)).toEqual([expect.stringContaining('not in the tap helper')]);
+    // The marker before the click does not count either.
+    const before = 'function tp(e,t){let v=`instapost:tap`;t.click();return v}';
+    expect(agentClickProblems(`${before};${LISTENER}`)).toEqual([expect.stringContaining('not in the tap helper')]);
+  });
+
+  it('the marker missing or repeated fails', () => {
+    expect(agentClickProblems(`${HELPER.replace('instapost:tap', 'x')};${LISTENER}`)).toEqual([
+      expect.stringContaining('marker'),
+    ]);
+    expect(agentClickProblems(`${HELPER};${LISTENER};let m=\`instapost:tap\``)).toEqual([
+      expect.stringContaining('marker'),
+    ]);
+  });
+
+  it('a click listener without capture, or a second click listener, fails', () => {
+    const bubbling = LISTENER.replace('capture:!0,', '');
+    expect(agentClickProblems(`${HELPER};${bubbling}`)).toEqual([expect.stringContaining('does not set capture')]);
+    expect(agentClickProblems(`${HELPER};${LISTENER};${LISTENER}`)).toEqual([
+      expect.stringContaining('exactly one "click" string'),
+    ]);
+  });
+
+  it('a string-keyed click, a click event, or .click read as a value fails', () => {
+    expect(agentClickProblems(`${HELPER};${LISTENER};e["click"]()`).join(' ')).toContain('"click" string');
+    expect(agentClickProblems(`${HELPER};el.dispatchEvent(new Event(\`click\`))`)).toEqual([
+      expect.stringContaining('not addEventListener'),
+    ]);
+    expect(agentClickProblems(`${HELPER};${LISTENER};let f=el.click;f()`)).toEqual([
+      expect.stringContaining('other than as a call'),
+    ]);
+  });
+
+  it('sameBlock: a closing brace between the two positions ends the block; strings and comments do not', () => {
+    const t = '{a();b("}");/* } */c()}d()';
+    expect(sameBlock(t, 1, t.indexOf('c()'))).toBe(true);
+    expect(sameBlock(t, 1, t.indexOf('d()'))).toBe(false);
   });
 });
 
@@ -102,6 +193,8 @@ describe('T3 patterns: every bundle, background.js, editor chunks', () => {
     ['navigator.sendBeacon(u,b)', 'sendBeacon'],
     ['new WebSocket(u)', 'WebSocket'],
     ['new EventSource(u)', 'EventSource'],
+    // ux.md IT2: the background never clicks anything.
+    ['t.click()', '.click('],
   ])('background.js: %s → %s', (code, label) => {
     expect(hits(code, BACKGROUND_ONLY)).toContain(label);
   });
@@ -315,6 +408,8 @@ describe('T3 patterns: the guarded-only E2E hooks never reach the live build (F2
     ['(await t.storage.local.get(`__e2ePortraitShimOff`)).__e2ePortraitShimOff===!0', '__e2e flag'],
     ['[`none`,`arc`,`arcLate`,`ignoreAll`]', 'quirk arcLate'],
     ['n===`ignoreAll`', 'quirk ignoreAll'],
+    ['e.get(`__e2eDwellScale`)', '__e2e flag'],
+    ['e.get(`__e2eBudgetScale`)', '__e2e flag'],
   ])('%s → %s', (code, label) => {
     expect(hits(code, E2E_HOOKS)).toContain(label);
   });

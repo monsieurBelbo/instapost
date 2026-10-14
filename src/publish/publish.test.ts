@@ -182,9 +182,16 @@ const status = (phase: HandoffStatusMsg['phase'], extra: Partial<HandoffStatusMs
   type: 'handoff/status',
   handoffId: 'hof_1',
   phase,
-  level: null,
   ...extra,
 });
+
+/** A structural lane message (the guard is the stand-in above, extended to the lane). */
+const isStatusOrLane = (x: unknown): x is BackgroundToEditor =>
+  isStatus(x) ||
+  (typeof x === 'object' &&
+    x !== null &&
+    (x as { v?: unknown }).v === 1 &&
+    (x as { type?: unknown }).type === 'handoff/lane');
 
 function harness(isMessage: (x: unknown) => x is BackgroundToEditor = isStatus) {
   const ports: FakePort[] = [];
@@ -210,23 +217,56 @@ describe('msite hand-off client', () => {
     vi.useRealTimers();
   });
 
-  test('start, cancel and outcome post v:1 messages on one port', () => {
+  test('every editor request posts its v:1 message on one port', () => {
     const { client, ports } = harness();
-    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: true, screen, browser: 'chromium' });
+    client.start({ exportId: 'exp_1', mode: 'post', screen, browser: 'chromium', queue: true, exportSha256: 'ab' });
     client.cancel();
-    client.outcome('hof_1', true);
+    client.accountChoice('hof_1', true);
+    client.manual('hof_1');
+    client.mark('hof_1', false);
+    client.enableMsite(1234);
+    client.openInstagram('story', 'testuser');
+    client.forgetAccount();
+    client.resultSeen('hof_1');
     expect(ports).toHaveLength(1);
     expect(ports[0]?.sent).toEqual([
-      { v: 1, type: 'handoff/start', exportId: 'exp_1', mode: 'post', rehearsal: true, screen, browser: 'chromium' },
+      {
+        v: 1,
+        type: 'handoff/start',
+        exportId: 'exp_1',
+        mode: 'post',
+        screen,
+        browser: 'chromium',
+        queue: true,
+        exportSha256: 'ab',
+      },
       { v: 1, type: 'handoff/cancel' },
-      { v: 1, type: 'handoff/outcome', handoffId: 'hof_1', posted: true },
+      { v: 1, type: 'handoff/account-choice', handoffId: 'hof_1', proceed: true },
+      { v: 1, type: 'handoff/manual', handoffId: 'hof_1' },
+      { v: 1, type: 'handoff/mark', handoffId: 'hof_1', posted: false },
+      { v: 1, type: 'handoff/enable-msite', lockedUntil: 1234 },
+      { v: 1, type: 'ui/open-instagram', page: 'story', handle: 'testuser' },
+      { v: 1, type: 'ui/forget-account' },
+      { v: 1, type: 'ui/result-seen', handoffId: 'hof_1' },
     ]);
   });
 
-  test('probe mode sends exportId null', () => {
+  test('check mode sends exportId null', () => {
     const { client, ports } = harness();
-    client.start({ exportId: null, mode: 'probe', rehearsal: true, screen, browser: 'chromium' });
-    expect(ports[0]?.sent[0]).toMatchObject({ type: 'handoff/start', exportId: null, mode: 'probe' });
+    client.start({ exportId: null, mode: 'check', screen, browser: 'chromium', queue: false });
+    expect(ports[0]?.sent[0]).toMatchObject({ type: 'handoff/start', exportId: null, mode: 'check' });
+  });
+
+  test('the lane reaches lane listeners only; statuses reach status listeners only', () => {
+    const { client, ports } = harness(isStatusOrLane);
+    const lanes: unknown[] = [];
+    const statuses: unknown[] = [];
+    client.onLane((l) => lanes.push(l.kind));
+    client.onStatus((s) => statuses.push(s.phase));
+    ports[0]?.emit({ v: 1, type: 'handoff/lane', kind: 'spacing', freeAt: 5 });
+    ports[0]?.emit(status('opening'));
+    expect(lanes).toEqual(['spacing']);
+    expect(statuses).toEqual(['opening']);
   });
 
   test('statuses reach listeners only after validation', () => {
@@ -260,7 +300,7 @@ describe('msite hand-off client', () => {
     client.onConnection((c) => conn.push(c));
     const seen: string[] = [];
     client.onStatus((s) => seen.push(s.phase));
-    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: true, screen, browser: 'chromium' });
+    client.start({ exportId: 'exp_1', mode: 'post', screen, browser: 'chromium', queue: false });
     ports[0]?.emit(status('probing'));
     ports[0]?.drop();
     expect(ports).toHaveLength(1);
@@ -275,9 +315,9 @@ describe('msite hand-off client', () => {
     vi.advanceTimersByTime(1);
     expect(ports).toHaveLength(3);
     // The live port delivers; dead ones are ignored. A delivered status resets the backoff.
-    ports[0]?.emit(status('awaitingShare'));
-    ports[2]?.emit(status('awaitingPick'));
-    expect(seen).toEqual(['probing', 'awaitingPick']);
+    ports[0]?.emit(status('composeReady'));
+    ports[2]?.emit(status('openingEntry'));
+    expect(seen).toEqual(['probing', 'openingEntry']);
     ports[2]?.drop();
     vi.advanceTimersByTime(100);
     expect(ports).toHaveLength(4);
@@ -292,7 +332,7 @@ describe('msite hand-off client', () => {
     ports[0]?.drop();
     vi.advanceTimersByTime(10_000);
     expect(ports).toHaveLength(1);
-    client.start({ exportId: null, mode: 'probe', rehearsal: true, screen, browser: 'chromium' });
+    client.start({ exportId: null, mode: 'check', screen, browser: 'chromium', queue: false });
     expect(ports).toHaveLength(2);
     expect(ports[1]?.sent).toHaveLength(1);
   });
@@ -301,15 +341,15 @@ describe('msite hand-off client', () => {
     const { client, ports } = harness();
     client.cancel();
     if (ports[0]) ports[0].throwOnPost = true;
-    client.outcome('hof_1', false);
+    client.mark('hof_1', false);
     expect(ports).toHaveLength(2);
-    expect(ports[1]?.sent).toEqual([{ v: 1, type: 'handoff/outcome', handoffId: 'hof_1', posted: false }]);
+    expect(ports[1]?.sent).toEqual([{ v: 1, type: 'handoff/mark', handoffId: 'hof_1', posted: false }]);
   });
 
   test('close disconnects and stops reconnecting', () => {
     vi.useFakeTimers();
     const { client, ports } = harness();
-    client.start({ exportId: 'exp_1', mode: 'post', rehearsal: false, screen, browser: 'chromium' });
+    client.start({ exportId: 'exp_1', mode: 'post', screen, browser: 'chromium', queue: false });
     client.close();
     expect(ports[0]?.disconnected).toBe(true);
     ports[0]?.drop();

@@ -386,6 +386,8 @@ Tools that call these endpoints directly, such as OpenCLI, read these values fro
 
 **Other web configure endpoints:** `/api/v1/media/configure/`, `configure_sidecar/`, `configure_to_clips/` and `configure_to_longform/`.
 
+**After Share (2026-10-13 reading of `PolarisStoryCreationActions.uploadStory`, strategy §11 AM40):** `UPLOAD_REQUESTED`; the upload above (XHR, no timeout, no retry); only after a 2xx, the finalize above (XHR, 60 s timeout), any 2xx of which the client treats as success; then a success toast, the tray refresh (`POST /graphql/query`) and `pushState('/')`. On failure the "Upload failed." toast with Retry and no navigation; `feedback_required` shows a dialog, 401 `require_login` goes to the login page, a `checkpoint_url` navigates there. `uploadStory` has no in-flight guard: a second Share click uploads and publishes again. instapost never calls these endpoints; it reads the page's own requests from resource timing (`docs/contract.md` C13).
+
 ### 5.4 Making a desktop tab look mobile from MV3
 
 | Backend | Mechanism | What stays inconsistent | Cost |
@@ -415,7 +417,7 @@ Additional constraints:
    - Dispatched events have `isTrusted=false`. Whether Instagram checks this is (unverified); test it in a fixture and on a throwaway account.
    - CDP `DOM.setFileInputFiles` is trusted but needs file paths on disk.
 4. **Getting the blob from the side panel to the content script:** Chrome 148 or later with the manifest key `"message_serialization": "structured_clone"` sends `Blob` and `File` directly ([blog, 2026-04-22](https://developer.chrome.com/blog/structured-clone-messaging)). Every messaging peer must use the same format, otherwise the port closes. Without it, send chunked ArrayBuffers over a Port.
-5. **Leave the final "Share to story" click to the user.**
+5. ~~**Leave the final "Share to story" click to the user.**~~ **Superseded on 2026-10-13 by the owner's decision (strategy §11 AM39, `docs/ux.md`).** instapost now taps Instagram's own + (Create), the Story menu item and Share with `element.click()` from the isolated world, and puts the file only into the story input that + → Story armed (so Instagram's story session starts, with its portrait check and a uuid session id; a file set without it skips the session). Instagram's own client still builds and sends every request. The facts behind it (the menu's two actions, no `isTrusted` or `userActivation` reads on that path, no chooser without user activation, Share without an in-flight guard, the outcome read from resource timing) are in `docs/contract.md` C10–C14 and § "Autopilot spike (2026-10-13)". This moves the extension from assisted to automated use under the terms discussed in §5.8 (strategy OD9).
 
 ### 5.6 Private endpoints beyond msite
 

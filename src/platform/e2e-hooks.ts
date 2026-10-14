@@ -28,6 +28,8 @@
  *   it installs itself first at the injection that follows the pick's SPA navigation, after the
  *   composer mounted: the late shim the reducer must catch. Read at every injection; live builds never
  *   read it (the runner gets no test hooks there).
+ * - `__e2eDwellScale` (number in [0, 1)): scales the autopilot's human-pace dwell (0 = none), ux.md IB6.
+ * - `__e2eBudgetScale` (number in (0, 1)): shrinks the outcome rules' 75 s / 120 s budgets, ux.md IB6.
  */
 import { browser } from 'wxt/browser';
 import type { WindowsPort, WindowUpdate } from './windows.ts';
@@ -41,6 +43,10 @@ export const WINDOW_QUIRK_KEY = '__e2eWindowQuirk';
 export const RESIZE_TIMEOUT_KEY = '__e2eResizeTimeoutMs';
 /** storage.local key that switches the portrait shim off (AM37). */
 export const PORTRAIT_SHIM_OFF_KEY = '__e2ePortraitShimOff';
+/** ux.md IB6: scales the human-pace dwell (0 = no dwell). */
+export const DWELL_SCALE_KEY = '__e2eDwellScale';
+/** ux.md IB6: shrinks the outcome budgets (75 s after the upload, 120 s for the upload). */
+export const BUDGET_SCALE_KEY = '__e2eBudgetScale';
 
 /** The size Arc gave the popup whatever windows.create asked for (2026-10-12 live run). */
 export const ARC_CREATED = { width: 1512, height: 949 } as const;
@@ -97,6 +103,21 @@ export function quirkDrops(
   }
 }
 
+/**
+ * Where "Arc" puts a popup whose bounds it ignored: ARC_CREATED's size, keeping the requested box's top and
+ * right edge. Since the popup is docked at the right edge of the screen (ux.md §4.6), keeping its left
+ * edge instead would put a 1512 px window mostly off screen, which Chromium refuses ("Bounds must be at
+ * least 50% within visible screen space") before any quirk could be observed.
+ */
+export function arcPlacement(box: { left: number; top: number; width: number; height: number }): {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} {
+  return { left: box.left + box.width - ARC_CREATED.width, top: box.top, ...ARC_CREATED };
+}
+
 /** Wraps a WindowsPort so the product's popups get the quirk storage.local names at their creation. */
 export function withWindowQuirk(base: WindowsPort, deps: QuirkDeps = defaultQuirkDeps): WindowsPort {
   const popups = new Map<number, { quirk: WindowQuirk; createdAt: number; updates: number }>();
@@ -106,16 +127,20 @@ export function withWindowQuirk(base: WindowsPort, deps: QuirkDeps = defaultQuir
       const quirk = await deps.readQuirk();
       if (quirk === 'none') return base.createPopup(box);
       const ignoresBounds = quirk === 'arc' || quirk === 'ignoreAll';
-      const created = await base.createPopup(ignoresBounds ? { left: box.left, top: box.top, ...ARC_CREATED } : box);
+      const arcBox = arcPlacement(box);
+      const created = await base.createPopup(ignoresBounds ? arcBox : box);
       popups.set(created.windowId, { quirk, createdAt: deps.now(), updates: 0 });
       if (quirk === 'arcLate') {
         deps.setTimeout(() => {
-          base.update(created.windowId, { state: 'normal', ...ARC_CREATED }).catch(() => undefined);
+          base.update(created.windowId, { state: 'normal', ...arcBox }).catch(() => undefined);
         }, ARC_LATE_MS);
       }
       return created;
     },
     async update(windowId, update) {
+      // The quirks are about bounds: raising the popup (focused only, ux.md §4.6) always goes through.
+      const bounds = ['left', 'top', 'width', 'height'].some((k) => k in update);
+      if (!bounds) return base.update(windowId, update);
       const p = popups.get(windowId);
       if (p) p.updates++;
       if (p && quirkDrops(p.quirk, update, p.createdAt, deps.now(), p.updates === 1)) return;
@@ -137,7 +162,14 @@ export interface RunnerTestHooks {
    * `'home'` (SH-1) when it must only read off the composer (flag set to 'home'); false otherwise.
    */
   portraitShimOff(): Promise<boolean | 'home'>;
+  /** ux.md IB6: the dwell scale in [0, 1), or undefined. */
+  dwellScale(): Promise<number | undefined>;
+  /** ux.md IB6: the outcome budget scale in (0, 1), or undefined. */
+  budgetScale(): Promise<number | undefined>;
 }
+
+const scaleOf = (v: unknown, zeroOk: boolean): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) && v < 1 && (zeroOk ? v >= 0 : v > 0) ? v : undefined;
 
 export const e2eRunnerHooks: RunnerTestHooks = {
   async resizeTimeoutMs() {
@@ -147,5 +179,11 @@ export const e2eRunnerHooks: RunnerTestHooks = {
   async portraitShimOff() {
     const v = await readLocal(PORTRAIT_SHIM_OFF_KEY);
     return v === 'home' ? 'home' : v === true;
+  },
+  async dwellScale() {
+    return scaleOf(await readLocal(DWELL_SCALE_KEY), true);
+  },
+  async budgetScale() {
+    return scaleOf(await readLocal(BUDGET_SCALE_KEY), false);
   },
 };

@@ -1,10 +1,11 @@
 /**
- * Background wiring (strategy §3.1, §3.5, §3.6 step 10): builds the runner over the real
+ * Background wiring (strategy §3.1, §3.5, §3.6 step 10; ux.md IB3): builds the runner over the real
  * platform wrappers and registers every listener synchronously, in the worker's first turn,
  * so Chrome can wake a stopped worker for any of them.
  *
- * - action click: open or focus the editor tab (its id lives in storage.session, so no `tabs`
- *   permission is needed);
+ * - action click (and its shortcut, `commands._execute_action`, ⌥⇧S): open or focus the editor tab (its
+ *   id lives in storage.session, so no `tabs` permission is needed);
+ * - the toolbar badge shows the run (`…`) and its result (✓ ! ?) until the editor has shown it;
  * - runtime.onConnect `handoff`: the editor port (our own extension pages only);
  * - runtime.onMessage: composer-agent messages (`agent/*`), each answered (protocol AgentReply);
  * - tabs.onUpdated: the composer tab's updates (hard reload, kill switch, AM2 re-probes);
@@ -14,6 +15,7 @@
  *   disable/enable of the extension is closed first, when the runner starts (runner.ts, AM22).
  */
 import { browser } from 'wxt/browser';
+import { badge } from '../platform/action.ts';
 import { dnr } from '../platform/dnr.ts';
 import { e2eRunnerHooks } from '../platform/e2e-hooks.ts';
 import { scripting } from '../platform/scripting.ts';
@@ -23,7 +25,7 @@ import { windows } from '../platform/windows.ts';
 import { GUARDED } from '../shared/env.ts';
 import { type AgentReply, HANDOFF_PORT } from '../shared/protocol.ts';
 import { localState } from './local-state.ts';
-import { idbExports, idbRecords } from './records.ts';
+import { idbExports, idbRecords, pruneExports } from './records.ts';
 import { consoleLogger, createRunner, type Logger, type Runner } from './runner.ts';
 import { sessionStore } from './session-store.ts';
 import { realClock } from './timers.ts';
@@ -51,6 +53,18 @@ export async function openOrFocusEditor(): Promise<void> {
   await session.set('editorTabId', tab.id);
 }
 
+/** ux.md §4.6: brings the editor tab's window back to the front, if there is an editor tab. */
+export async function focusEditorWindow(): Promise<void> {
+  const known = await session.get('editorTabId');
+  if (known === undefined) return;
+  try {
+    const tab = await tabs.get(known);
+    await windows.update(tab.windowId, { focused: true });
+  } catch {
+    // The editor tab is gone: nothing to focus.
+  }
+}
+
 /** A sender that is one of this extension's own pages (not a content script in a web page). */
 function isOwnPage(sender: { id?: string; url?: string } | undefined): boolean {
   return sender?.id === browser.runtime.id && (sender.url ?? '').startsWith(browser.runtime.getURL('/'));
@@ -72,6 +86,8 @@ export function createBackgroundRunner(log: Logger = consoleLogger): Runner {
       local: localState(GUARDED),
       records: idbRecords,
       exports: idbExports,
+      badge,
+      focusEditor: focusEditorWindow,
     },
     {
       guarded: GUARDED,
@@ -120,7 +136,12 @@ export function startBackground(runner: Runner = createBackgroundRunner(), log: 
   windows.onBoundsChanged((windowId) => void runner.windowBoundsChanged(windowId));
   tabs.onRemoved((tabId) => void runner.dispatch({ type: 'tabRemoved', tabId }));
   windows.onRemoved((windowId) => void runner.dispatch({ type: 'windowRemoved', windowId }));
-  browser.runtime.onStartup.addListener(() => void runner.dispatch({ type: 'startup' }));
-  browser.runtime.onInstalled.addListener(() => void runner.dispatch({ type: 'startup' }));
+  const startup = () => {
+    void runner.dispatch({ type: 'startup' });
+    // ux.md IB5: exports older than 30 days go (History shows a placeholder for them).
+    pruneExports(Date.now()).catch((err: unknown) => log.warn('export pruning failed', err));
+  };
+  browser.runtime.onStartup.addListener(startup);
+  browser.runtime.onInstalled.addListener(startup);
   return runner;
 }

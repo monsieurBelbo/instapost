@@ -4,24 +4,28 @@
  * base64 round trip of 12 MB.
  */
 import { describe, expect, it } from 'vitest';
-import type { HandoffPhase } from '../core/handoff/state.ts';
+import type { SessionPhase } from '../core/handoff/state.ts';
 import type { ProbeReport } from '../core/ig-contract/contract.ts';
 import { b64ToBytes, bytesToB64 } from './b64.ts';
 import {
   type ActiveAgentSession,
+  AGENT_FACT_PHASES,
   AGENT_MESSAGE_PHASES,
   type AgentRejection,
   type AgentToBackground,
   acceptAgentMessage,
   HANDOFF_PHASES,
   isAgentAck,
+  isAgentFact,
   isAgentToBackground,
   isBackgroundToAgent,
   isBackgroundToEditor,
   isEditorToBackground,
   isGetFileReply,
+  isLane,
   isPageOrientation,
   isProbeReport,
+  normalizeFact,
   PROBE_LIMITS,
   type SenderLike,
   toPageOrientation,
@@ -72,6 +76,24 @@ const event = (name: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+const factMsg = (f: Record<string, unknown>, over: Record<string, unknown> = {}) => ({
+  v: 1,
+  type: 'agent/fact',
+  fact: f,
+  handoffId: HID,
+  nonce: NONCE,
+  ...over,
+});
+const NET_ENTRY = {
+  host: 'i',
+  path: '/rupload_igphoto/fb_uploader_1',
+  status: 200,
+  type: 'application/json',
+  redirected: false,
+  start: 10,
+  end: 900,
+};
+
 const sender = (over: Partial<SenderLike> = {}): SenderLike => ({
   id: RUNTIME_ID,
   tab: { id: TAB },
@@ -79,7 +101,7 @@ const sender = (over: Partial<SenderLike> = {}): SenderLike => ({
   url: 'https://www.instagram.com/create/story/',
   ...over,
 });
-const active = (phase: HandoffPhase, over: Partial<ActiveAgentSession> = {}): ActiveAgentSession => ({
+const active = (phase: SessionPhase, over: Partial<ActiveAgentSession> = {}): ActiveAgentSession => ({
   runtimeId: RUNTIME_ID,
   tabId: TAB,
   handoffId: HID,
@@ -172,15 +194,30 @@ describe('U12 acceptAgentMessage (§3.5)', () => {
     ['report without probe', report({ probe: undefined })],
     ['report with a bad probe', report({ probe: { ...probe(), isMobile: 'yes' } })],
     ['unknown event', event('composer-clicked')],
+    ['a hand-off era event', event('composer-ready')],
+    ['an unknown fact', factMsg({ kind: 'tapped' })],
+    ['a net fact past the bounds', factMsg({ kind: 'net', entries: Array(65).fill(NET_ENTRY), elapsedMs: 1 })],
+    [
+      'a net entry with a long path',
+      factMsg({ kind: 'net', entries: [{ ...NET_ENTRY, path: `/${'x'.repeat(200)}` }], elapsedMs: 1 }),
+    ],
+    [
+      'a net entry with a status out of range',
+      factMsg({ kind: 'net', entries: [{ ...NET_ENTRY, status: 600 }], elapsedMs: 1 }),
+    ],
+    [
+      'a net entry from an unknown host class',
+      factMsg({ kind: 'net', entries: [{ ...NET_ENTRY, host: 'evil' }], elapsedMs: 1 }),
+    ],
   ])('rejects a malformed message: %s', (_, raw) => {
     expect(reason(raw, sender(), active('probing'))).toBe('shape');
   });
 
-  describe('phase gating (AGENT_MESSAGE_PHASES)', () => {
+  describe('phase gating (AGENT_MESSAGE_PHASES, AGENT_FACT_PHASES)', () => {
     const cases: [string, () => unknown, AgentToBackground['type']][] = [
       ['agent/report', () => report(), 'agent/report'],
       ['agent/get-file', () => getFile(), 'agent/get-file'],
-      ['agent/event', () => event('composer-ready'), 'agent/event'],
+      ['agent/event', () => event('input-appeared'), 'agent/event'],
     ];
     for (const [name, make, type] of cases) {
       for (const phase of HANDOFF_PHASES) {
@@ -191,12 +228,63 @@ describe('U12 acceptAgentMessage (§3.5)', () => {
       }
     }
 
-    it('events are also accepted in probing, for the AM16 replay', () => {
-      expect(AGENT_MESSAGE_PHASES['agent/event']).toContain('probing');
-    });
+    const facts: [string, Record<string, unknown>][] = [
+      [
+        'entry',
+        {
+          kind: 'entry',
+          result: 'armed',
+          fpUsed: false,
+          storyIndex: 1,
+          glyph: 'ab12',
+          menuCount: 2,
+          trials: 0,
+          plusTaps: 1,
+          armedMs: 300,
+        },
+      ],
+      ['inserted', { kind: 'inserted' }],
+      ['insert-failed', { kind: 'insert-failed', why: 'not-armed' }],
+      [
+        'compose',
+        {
+          kind: 'compose',
+          onComposer: true,
+          drawn: true,
+          landscape: false,
+          controls: 1,
+          variant: 'v1',
+          fbAuto: false,
+          settled: true,
+          settleMs: 1500,
+          canvas: { w: 1, h: 2 },
+          imageScore: null,
+        },
+      ],
+      ['share-done', { kind: 'share-done', t0Wall: 1 }],
+      ['share-refused', { kind: 'share-refused', why: 'controls' }],
+      ['net', { kind: 'net', entries: [NET_ENTRY], elapsedMs: 1000 }],
+      ['ui', { kind: 'ui', progressSeen: true, toast: 'none', wentHome: false }],
+      ['visibility', { kind: 'visibility', hidden: true }],
+      ['owner-share', { kind: 'owner-share', t0Wall: 1 }],
+    ];
+    for (const [name, f] of facts) {
+      for (const phase of HANDOFF_PHASES) {
+        const allowed =
+          AGENT_MESSAGE_PHASES['agent/fact'].includes(phase) &&
+          AGENT_FACT_PHASES[f.kind as keyof typeof AGENT_FACT_PHASES].includes(phase);
+        it(`fact ${name} in ${phase}: ${allowed ? 'accepted' : 'phase'}`, () => {
+          expect(reason(factMsg(f), sender(), active(phase))).toBe(allowed ? 'ok' : 'phase');
+        });
+      }
+    }
 
-    it('get-file is accepted only in injecting', () => {
-      expect(AGENT_MESSAGE_PHASES['agent/get-file']).toEqual(['injecting']);
+    it('get-file only while inserting; Share’s answer only while sharing; taps’ facts only in their phase', () => {
+      expect(AGENT_MESSAGE_PHASES['agent/get-file']).toEqual(['inserting']);
+      expect(AGENT_FACT_PHASES['share-done']).toEqual(['sharing']);
+      expect(AGENT_FACT_PHASES.entry).toEqual(['openingEntry']);
+      expect(AGENT_FACT_PHASES.net).toEqual(['sharing', 'confirmingUpload', 'finished', 'manual']);
+      expect(AGENT_FACT_PHASES['owner-share']).toEqual(['manual']);
     });
   });
 
@@ -211,6 +299,23 @@ describe('U12 acceptAgentMessage (§3.5)', () => {
     expect(reason(report({ handoffId: 'h', nonce: 'x' }), sender(), active('idle'))).toBe('handoff');
     expect(reason(report({ nonce: 'x' }), sender(), active('idle'))).toBe('nonce');
     expect(reason(report(), sender(), active('idle'))).toBe('phase');
+  });
+
+  it('a fact is copied with only its known fields (nothing extra reaches storage)', () => {
+    const raw = factMsg({
+      kind: 'net',
+      entries: [{ ...NET_ENTRY, html: '<x>', start: 10.4 }],
+      elapsedMs: 900.6,
+      extra: 1,
+    });
+    const r = acceptAgentMessage(raw, sender(), active('confirmingUpload'));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.msg).toEqual(factMsg({ kind: 'net', entries: [{ ...NET_ENTRY, start: 10 }], elapsedMs: 901 }));
+    expect(normalizeFact({ kind: 'visibility', hidden: true, x: 1 } as never)).toEqual({
+      kind: 'visibility',
+      hidden: true,
+    });
   });
 
   it('returns a copy with only the known fields', () => {
@@ -233,7 +338,7 @@ describe('U12 guards', () => {
       type: 'handoff/start',
       exportId: 'exp_1',
       mode: 'post',
-      rehearsal: true,
+      queue: true,
       screen,
       browser: 'chromium',
     };
@@ -243,62 +348,115 @@ describe('U12 guards', () => {
     expect(isEditorToBackground({ ...start, browser: 'unknown' })).toBe(true);
     expect(isEditorToBackground({ ...start, browser: 'safari' })).toBe(false);
     expect(isEditorToBackground({ ...start, browser: undefined })).toBe(false);
-    expect(isEditorToBackground({ ...start, exportId: null, mode: 'probe' })).toBe(true);
+    expect(isEditorToBackground({ ...start, exportId: null, mode: 'check' })).toBe(true);
+    for (const mode of ['test', 'shareTest']) expect(isEditorToBackground({ ...start, mode })).toBe(true);
+    expect(
+      isEditorToBackground({ ...start, exportSha256: 'a'.repeat(64), docHash: 'b'.repeat(64), exportSample: 'AAAA' }),
+    ).toBe(true);
+    expect(isEditorToBackground({ ...start, exportSha256: 'nothex' })).toBe(false);
+    expect(isEditorToBackground({ ...start, exportSample: '<script>' })).toBe(false);
     expect(isEditorToBackground({ v: 1, type: 'handoff/cancel' })).toBe(true);
-    expect(isEditorToBackground({ v: 1, type: 'handoff/outcome', handoffId: HID, posted: false })).toBe(true);
+    expect(isEditorToBackground({ v: 1, type: 'handoff/account-choice', handoffId: HID, proceed: true })).toBe(true);
+    expect(isEditorToBackground({ v: 1, type: 'handoff/account-choice', handoffId: HID })).toBe(false);
+    expect(isEditorToBackground({ v: 1, type: 'handoff/manual', handoffId: HID })).toBe(true);
+    expect(isEditorToBackground({ v: 1, type: 'handoff/mark', handoffId: HID, posted: false })).toBe(true);
+    expect(isEditorToBackground({ v: 1, type: 'ui/open-instagram', page: 'home' })).toBe(true);
+    expect(isEditorToBackground({ v: 1, type: 'ui/open-instagram', page: 'story', handle: 'testuser' })).toBe(true);
+    expect(isEditorToBackground({ v: 1, type: 'ui/open-instagram', page: 'https://evil.example/' })).toBe(false);
+    expect(isEditorToBackground({ v: 1, type: 'ui/forget-account' })).toBe(true);
+    // AP-4: Use @account names the check, never a handle (the background takes the one it read).
+    expect(isEditorToBackground({ v: 1, type: 'ui/use-account', handoffId: HID })).toBe(true);
+    expect(isEditorToBackground({ v: 1, type: 'ui/use-account' })).toBe(false);
+    expect(isEditorToBackground({ v: 1, type: 'ui/result-seen', handoffId: HID })).toBe(true);
+    // The "Posted?" question is gone (DL1).
+    expect(isEditorToBackground({ v: 1, type: 'handoff/outcome', handoffId: HID, posted: false })).toBe(false);
 
     expect(isEditorToBackground({ ...start, mode: 'publish' })).toBe(false);
-    expect(isEditorToBackground({ ...start, rehearsal: 'yes' })).toBe(false);
+    expect(isEditorToBackground({ ...start, mode: 'probe' })).toBe(false);
+    expect(isEditorToBackground({ ...start, queue: 'yes' })).toBe(false);
     expect(isEditorToBackground({ ...start, screen: { ...screen, availHeight: Number.NaN } })).toBe(false);
     expect(isEditorToBackground({ ...start, exportId: '' })).toBe(false);
     expect(isEditorToBackground({ ...start, v: 2 })).toBe(false);
-    expect(isEditorToBackground({ v: 1, type: 'handoff/outcome', handoffId: HID })).toBe(false);
     // AM25: ENABLE carries the lock the editor showed (or null).
     expect(isEditorToBackground({ v: 1, type: 'handoff/enable-msite', lockedUntil: 5 })).toBe(true);
     expect(isEditorToBackground({ v: 1, type: 'handoff/enable-msite', lockedUntil: null })).toBe(true);
     expect(isEditorToBackground({ v: 1, type: 'handoff/enable-msite' })).toBe(false);
     expect(isEditorToBackground({ v: 1, type: 'handoff/enable-msite', lockedUntil: 'x' })).toBe(false);
-    expect(isEditorToBackground({ v: 1, type: 'handoff/status', handoffId: null, phase: 'idle', level: null })).toBe(
-      false,
-    );
+    expect(isEditorToBackground({ v: 1, type: 'handoff/status', handoffId: null, phase: 'idle' })).toBe(false);
   });
 
   it('isBackgroundToEditor', () => {
-    const status = { v: 1, type: 'handoff/status', handoffId: HID, phase: 'awaitingPick', level: 'H0' };
+    const status = { v: 1, type: 'handoff/status', handoffId: HID, phase: 'openingEntry', mode: 'post', step: 'story' };
     expect(isBackgroundToEditor(status)).toBe(true);
+    const result = {
+      kind: 'unknown',
+      code: 'OUTCOME_UNKNOWN',
+      why: 'no-upload-seen',
+      alarms: [],
+      at: 5,
+      held: true,
+      account: 'testuser',
+    };
     expect(
       isBackgroundToEditor({
         ...status,
-        error: 'INJECTION_IGNORED',
+        phase: 'finished',
+        error: 'OUTCOME_UNKNOWN',
         probe: probe(),
         banner: 'FAKE_INSTAGRAM',
         route: 'homeOnly',
-        detectedPosted: false,
         freeAt: 5,
         detail: 'x',
-        rehearsal: true,
-        assistedInsert: false,
-        holdOpen: true,
-        postedUnknown: true,
+        result,
+        held: 'upload',
+        closeAt: 9,
+        canStop: false,
+        shareSent: true,
+        steps: { opened: 1, instagram: 2, share: 3 },
+        account: { detected: 'testuser', candidates: 1, expected: 'testuser', decision: 'ok', confirmedBy: 'match' },
+        evidence: {
+          sharedAt: 3,
+          sharedBy: 'autopilot',
+          net: [NET_ENTRY],
+          ui: { progressSeen: true, toast: 'none', wentHomeAt: null },
+          alarms: ['DUPLICATE_UPLOAD'],
+        },
       }),
     ).toBe(true);
-    // AM21/AM19: the session switches and holdOpen are booleans or absent.
-    expect(isBackgroundToEditor({ ...status, rehearsal: 'on' })).toBe(false);
-    expect(isBackgroundToEditor({ ...status, assistedInsert: 1 })).toBe(false);
-    expect(isBackgroundToEditor({ ...status, holdOpen: null })).toBe(false);
-    expect(isBackgroundToEditor({ ...status, error: 'UNEXPECTED_PAGE' })).toBe(true);
-    // AM28: the new codes, and postedUnknown as a boolean.
-    expect(isBackgroundToEditor({ ...status, error: 'BRANDED_BROWSER' })).toBe(true);
-    expect(isBackgroundToEditor({ ...status, error: 'NAVIGATION_TIMEOUT' })).toBe(true);
-    expect(isBackgroundToEditor({ ...status, postedUnknown: 'yes' })).toBe(false);
+    expect(isBackgroundToEditor({ ...status, phase: 'queued', queuedUntil: 5 })).toBe(true);
     expect(
-      isBackgroundToEditor({ ...status, handoffId: null, phase: 'idle', level: null, error: 'RATE_LIMITED' }),
+      isBackgroundToEditor({
+        ...status,
+        phase: 'awaitingAccount',
+        accountPrompt: { kind: 'mismatch', detected: 'other', expected: 'testuser', until: 5 },
+      }),
     ).toBe(true);
-    expect(isBackgroundToEditor({ ...status, phase: 'posting' })).toBe(false);
+    expect(
+      isBackgroundToEditor({ ...status, accountPrompt: { kind: 'maybe', detected: null, expected: null, until: 5 } }),
+    ).toBe(false);
+    expect(isBackgroundToEditor({ ...status, result: { ...result, kind: 'probably' } })).toBe(false);
+    expect(isBackgroundToEditor({ ...status, result: { ...result, account: 'not a handle!' } })).toBe(false);
+    expect(isBackgroundToEditor({ ...status, held: 'forever' })).toBe(false);
+    expect(isBackgroundToEditor({ ...status, canStop: 'yes' })).toBe(false);
+    expect(isBackgroundToEditor({ ...status, mode: 'probe' })).toBe(false);
+    // The hand-off era phases no longer parse (a stale status, IR1).
+    expect(isBackgroundToEditor({ ...status, phase: 'awaitingShare' })).toBe(false);
     expect(isBackgroundToEditor({ ...status, error: 'OOPS' })).toBe(false);
-    expect(isBackgroundToEditor({ ...status, level: 'H2' })).toBe(false);
-    expect(isBackgroundToEditor({ ...status, probe: { marker: true } })).toBe(false);
-    // 2026-10-12: the guided resize, the window diagnostics, the page path, C4; the new codes and phase.
+    for (const code of [
+      'STORY_ENTRY_MISSING',
+      'SHARE_MISSING',
+      'WINDOW_IN_USE',
+      'WINDOW_HIDDEN',
+      'ACCOUNT_UNCONFIRMED',
+      'UPLOAD_FAILED',
+      'TEST_LEAK',
+    ]) {
+      expect(isBackgroundToEditor({ ...status, error: code })).toBe(true);
+    }
+    expect(
+      isBackgroundToEditor({ v: 1, type: 'handoff/status', handoffId: null, phase: 'idle', error: 'RATE_LIMITED' }),
+    ).toBe(true);
+    // 2026-10-12: the guided resize and the window diagnostics.
     const win = {
       screen,
       requested: { left: 2970, top: -328, width: 524, height: 1012 },
@@ -319,41 +477,65 @@ describe('U12 guards', () => {
       manualResize: false,
       finalTab: { w: 1512, h: 902 },
       zoom: 1,
+      docked: true,
     };
     const resizing = {
       ...status,
       phase: 'resizing',
-      level: null,
       resize: { tab: { w: 1512, h: 902 }, ok: false, until: 5, maxW: 767 },
       window: win,
     };
     expect(isBackgroundToEditor(resizing)).toBe(true);
-    expect(isBackgroundToEditor({ ...resizing, window: { ...win, created: null, createdTab: null, zoom: null } })).toBe(
-      true,
-    );
     expect(isBackgroundToEditor({ ...resizing, resize: { tab: { w: 1, h: 1 }, ok: 'no', until: 5, maxW: 767 } })).toBe(
       false,
     );
-    // AF-8: the width limit the indicator uses travels with it.
-    expect(isBackgroundToEditor({ ...resizing, resize: { tab: { w: 1, h: 1 }, ok: false, until: 5 } })).toBe(false);
-    expect(isBackgroundToEditor({ ...resizing, window: { ...win, attempts: 'one' } })).toBe(false);
-    expect(isBackgroundToEditor({ ...resizing, window: { ...win, updates: [{ step: 'again' }] } })).toBe(false);
-    expect(isBackgroundToEditor({ ...status, path: '/', c4: 'unknown' })).toBe(true);
+    expect(isBackgroundToEditor({ ...resizing, window: { ...win, docked: 'right' } })).toBe(false);
     expect(isBackgroundToEditor({ ...status, path: 'x'.repeat(513) })).toBe(false);
-    expect(isBackgroundToEditor({ ...status, c4: 'maybe' })).toBe(false);
-    for (const code of ['SW_INTERCEPTS', 'WINDOW_NOT_FITTED', 'LAYOUT_TOO_WIDE', 'SW_TOOK_CONTROL']) {
-      expect(isBackgroundToEditor({ ...status, error: code })).toBe(true);
-    }
+    // The lane.
+    const lane = {
+      v: 1,
+      type: 'handoff/lane',
+      kind: 'spacing',
+      freeAt: 5,
+      today: 3,
+      hour: 1,
+      caps: { hour: 6, day: 15 },
+    };
+    expect(isBackgroundToEditor(lane)).toBe(true);
+    expect(isLane({ kind: 'busy', handoffId: HID, today: 0, hour: 0, caps: { hour: 6, day: 15 } })).toBe(true);
+    expect(isBackgroundToEditor({ ...lane, kind: 'maybe' })).toBe(false);
+    expect(isBackgroundToEditor({ ...lane, caps: undefined })).toBe(false);
   });
 
   it('isBackgroundToAgent', () => {
     const base = { v: 1, handoffId: HID, nonce: NONCE };
     expect(isBackgroundToAgent({ ...base, type: 'agent/probe' })).toBe(true);
-    expect(isBackgroundToAgent({ ...base, type: 'agent/inject' })).toBe(true);
-    expect(isBackgroundToAgent({ ...base, type: 'agent/watch', readyTimeoutMs: 0 })).toBe(true);
-    expect(isBackgroundToAgent({ ...base, type: 'agent/watch', readyTimeoutMs: 10_000 })).toBe(true);
-    expect(isBackgroundToAgent({ ...base, type: 'agent/watch' })).toBe(false);
-    expect(isBackgroundToAgent({ ...base, type: 'agent/watch', readyTimeoutMs: -1 })).toBe(false);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/watch' })).toBe(true);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/drive', step: 'open-entry', fingerprint: null })).toBe(true);
+    expect(
+      isBackgroundToAgent({
+        ...base,
+        type: 'agent/drive',
+        step: 'open-entry',
+        fingerprint: { count: 2, storyIndex: 1, glyph: '0a1b2c3d', savedAt: 5 },
+      }),
+    ).toBe(true);
+    expect(
+      isBackgroundToAgent({
+        ...base,
+        type: 'agent/drive',
+        step: 'open-entry',
+        fingerprint: { count: 2, storyIndex: 9, glyph: 'zz', savedAt: 5 },
+      }),
+    ).toBe(false);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/drive', step: 'insert' })).toBe(true);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/drive', step: 'compose', sample: null })).toBe(true);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/drive', step: 'share' })).toBe(true);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/drive', step: 'retry' })).toBe(false);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/observe', from: 'manual' })).toBe(true);
+    expect(isBackgroundToAgent({ ...base, type: 'agent/observe', from: 'anything' })).toBe(false);
+    // The hand-off era's insert is gone (DL3).
+    expect(isBackgroundToAgent({ ...base, type: 'agent/inject' })).toBe(false);
     expect(isBackgroundToAgent({ ...base, type: 'agent/click' })).toBe(false);
     expect(isBackgroundToAgent({ v: 1, type: 'agent/probe', handoffId: HID })).toBe(false);
     expect(isBackgroundToAgent(getFile())).toBe(false);
@@ -362,18 +544,21 @@ describe('U12 guards', () => {
   it('isAgentToBackground', () => {
     expect(isAgentToBackground(report())).toBe(true);
     expect(isAgentToBackground(getFile())).toBe(true);
-    for (const name of [
-      'input-appeared',
-      'composer-ready',
-      'composer-left',
-      'inject-ignored',
-      'inject-unconfirmed',
-      'sw-controller-change',
-      'sw-intercepted',
-    ]) {
+    for (const name of ['input-appeared', 'account-appeared', 'sw-controller-change', 'sw-intercepted']) {
       expect(isAgentToBackground(event(name))).toBe(true);
     }
-    expect(isAgentToBackground(event('posted'))).toBe(false);
+    for (const name of ['composer-ready', 'composer-left', 'inject-ignored', 'posted']) {
+      expect(isAgentToBackground(event(name))).toBe(false);
+    }
+    expect(isAgentToBackground(factMsg({ kind: 'net', entries: [NET_ENTRY], elapsedMs: 5 }))).toBe(true);
+    expect(isAgentFact({ kind: 'ui', progressSeen: true, toast: 'action', wentHome: true })).toBe(true);
+    expect(isAgentFact({ kind: 'ui', progressSeen: true, toast: 'shout', wentHome: true })).toBe(false);
+    expect(isAgentFact({ kind: 'compose', onComposer: true })).toBe(false);
+    expect(isAgentFact({ kind: 'entry', result: 'GUESSED' })).toBe(false);
+    expect(isAgentFact({ kind: 'share-refused', why: 'tired' })).toBe(false);
+    expect(
+      isAgentFact({ kind: 'net', entries: [{ ...NET_ENTRY, start: Number.POSITIVE_INFINITY }], elapsedMs: 5 }),
+    ).toBe(false);
   });
 
   it('isProbeReport', () => {

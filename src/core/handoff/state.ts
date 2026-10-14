@@ -1,41 +1,25 @@
 /**
- * Hand-off state machine vocabulary (strategy §3.5, §3.6, §3.10). The reducer
- * (reducer.ts) is pure: `(state, event, ctx) → {state, effects}`. The runner
- * (src/handoff/runner.ts) executes effects, turns platform callbacks into events and
- * persists the state in storage.session after every transition, so a service-worker
- * restart resumes mid-flow.
+ * Hand-off state machine vocabulary (strategy §3.5, §3.6, §3.10; docs/ux.md, the autopilot). The
+ * reducer (reducer.ts) is pure: `(state, event, ctx) → {state, effects}`. The runner
+ * (src/handoff/runner.ts) executes effects, turns platform callbacks into events and persists the
+ * state in storage.session after every transition, so a service-worker restart resumes mid-flow.
  *
- * Contract version 1 of this file: later streams may add phases, events, effects or fields;
- * they must not rename or repurpose existing ones without updating every user.
- * v1 (stream B2, additive): WindowedSession bookkeeping (level, degradedFrom, hardReloadSent,
- * injectSent, fileServed, loadsSinceReload, composerReached, route, url); the probing member's
- * `step`/`strict`/`resumeFrom` (AM2 re-probes); `outcome` on finished/closing and `level` on
- * closing; HandoffStatus `route`/`detectedPosted`/`detail`; HandoffRecord `route`/`preflight`/`detail`.
- * v2 (integrator, additive, §11 AM13): WindowedSession and HandoffRecord `readyProbe`, the report
- * taken once the composer is ready (C6), so C8 carries the canvas on a real hand-off.
- * v3 (review fixes, additive, §11 AM16–AM24): error UNEXPECTED_PAGE; timer `navigation`; WindowedSession
- * `offhostSeen`; probing `amLoad`/`pending`; finished `holdOpen`; agentInjected `fresh`; effects
- * rememberWindow/forgetWindow; HandoffStatus `rehearsal`/`assistedInsert`/`holdOpen`; ctx `brandedBrowser`.
- * v4 (review fixes, additive, §11 AM28): errors BRANDED_BROWSER, NAVIGATION_TIMEOUT; agent event
- * `inject-unconfirmed`; WindowedSession `insertDispatched`; finished `postedUnknown`/`unexpectedPage`;
- * HandoffStatus `postedUnknown`.
- * v5 (first live run in Arc, 2026-10-12: W1–W5, P1–P6, U1–U2): phase `resizing`; `fitting` gains
- * `fitStep`; probing step `awaitInput`; errors SW_INTERCEPTS, WINDOW_NOT_FITTED, LAYOUT_TOO_WIDE
- * (SW_TOOK_CONTROL is no longer emitted); agent event `sw-intercepted`; events `windowFitted`
- * (now with the verification), `windowSized`, `boundsChanged`; `tabMeasured.zoom`; effects
- * `updateWindow` (now with `tabId` and the target `inner`), `readSize`; timers `fitRetry`,
- * `resizeDeadline`, `resizePoll`, `inputWait`; SessionBase `browser`/`win`; WindowedSession
- * `inputWaitUsed`, `inputWaitUntil`, `swControllerChanges`, `c4Reached`, `injectAt`; HandoffStatus
- * `resize`, `window`, `path`, `c4`; HandoffRecord `window`, `browser`, `swControllerChanges`; ctx
- * `resizeTimeoutMs`; start `browser`.
- * v5.1 (Arc hardening, additive): updateWindow `reapply`; windowFitted and WindowUpdateDiag `applied`.
- * v5.2 (review of the Arc changes): measureTab `settle` (false for the refit: one read, AL-3); the
- * `resize` status gains `maxW` (the zoom-aware width limit its ✓ uses, AF-8); probing `awaitInput`
- * now also serves the probe mode and H0 with H1 off (AL-1/AF-1).
- * v6 (AM37, second live run in Arc, 2026-10-12, additive): error SCREEN_LANDSCAPE; `injectAgent` first
- * injects the MAIN-world portrait shim; `agentInjected.orientation`; WindowedSession `pageOrientation`.
- * v6.1 (review of AM37, 2026-10-13, additive): WindowedSession `composerEntered` (SH-1);
- * PageOrientation `afterComposerMount`.
+ * Contract history (v1–v6.1, AM2–AM38) is in docs/strategy.md §11. **v7 (2026-10-13, ux.md, AM39–AM41,
+ * breaking)**: the autopilot. After the owner presses Post story nothing else needs them: instapost taps
+ * Instagram's own + → Story, adds the photo to the armed story input, presses Share once, and decides the
+ * result from Instagram's own publish request.
+ * - Phases removed: `injecting`, `awaitingPick`, `awaitingShare` (H0 and H1 are gone; a stored session in
+ *   one of them no longer parses, so the startup cleanup drops it: rules 1001–1019 removed, AM22 closes
+ *   the remembered popup). They stay in `HandoffPhase` as names records of earlier builds carry.
+ * - Phases added: `queued`, `awaitingAccount`, `openingEntry`, `inserting`, `composeReady`, `sharing`,
+ *   `confirmingUpload`, `manual`. `finished` carries the RunResult and a hold; `closing` the result.
+ * - Modes: `post`, `test` (stops at Share), `shareTest` (presses Share, writes blocked), `check` (was
+ *   `probe`). Write blocking is derived (`mode !== 'post'`, or a guarded build). `rehearsal`,
+ *   `assistedInsert`, `level`, the "Posted?" question (`outcome` event) and `inactivity` are gone.
+ * - Errors added: STORY_ENTRY_MISSING, SHARE_MISSING, WINDOW_IN_USE, WINDOW_HIDDEN, ACCOUNT_UNCONFIRMED,
+ *   UPLOAD_FAILED, OUTCOME_UNKNOWN, TEST_LEAK. Effects `degrade-h0` → `offer-manual` (and `hold`).
+ * - Agent: `agent/drive` (open-entry, insert, compose, share) and `agent/observe` commands; `agent/fact`
+ *   messages (entry, inserted, compose, share-done/refused, net, ui, visibility, owner-share).
  */
 
 import type { Size } from '../geometry/fit.ts';
@@ -49,8 +33,8 @@ import type { ExportId, HandoffId, Nonce } from '../model/ids.ts';
 import type { RateCaps, RateDecision } from './rate-guard.ts';
 
 // ---------------------------------------------------------------------------------------
-// Errors (§3.10). Errors never retry; every error leaves the image in Downloads and offers
-// the phone lane.
+// Errors (§3.10, ux.md §5). Errors never retry a publish; every failure after the export leaves a
+// copy in Downloads and offers the phone.
 
 export const ERROR_CODES = [
   'RATE_LIMITED',
@@ -64,10 +48,7 @@ export const ERROR_CODES = [
   'INPUT_MISSING',
   'ACCEPT_DRIFT',
   'INJECTION_IGNORED',
-  /**
-   * No longer emitted (P2, 2026-10-12): Instagram's worker claims every logged-in page (F2), so a
-   * `controllerchange` is counted on the record instead. Kept so records of earlier builds still parse.
-   */
+  /** No longer emitted (P2, 2026-10-12). Kept so records of earlier builds still parse. */
   'SW_TOOK_CONTROL',
   'KILLED_CHALLENGE',
   'KILLED_OFFHOST',
@@ -78,36 +59,49 @@ export const ERROR_CODES = [
   'FONT_NOT_LOADED',
   /** AM17: the composer tab went to a www page that is neither the composer, home, login nor a security flow. */
   'UNEXPECTED_PAGE',
-  /** AM23/AM28: a guarded build in a branded browser (Google Chrome, Microsoft Edge); no window opens. */
+  /** AM23/AM28: a guarded build in a branded browser; no window opens. */
   'BRANDED_BROWSER',
   /** AM20/AM28: the first navigation never committed on www within NAVIGATION_TIMEOUT_MS. */
   'NAVIGATION_TIMEOUT',
-  /**
-   * P3: a service worker handled the composer page's requests (resource or navigation timing with
-   * `workerStart > 0`), so they left without the tab-scoped UA rule 1001.
-   */
+  /** P3: a service worker handled the composer page's requests, so they left without rule 1001. */
   'SW_INTERCEPTS',
-  /** W3: the popup never became narrow and tall enough (auto-fit, its retry and RESIZE_TIMEOUT_MS of guided resize). */
+  /** W3: the popup never became narrow and tall enough (auto-fit, its retry and the guided resize). */
   'WINDOW_NOT_FITTED',
-  /** P4: after the one refit the composer is still wider than MSITE_MAX_CSS_WIDTH (no + → Story entry there). */
+  /** P4: after the one refit the page is still wider than MSITE_MAX_CSS_WIDTH (no + → Story there). */
   'LAYOUT_TOO_WIDE',
-  /**
-   * AM37 (C3b): the composer was reached and the page still read a landscape screen orientation (the
-   * portrait shim off, failed or absent), so Instagram's composer hides Share there.
-   */
+  /** AM37 (C3b): the composer read a landscape screen orientation, so it hides Share. */
   'SCREEN_LANDSCAPE',
+  /** ux.md: the + → Story menu was not where or what instapost expects (C10, C11). */
+  'STORY_ENTRY_MISSING',
+  /** ux.md: the photo is in the composer but there is not exactly one Share control (C12). Nothing clicked. */
+  'SHARE_MISSING',
+  /** ux.md: the page had user activation (the owner clicking in it) and kept it; nothing was tapped. */
+  'WINDOW_IN_USE',
+  /** ux.md: the Instagram window stayed hidden (Instagram throttles hidden pages); nothing was tapped. */
+  'WINDOW_HIDDEN',
+  /** ux.md §4.8: the account prompt was not answered within ACCOUNT_PROMPT_MS. */
+  'ACCOUNT_UNCONFIRMED',
+  /** ux.md §6 O2/O4: Instagram answered that the upload or the publish failed. Not posted. */
+  'UPLOAD_FAILED',
+  /** ux.md §6: Share was pressed and the evidence is neither a clear yes nor a clear no. */
+  'OUTCOME_UNKNOWN',
+  /** ux.md §6 O10: during a test with writes blocked, a publish request (or a 2xx upload) went through. */
+  'TEST_LEAK',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /**
- * What each error does (§3.10):
+ * What each error does (§3.10, ux.md §5):
  * - `no-window`: a guard refused; nothing opened;
  * - `close`: close the popup, remove the rules, no lock;
- * - `degrade-h0`: stay in the same window and fall back to H0 (manual pick);
+ * - `offer-manual`: stop tapping; keep the window OFFER_MANUAL_MS so the owner may Finish by hand;
+ * - `hold`: keep the window while an upload may still run (UPLOAD_HOLD_MS);
  * - `kill`: close, remove the rules, lock the msite lane for 7 days;
  * - `editor`: shown in the editor only; never reaches the reducer.
+ * Before Share only. Any error after the Share command was sent is Couldn't confirm (OUTCOME_UNKNOWN)
+ * unless the outcome rules decided, except a kill, which still locks.
  */
-export type ErrorEffect = 'no-window' | 'close' | 'degrade-h0' | 'kill' | 'editor';
+export type ErrorEffect = 'no-window' | 'close' | 'offer-manual' | 'hold' | 'kill' | 'editor';
 
 export const ERROR_EFFECT: Readonly<Record<ErrorCode, ErrorEffect>> = {
   RATE_LIMITED: 'no-window',
@@ -118,9 +112,9 @@ export const ERROR_EFFECT: Readonly<Record<ErrorCode, ErrorEffect>> = {
   NOT_LOGGED_IN: 'close',
   LANDSCAPE: 'close',
   SCREEN_TOO_SMALL: 'close',
-  INPUT_MISSING: 'degrade-h0',
-  ACCEPT_DRIFT: 'degrade-h0',
-  INJECTION_IGNORED: 'degrade-h0',
+  INPUT_MISSING: 'offer-manual',
+  ACCEPT_DRIFT: 'offer-manual',
+  INJECTION_IGNORED: 'offer-manual',
   SW_TOOK_CONTROL: 'close',
   KILLED_CHALLENGE: 'kill',
   KILLED_OFFHOST: 'kill',
@@ -136,17 +130,24 @@ export const ERROR_EFFECT: Readonly<Record<ErrorCode, ErrorEffect>> = {
   WINDOW_NOT_FITTED: 'close',
   LAYOUT_TOO_WIDE: 'close',
   SCREEN_LANDSCAPE: 'close',
+  STORY_ENTRY_MISSING: 'offer-manual',
+  SHARE_MISSING: 'offer-manual',
+  WINDOW_IN_USE: 'offer-manual',
+  WINDOW_HIDDEN: 'close',
+  ACCOUNT_UNCONFIRMED: 'close',
+  UPLOAD_FAILED: 'close',
+  OUTCOME_UNKNOWN: 'hold',
+  TEST_LEAK: 'kill',
 };
 
 // ---------------------------------------------------------------------------------------
-// Timing (§3.6, §3.8).
+// Timing (§3.6, §3.8, ux.md §4.6 and §10).
 
 export const MSITE_LOCK_MS = 7 * 24 * 60 * 60 * 1000;
-/** H1: wait for C6 (composer ready) after the insert. */
-export const INJECT_READY_TIMEOUT_MS = 10_000;
-/** Inactivity before the popup is closed with TIMEOUT. */
-export const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
-/** After `finished`, the popup closes this much later (unless it is held open for an upload, AM19). */
+/** Why desktop posting is paused: the kill switch's two triggers, or a test whose write block leaked. */
+export const MSITE_LOCK_REASONS = ['KILLED_CHALLENGE', 'KILLED_OFFHOST', 'TEST_LEAK'] as const;
+export type MsiteLockReason = (typeof MSITE_LOCK_REASONS)[number];
+/** Default close delay of a finished session (Not posted after Share, Couldn't confirm with nothing pending). */
 export const CLOSE_DELAY_MS = 3000;
 /** AM20: the first navigation must commit on www within this long, else the popup closes. */
 export const NAVIGATION_TIMEOUT_MS = 30_000;
@@ -162,56 +163,120 @@ export const FIT_VERIFY_POLL_MS = 100;
 export const FIT_VERIFY_MAX_MS = 1500;
 /** The one retry of windows.update comes this long after the first attempt failed to verify. */
 export const FIT_RETRY_DELAY_MS = 300;
-/**
- * W2 hardening (Arc research, 2026-10-12: Arc often ignores the first windows.update, and may re-place
- * a new popup up to about 1 s after windows.create). While the tab is still about:blank, so Instagram
- * sees none of it, an updateWindow re-applies the same box at these offsets (ms after its first
- * windows.update) whenever the tab is not fitted at that moment. Never after the navigation.
- */
+/** W2 hardening (AM29): the same box is re-applied at these offsets while the tab is still about:blank. */
 export const FIT_REAPPLY_MS: readonly number[] = [0, 150, 300, 500, 1000];
-/**
- * …and its verification counts the tab as fitted only once it still is this long after the first
- * windows.update, so a late re-placement lands inside it and is re-applied (at most FIT_VERIFY_MAX_MS).
- */
+/** …and its verification counts the tab as fitted only once it still is this long after the first update. */
 export const FIT_HOLD_MS = 1100;
-/** W3: how long the owner has to drag the popup narrow and tall before WINDOW_NOT_FITTED. */
-export const RESIZE_TIMEOUT_MS = 3 * 60 * 1000;
+/** W3 (ux.md §4.6: 2 minutes, was 3): how long the owner has to drag the popup narrow and tall. */
+export const RESIZE_TIMEOUT_MS = 2 * 60 * 1000;
 /** W3: the tab size is also polled this often while resizing (besides windows.onBoundsChanged). */
 export const RESIZE_POLL_MS = 1000;
-/** P5: how long a probe that found no story input waits for the agent's `input-appeared` (hydration). */
+/** P5: how long a probe that found no story input (or no account) waits for the agent's watch. */
 export const INPUT_WAIT_MS = 6000;
 /** W5: windows.update entries kept on the record (the fit, its one retry and the single refit). */
 export const MAX_WINDOW_UPDATES = 3;
 
+// ux.md §10 budgets.
+/** From the reload's `complete` to the deciding probe ("home ready"). */
+export const HOME_READY_MS = 15_000;
+/** From the hard reload to its `complete`. */
+export const RELOAD_BUDGET_MS = 30_000;
+/** agent/drive open-entry → its entry fact (activation 6 s, menu 6 s + one re-tap, armed 3 s, a trial, jitter). */
+export const ENTRY_BUDGET_MS = 30_000;
+/** agent/drive insert → the compose fact (insert → /create/story 10 s, drawn 10 s, footer settle cap 8 s). */
+export const INSERT_BUDGET_MS = 30_000;
+/** Everything before Share, paused while the owner resizes or answers the account prompt. */
+export const PRE_SHARE_CAP_MS = 2 * 60 * 1000;
+/** ux.md §4.8: the account prompt cancels itself after this long (ACCOUNT_UNCONFIRMED). */
+export const ACCOUNT_PROMPT_MS = 60_000;
+/** ux.md §4.6: a page hidden before Share is raised once; still hidden this long later → WINDOW_HIDDEN. */
+export const HIDDEN_WAIT_MS = 10_000;
+/** The agent's wait for visibility, and then for activation, before it touches Share (each, one after the other). */
+export const SHARE_ACTIVATION_WAIT_MS = 6000;
+/**
+ * The Share command's answer (share-done or share-refused). The agent waits up to SHARE_ACTIVATION_WAIT_MS
+ * for the page to be visible and then up to SHARE_ACTIVATION_WAIT_MS for its user activation to lapse, one
+ * after the other, so this covers both waits plus a margin for the tap and the message (AP-5).
+ */
+export const SHARE_ACK_MS = 2 * SHARE_ACTIVATION_WAIT_MS + 3000;
+/** The outcome rules re-run this often while confirming (timeouts O5/O6). */
+export const CONFIRM_TICK_MS = 2000;
+/** O6: no upload entry this long after Share → Couldn't confirm (no-upload-seen). */
+export const UPLOAD_ENTRY_BUDGET_MS = 120_000;
+/** O5: no publish request this long after a 2xx upload → Couldn't confirm (no-finalize-after-upload). */
+export const PUBLISH_AFTER_UPLOAD_MS = 75_000;
+/** O4/O9: an upload that ended non-2xx (or blocked) settles this long before it decides. */
+export const UPLOAD_SETTLE_MS = 3000;
+/** §6.4: a window whose upload may still run is held open this long (Instagram's upload has no timeout). */
+export const UPLOAD_HOLD_MS = 15 * 60 * 1000;
+/** §4.9: after a drift failure the window is kept this long for Finish by hand. */
+export const OFFER_MANUAL_MS = 60_000;
+/** §4.9: Finish by hand ends with TIMEOUT (or Couldn't confirm) after this long without a result. */
+export const MANUAL_DEADLINE_MS = 5 * 60 * 1000;
+/** §4.6: Posted closes this long after Instagram went home… */
+export const HOME_CLOSE_MS = 2000;
+/** …or this long after the confirmation if it never does. */
+export const POSTED_CLOSE_MS = 8000;
+/** A `closing` session whose windowRemoved never arrives ends anyway after this long. */
+export const CLOSING_BACKSTOP_MS = 10_000;
+/** Resource entries kept per hand-off (ux.md IR7), and per `net` fact. */
+export const MAX_NET_ENTRIES = 64;
+/**
+ * Of those, Instagram's upload and publish entries, which decide the result: always kept, up to this many
+ * (enough for O7's duplicate alarm). Only the 'other' entries share the rest (AP-1).
+ */
+export const MAX_WRITE_NET_ENTRIES = 8;
+export const MAX_OTHER_NET_ENTRIES = MAX_NET_ENTRIES - MAX_WRITE_NET_ENTRIES;
+
 // ---------------------------------------------------------------------------------------
 // Settings (storage.local, §3.3). Rate caps can only be made stricter (rate-guard.ts).
 
+/** ux.md §4.12: the account Instagram is logged in as, as instapost detected it. */
+export interface ExpectedAccount {
+  handle: string;
+  detectedAt: number;
+}
+
+/**
+ * ux.md §10 (C10): the + menu as a test run (or a post) found it: how many items, which one is Story, and
+ * a hash of its glyph. Background-owned key `menuFingerprint`.
+ */
+export interface MenuFingerprint {
+  count: number;
+  storyIndex: number;
+  glyph: string;
+  savedAt: number;
+}
+
 export interface Settings {
-  /** "posts as …", typed by the owner; display only. */
-  accountLabel: string;
-  /**
-   * H1. Default ON in guarded builds, OFF in live until OD3. AM37: the insert also skips msite's story
-   * session start (its session id stays null), a second reason to keep it off in live; Settings says so.
-   */
-  assistedInsert: boolean;
-  /** Rehearsal rules 1002–1019. Default ON in every build; the owner switches it off from L8. */
-  rehearsal: boolean;
   chMode: ChMode;
-  /** Epoch ms; the msite lane is locked until then (kill switch). null = unlocked. */
+  /** Epoch ms; the msite lane is locked until then (kill switch, background-owned key). null = unlocked. */
   msiteLockedUntil: number | null;
   composerProfile: ComposerProfile | null;
   rateCaps: Partial<RateCaps>;
+  /** ux.md §4.12: background-owned key `expectedAccount` (merged in); null until detected, or after Forget. */
+  expectedAccount: ExpectedAccount | null;
+  /** "Only post as @handle" (OD11, default on). */
+  accountLock: boolean;
+  /** "Also keep every posted story in Downloads/instapost" (default off; failures are always saved). */
+  keepCopies: boolean;
+  /** The onboarding card was dismissed (Start or Skip). */
+  onboardedAt: number | null;
+  /** OD10: background-owned key `lastTestPassAt` (merged in); the one-time setup test gate. */
+  lastTestPassAt: number | null;
 }
 
-export function defaultSettings(guarded: boolean): Settings {
+export function defaultSettings(_guarded: boolean): Settings {
   return {
-    accountLabel: '',
-    assistedInsert: guarded,
-    rehearsal: true,
     chMode: 'full',
     msiteLockedUntil: null,
     composerProfile: null,
     rateCaps: {},
+    expectedAccount: null,
+    accountLock: true,
+    keepCopies: false,
+    onboardedAt: null,
+    lastTestPassAt: null,
   };
 }
 
@@ -219,156 +284,395 @@ export function defaultSettings(guarded: boolean): Settings {
 // Agent vocabulary shared with src/shared/protocol.ts (which adds v:1, handoffId, nonce).
 
 export type AgentEventName =
+  /** P5: a story-input candidate (C4) is in the DOM. */
   | 'input-appeared'
-  | 'composer-ready'
-  | 'composer-left'
-  /** The insert could not be made (no input, no file, the assignment threw). */
-  | 'inject-ignored'
-  /** AM28: the insert was dispatched but C6 did not hold within the ready deadline. */
-  | 'inject-unconfirmed'
+  /** ux.md C14: exactly one account link is readable now. */
+  | 'account-appeared'
   /** Diagnostics only since P2: counted on the record (Instagram's worker claims every page, F2). */
   | 'sw-controller-change'
   /** P3: the agent's watch saw a service worker handle a www/i.instagram.com request (SW_INTERCEPTS). */
   | 'sw-intercepted';
 
+/** The open-entry outcome (ux.md §10 `armStory`). */
+export const ENTRY_RESULTS = [
+  'armed',
+  'ENTRY_MISSING',
+  'MENU_MISSING',
+  'MENU_DRIFT',
+  'WRONG_ITEM',
+  'NOT_ARMED',
+  'SESSION_NOT_STARTED',
+  'ACTIVATION_ACTIVE',
+  'HIDDEN',
+  'REFUSED',
+] as const;
+export type EntryResult = (typeof ENTRY_RESULTS)[number];
+
+/** What the agent found and did at + → Story. Structural facts only. */
+export interface EntryFact {
+  kind: 'entry';
+  result: EntryResult;
+  /** The stored fingerprint chose the Story item (no trial). */
+  fpUsed: boolean;
+  /** The index of the item that armed the story input (0-based), or null. */
+  storyIndex: number | null;
+  /** fnv1a hash of that item's glyph, or null. */
+  glyph: string | null;
+  /** Outermost pressables in the menu dialog, or null when no dialog appeared. */
+  menuCount: number | null;
+  /** Wrong items tapped before the right one (at most 1). */
+  trials: number;
+  /** Taps of + in this document. */
+  plusTaps: number;
+  /** From the Story tap to the story input's click, in ms. */
+  armedMs: number | null;
+}
+
+export const INSERT_FAILURES = ['not-armed', 'no-file', 'accept-drift', 'threw'] as const;
+export type InsertFailure = (typeof INSERT_FAILURES)[number];
+
+/** ux.md §10 C12: the composer as the agent's compose watch saw it once its Share footer settled. */
+export interface ComposeFact {
+  kind: 'compose';
+  /** The page is on /create/story. */
+  onComposer: boolean;
+  /** The composer's canvas has a backing store (the photo is drawn). */
+  drawn: boolean;
+  /** Instagram's rotate snackbar is shown (C3b failed in the page). */
+  landscape: boolean;
+  /** Share controls in the one visible Share footer (0 when there is none, 2+ when ambiguous). */
+  controls: number;
+  /** v1: a `button`; v2: a `[role=button]` with the account's avatar. */
+  variant: 'v1' | 'v2' | null;
+  /** v2 with Instagram's automatic Facebook cross-post badge. */
+  fbAuto: boolean;
+  /** The footer settled (1.5 s quiet), or the watch ran out of time. */
+  settled: boolean;
+  settleMs: number;
+  /** The composer canvas's backing size (C8), when drawn. */
+  canvas: Size | null;
+  /** IA7 (diagnostic): similarity of the drawn photo to the export sample, 0..1. */
+  imageScore: number | null;
+}
+
+export const SHARE_REFUSALS = [
+  'controls',
+  'not-drawn',
+  'not-composer',
+  'landscape',
+  'activation',
+  'hidden',
+  'refused',
+] as const;
+export type ShareRefusal = (typeof SHARE_REFUSALS)[number];
+
+/** One XHR/fetch resource timing entry after Share (query dropped; offsets relative to the Share click). */
+export interface NetEntry {
+  host: 'www' | 'i' | 'other';
+  /** The URL's pathname, at most 200 characters (digits normalised to `<n>` on records). */
+  path: string;
+  /** responseStatus: 0 for a blocked, failed or opaque request. */
+  status: number;
+  /** contentType, at most 64 characters ('' when unknown). */
+  type: string;
+  redirected: boolean;
+  /** ms after the Share click. */
+  start: number;
+  end: number;
+}
+
+export interface UiFacts {
+  /** Instagram's "uploading" progress was seen. */
+  progressSeen: boolean;
+  /** A new toast after Share: none, plain, or with an action button (Retry). */
+  toast: 'none' | 'plain' | 'action';
+  /** The page went home (`/`) after Share, epoch ms (background clock); null before. */
+  wentHomeAt: number | null;
+}
+
+export type AgentFact =
+  | EntryFact
+  | { kind: 'inserted' }
+  | { kind: 'insert-failed'; why: InsertFailure }
+  | ComposeFact
+  /** The agent tapped Share. `t0Wall`: the page's Date.now() at the click (diagnostics). */
+  | { kind: 'share-done'; t0Wall: number }
+  /** The agent did not tap Share (nothing was clicked). */
+  | { kind: 'share-refused'; why: ShareRefusal }
+  /** Resource entries that ended since the last batch; `elapsedMs` since the Share click (or the observe start). */
+  | { kind: 'net'; entries: NetEntry[]; elapsedMs: number }
+  | { kind: 'ui'; progressSeen: boolean; toast: 'none' | 'plain' | 'action'; wentHome: boolean }
+  | { kind: 'visibility'; hidden: boolean }
+  /** Finish by hand: the owner's own (trusted) click on the Share control. */
+  | { kind: 'owner-share'; t0Wall: number };
+export type AgentFactKind = AgentFact['kind'];
+
 export type AgentCommand =
   | { type: 'agent/probe' }
-  | { type: 'agent/inject' }
+  /** Starts (or restarts) the agent's watch: input-appeared, account-appeared, sw-controller-change, sw-intercepted. */
+  | { type: 'agent/watch' }
+  | { type: 'agent/drive'; step: 'open-entry'; fingerprint: MenuFingerprint | null }
+  | { type: 'agent/drive'; step: 'insert' }
+  /** `sample`: the export's 16×16 RGBA, base64 (IA7, diagnostic), or null. */
+  | { type: 'agent/drive'; step: 'compose'; sample: string | null }
+  | { type: 'agent/drive'; step: 'share' }
+  /** Finish by hand: stop driving for good, observe the owner's Share and the requests after it. */
+  | { type: 'agent/observe'; from: 'manual' };
+
+// ---------------------------------------------------------------------------------------
+// Results (ux.md §4.7, §6).
+
+export type HandoffMode = 'post' | 'test' | 'shareTest' | 'check';
+
+export const RESULT_KINDS = ['posted', 'notPosted', 'unknown', 'tested', 'shareTested', 'checked', 'stopped'] as const;
+export type ResultKind = (typeof RESULT_KINDS)[number];
+
+/** Why a result is Couldn't confirm (ux.md §5 `{why}`). */
+export const UNKNOWN_WHYS = [
+  'no-upload-seen',
+  'no-finalize-after-upload',
+  'configure-5xx',
+  'configure-0',
+  'configure-html',
+  'redirected',
+  'window-closed',
+  'agent-lost',
+  'unexpected-page',
+  'share-not-acknowledged',
+  /** O9: writes were blocked, yet an upload reached Instagram (a non-zero, non-2xx status): the block failed. */
+  'not-blocked',
+] as const;
+export type UnknownWhy = (typeof UNKNOWN_WHYS)[number];
+
+export const ALARMS = ['DUPLICATE_UPLOAD'] as const;
+export type Alarm = (typeof ALARMS)[number];
+
+export interface RunResult {
+  kind: ResultKind;
+  /** notPosted: the failure; unknown: OUTCOME_UNKNOWN or TEST_LEAK; posted/unknown after a kill: absent. */
+  code?: ErrorCode;
+  why?: UnknownWhy;
+  /** A short structural detail (`publish 400`, `menu 3 items`, a page path). */
+  detail?: string;
+  /** The kill switch fired (after or before the outcome); the lane is locked. */
+  killed?: 'KILLED_CHALLENGE' | 'KILLED_OFFHOST' | 'TEST_LEAK';
+  alarms: Alarm[];
+  /** Epoch ms of the decision. */
+  at: number;
+  /** Instagram's automatic Facebook cross-post was on the Share control (OD12). */
+  facebook?: boolean;
+  /** Couldn't confirm while an upload may still run: the window is held (§6.4). */
+  held?: boolean;
+  /** stopped: by the owner's Stop, or by closing the Instagram window. */
+  stoppedBy?: 'owner' | 'window';
+  /** The account the run went to, when read. */
+  account?: string | null;
+  /** §6.4: a later answer replaced a Couldn't confirm. */
+  late?: boolean;
   /**
-   * Starts (or restarts) the agent's watch for this document: input-appeared, composer-ready
-   * (C6), composer-left (C9), sw-controller-change, sw-intercepted. `readyTimeoutMs > 0` (H1): report
-   * `inject-unconfirmed` if C6 does not hold that long after the insert (AM28). `0` (H0): no deadline.
+   * The owner's "It posted" / "It didn't post" on a Couldn't confirm (ux.md §4.7): the kind is theirs, never
+   * Instagram's answer, so no copy may say "Instagram confirmed it" (P4, AP-3).
    */
-  | { type: 'agent/watch'; readyTimeoutMs: number };
+  markedBy?: 'owner';
+  /**
+   * checked: the account posts are locked to, when Instagram is logged in as another one (`account`). Post
+   * story would stop and ask; "Use @account" makes the logged-in one the expected account (AP-4).
+   */
+  lockedTo?: string;
+}
+
+/**
+ * IndexedDB `handoffs` outcome. v7 literals: posted, unknown, tested, share-tested, checked, cancelled,
+ * not-posted and `failed:`/`killed:` with the code. `posted-confirmed` and `abandoned` are records of
+ * earlier builds (still parsed and shown).
+ */
+export type HandoffOutcome =
+  | 'posted'
+  | 'unknown'
+  | 'tested'
+  | 'share-tested'
+  | 'checked'
+  | 'cancelled'
+  | 'not-posted'
+  | `failed:${ErrorCode}`
+  | `killed:${ErrorCode}`
+  | 'posted-confirmed'
+  | 'abandoned';
 
 // ---------------------------------------------------------------------------------------
 // State.
 
-export type HandoffMode = 'post' | 'probe';
-export type HandoffLevel = 'H1' | 'H0';
-
-export type HandoffPhase =
+/** The phases of the live state machine (statuses, stored sessions). */
+export type SessionPhase =
   | 'idle'
+  /** ux.md K11: a post waits for the 60 s spacing; it starts by itself. */
+  | 'queued'
   /** windows.create(about:blank) issued. */
   | 'opening'
-  /** Rule 1001 (+ rehearsal rules) being installed while the tab is still about:blank. */
+  /** Rule 1001 (+ the write-block rules for tests) being installed while the tab is still about:blank. */
   | 'scoping'
-  /**
-   * W2, still at about:blank: the settled window is measured, then windows.update({state:'normal'})
-   * to windowFit() is verified against the tab size; one retry 300 ms later (`fitStep`).
-   */
+  /** W2, still at about:blank: measure, then windows.update to windowFit() docked right, verified. */
   | 'fitting'
-  /**
-   * W3: auto-fit failed; the owner drags the popup narrow and tall (live size in the editor). Goes
-   * on by itself once the tab is usable (isUsableInner), else WINDOW_NOT_FITTED after 3 min.
-   */
+  /** W3: auto-fit failed; the owner drags the popup narrow and tall. */
   | 'resizing'
   /** tabs.update to COMPOSER_URL issued; waiting for the first `loading` on www. */
   | 'navigating'
   /** Hard reload issued once; kill switch armed from here on; waiting for `complete`. */
   | 'reloading'
-  /** Agent injected and agent/probe sent (also after the single landscape refit). */
+  /** Agent injected and agent/probe sent (also after the single refit, and after a new document before any tap). */
   | 'probing'
-  /** H1: agent/inject sent; agent/get-file is accepted only here. */
-  | 'injecting'
-  /** H0: the owner taps + → Story and picks the file. */
-  | 'awaitingPick'
-  /** Composer ready (C6); the owner reviews and taps Share. */
-  | 'awaitingShare'
-  /** Composer left (C9); the editor asks "Posted?"; the popup closes after CLOSE_DELAY_MS. */
+  /** ux.md §4.8: the account differs, cannot be read, or none is expected; paused before any tap. */
+  | 'awaitingAccount'
+  /** ux.md §10: + → Story (dwell, then agent/drive open-entry). */
+  | 'openingEntry'
+  /** The photo goes into the armed story input (dwell, drive insert, get-file, then the compose watch). */
+  | 'inserting'
+  /** The composer drew the photo and its Share footer settled; dwell (and, for a Share test, the rules check). */
+  | 'composeReady'
+  /** The Share command was sent once; waiting for share-done / share-refused. */
+  | 'sharing'
+  /** Share was pressed; the outcome rules read Instagram's upload and publish requests. */
+  | 'confirmingUpload'
+  /** §4.9 Finish by hand: the owner taps; instapost observes only. */
+  | 'manual'
+  /** The result is known; the window closes on its schedule (or is held). */
   | 'finished'
   /** Window close requested; cleanup pending until windows.onRemoved. */
   | 'closing';
+
+/** Phase names records of earlier builds (H0/H1, before v7) carry in their phase log. */
+export type LegacyPhase = 'injecting' | 'awaitingPick' | 'awaitingShare';
+/** Any phase a status, a stored session or a record's phase log may name. */
+export type HandoffPhase = SessionPhase | LegacyPhase;
 
 export interface PhaseLogEntry {
   phase: HandoffPhase;
   t: number;
 }
 
-export type HandoffOutcome =
-  | 'posted-confirmed'
-  | 'not-posted'
-  | 'abandoned'
-  | `failed:${ErrorCode}`
-  | `killed:${ErrorCode}`;
+/** ux.md §4.6: the five steps of the run view. */
+export type RunStep = 'instagram' | 'account' | 'story' | 'share' | 'confirm';
+
+/** Epoch ms when each step's fact was established. */
+export interface StepTimes {
+  opened: number;
+  instagram?: number;
+  account?: number;
+  armed?: number;
+  composer?: number;
+  share?: number;
+  confirmed?: number;
+}
 
 /** W2: one windows.update and what the verification saw. Structural numbers only. */
 export interface WindowUpdateDiag {
-  /** `fit` and `retry` (its one retry) in `fitting`; `refit` for the single P4/landscape refit while probing. */
   step: 'fit' | 'retry' | 'refit';
-  /** The outer box asked for. */
   box: WindowBox;
-  /** The inner size it should give. */
   target: Size;
-  /** The window and its tab when the verification ended. */
   outer: WindowBox;
   tab: Size;
-  /** The tab reached the target within FIT_TOLERANCE_PX. */
   fitted: boolean;
-  /**
-   * windows.update calls this step made: 1, or more when the pre-navigation verification re-applied
-   * the box (FIT_REAPPLY_MS). Absent on records of earlier builds.
-   */
+  /** windows.update calls this step made (re-applies included). Absent on records of earlier builds. */
   applied?: number;
 }
 
-/** W5: how the popup was sized, for the record and the panel. Structural numbers only. */
+/** W5: how the popup was sized, for the record and Details. Structural numbers only. */
 export interface WindowDiagnostics {
-  /** screen.avail* the editor sent. */
   screen: ScreenAvail;
-  /** The box windows.create was asked for (firstGuess). */
   requested: WindowBox;
-  /** The window once it settled after windows.create (Arc ignores the create bounds, F1); null before. */
   created: WindowBox | null;
-  /** Its tab (inner) size then. */
   createdTab: Size | null;
-  /** Outer minus tab size of the settled window. */
   frameDelta: FrameDelta | null;
-  /** Every windows.update with its verification, in order (at most MAX_WINDOW_UPDATES). */
   updates: WindowUpdateDiag[];
-  /** windows.update calls in `fitting` (1, or 2 with the one retry). */
   attempts: number;
-  /** W3: the owner resized the popup by hand. */
   manualResize: boolean;
-  /** The tab size when the navigation started (while resizing: the latest size read). */
   finalTab: Size | null;
-  /** tabs.getZoom at the latest measurement (about:blank, then the composer page at a refit). */
   zoom: number | null;
+  /** ux.md §4.6: placed at the right edge of the editor's screen (absent on records of earlier builds). */
+  docked?: boolean;
+}
+
+export type AccountDecisionKind =
+  | 'ok'
+  | 'learn'
+  | 'unlocked'
+  | 'prompt-mismatch'
+  | 'prompt-unreadable'
+  | 'prompt-first'
+  /** A check (it never prompts): the lock is on and Instagram is logged in as another account (AP-4). */
+  | 'mismatch'
+  /** A check: the account could not be read. */
+  | 'unreadable';
+export type AccountPromptKind = 'mismatch' | 'unreadable' | 'first';
+
+/** ux.md C14: the account as read on Instagram's home, and what instapost decided. */
+export interface AccountFacts {
+  detected: string | null;
+  /** Account link candidates seen (distinct handles when ambiguous). */
+  candidates: number;
+  expected: string | null;
+  decision: AccountDecisionKind | null;
+  confirmedBy: 'match' | 'owner' | 'learned' | 'unlocked' | null;
+}
+
+/** The entry facts kept on the session and the record (without the fact's `kind`). */
+export type EntryFacts = Omit<EntryFact, 'kind'>;
+export type ComposeFacts = Omit<ComposeFact, 'kind'>;
+
+/** ux.md §4.13 Evidence: what decided the result. Paths are normalised (digits → `<n>`). */
+export interface Evidence {
+  sharedAt: number | null;
+  sharedBy: 'autopilot' | 'owner' | null;
+  net: NetEntry[];
+  ui: UiFacts;
+  alarms: Alarm[];
 }
 
 /** IndexedDB `handoffs` (§3.6). */
 export interface HandoffRecord {
   id: HandoffId;
   exportId: ExportId | null;
-  mode: HandoffMode;
-  level: HandoffLevel | null;
-  rehearsal: boolean;
+  /** `probe` on records of earlier builds (now `check`). */
+  mode: HandoffMode | 'probe';
   chMode: ChMode;
   phaseLog: PhaseLogEntry[];
   probe?: ProbeReport;
-  /**
-   * C1–C5 and the SW state from the deciding probe, C8 from `readyProbe` when the composer got
-   * that far (§3.9 item 1, AM13). Present with `probe`.
-   */
   preflight?: Preflight;
-  /** AM13: the report taken when the composer became ready (C6); its canvas is C8. */
   readyProbe?: ProbeReport;
-  /** C5: where the tab landed after the hard reload. */
   route?: ComposerRoute;
-  /**
-   * Platform error text when an effect failed (AGENT_UNREACHABLE); the page of an UNEXPECTED_PAGE
-   * (`UNEXPECTED_PAGE /x/`, query dropped); why a finished outcome was not pre-answered (AM28).
-   */
   detail?: string;
-  /** W5: how the popup was sized (absent on records of earlier builds). */
   window?: WindowDiagnostics;
-  /** P6: the browser the editor detected. */
   browser?: BrowserFlavour;
-  /** P2: `controllerchange` events the agent saw (a worker claiming the page is normal on Instagram). */
   swControllerChanges?: number;
   outcome: HandoffOutcome;
   startedAt: number;
   endedAt: number;
+  // v7
+  result?: RunResult;
+  account?: AccountFacts;
+  entry?: EntryFacts;
+  compose?: ComposeFacts;
+  evidence?: Evidence;
+  steps?: StepTimes;
+  durationMs?: number;
+  /** History's "It posted / It didn't post" on a Couldn't confirm record. */
+  markedBy?: 'owner';
+  exportSha256?: string;
+  docHash?: string;
+  // Records of earlier builds.
+  level?: 'H1' | 'H0' | null;
+  rehearsal?: boolean;
+}
+
+/** The start request as the queue keeps it. */
+export interface StartRequest {
+  exportId: ExportId | null;
+  mode: HandoffMode;
+  screen: ScreenAvail;
+  browser: BrowserFlavour;
+  exportSample?: string;
+  exportSha256?: string;
+  docHash?: string;
 }
 
 /** Fields every active hand-off carries. */
@@ -376,279 +680,244 @@ export interface SessionBase {
   handoffId: HandoffId;
   nonce: Nonce;
   mode: HandoffMode;
-  /** null for `probe` (no file). */
+  /** null for `check` (no file). */
   exportId: ExportId | null;
-  rehearsal: boolean;
-  /** Snapshot of settings at start. */
-  assistedInsert: boolean;
+  exportSha256: string | null;
+  docHash: string | null;
+  /** IA7: the export's 16×16 sample (base64), or null. */
+  exportSample: string | null;
+  /** Instagram's write requests are blocked in this session (tests, and every guarded build). */
+  writeBlocked: boolean;
   chMode: ChMode;
   chromeMajor: number;
   screen: ScreenAvail;
-  /** P6: the browser the editor detected (record only; a guarded build refused the branded ones). */
   browser: BrowserFlavour;
-  /** W5: the popup's sizing so far. */
   win: WindowDiagnostics;
   startedAt: number;
   lastEventAt: number;
   phaseLog: PhaseLogEntry[];
+  /** The pre-Share cap's deadline while it runs; null while paused (resizing, awaitingAccount) or over. */
+  preShareUntil: number | null;
+  /** The pre-Share cap left while paused; null otherwise. */
+  preShareLeft: number | null;
 }
 
 /** Once the popup exists. */
 export interface WindowedSession extends SessionBase {
   windowId: number;
   tabId: number;
-  /** Measured in `fitting`; null before. */
   frameDelta: Size | null;
-  /** The single landscape refit has been used. */
   refitUsed: boolean;
   /** The probe report that decided the flow (the last one evaluated). */
   probe: ProbeReport | null;
-  /**
-   * AM13: the report taken once the composer was ready (C6), for C8. Diagnostics only: it never
-   * drives a decision, and the deciding `probe` is kept as it was.
-   */
+  /** AM13: the report taken once the composer drew the photo, for C8. Diagnostics only. */
   readyProbe: ProbeReport | null;
-  /** Live build on the fake: show the FAKE INSTAGRAM banner. */
+  /** Live build on the fake: show the FAKE INSTAGRAM bar. */
   fakeBanner: boolean;
-  /** Level decided by the first passing probe; null before. Re-probes never upgrade H0 to H1. */
-  level: HandoffLevel | null;
-  /** Why H0 replaced H1, if it did (INPUT_MISSING, ACCEPT_DRIFT, INJECTION_IGNORED). */
-  degradedFrom: ErrorCode | null;
-  /**
-   * AM20: in `navigating`, an update with a hidden URL (about:blank's own load, or an off-host
-   * commit) was seen. If the navigation deadline passes with no www commit, the popup is killed.
-   */
+  /** AM20: in `navigating`, a hidden URL update was seen. */
   offhostSeen: boolean;
-  /** The one hard reload was issued (AM2: never a second one per hand-off). */
+  /** The one hard reload was issued. */
   hardReloadSent: boolean;
-  /** The one agent/inject was sent (§3.8: never a second one per handoffId). */
-  injectSent: boolean;
+  /** `status:'loading'` events since the hard reload. */
+  loadsSinceReload: number;
+  /** The tab showed /create/story after the reload (diagnostics). */
+  composerReached: boolean;
+  /** C5: set by the first `complete` after the reload. */
+  route: ComposerRoute | null;
+  /** tab.url of the latest tabs.onUpdated. */
+  url: string | null;
+  /** P5: the one wait for a late story input (or account link) was used. */
+  inputWaitUsed: boolean;
+  inputWaitUntil: number | null;
+  swControllerChanges: number;
+  c4Reached: boolean;
+  /** AM37: the portrait shim's reading in the current document. */
+  pageOrientation: PageOrientation | null;
+  /** SH-1: since the previous injection a commit moved the tab onto /create/story. */
+  composerEntered: boolean;
+  /** The deciding probe passed (proceed or check): later loads are document checks, not probes. */
+  decided: boolean;
+  /**
+   * A later load of the composer tab after the decision: re-inject the agent (`complete`) and learn from
+   * its sentinel whether the document is new (AM16). null when none is pending.
+   */
+  docCheck: 'awaitComplete' | 'injectAgent' | null;
+  account: AccountFacts;
+  entry: EntryFacts | null;
+  /** The one agent/drive open-entry was sent. */
+  entrySent: boolean;
+  /** The one agent/drive insert was sent. */
+  insertSent: boolean;
   /** The export was served to the one agent/get-file. */
   fileServed: boolean;
-  /**
-   * AM28: the agent dispatched the insert in this document but C6 never confirmed it
-   * (`inject-unconfirmed`), so the file may be in the composer and Share may be tapped from H0.
-   * Cleared when a new document is detected (AM16).
-   */
-  insertDispatched: boolean;
-  /** `status:'loading'` events (document commits) since the hard reload; the first is the reload's own. */
-  loadsSinceReload: number;
-  /**
-   * The tab showed a /create/story URL after the reload. Diagnostics only since AM18: C9 counts once
-   * the composer is engaged (a file reached it), see reducer.ts `engaged()`.
-   */
-  composerReached: boolean;
-  /** C5: set by the first `complete` after the reload ('homeOnly' when it landed elsewhere on www). */
-  route: ComposerRoute | null;
-  /** tab.url of the latest tabs.onUpdated (probe evaluation and the preflight). */
-  url: string | null;
-  /** P5: the one wait for a story input that mounts after hydration was used. */
-  inputWaitUsed: boolean;
-  /**
-   * P5: while that wait runs, its deadline (epoch ms); null otherwise. A same-document load
-   * (hydration's replaceState) that interrupts it resumes the wait instead of ending it (AM16).
-   */
-  inputWaitUntil: number | null;
-  /** P2: `sw-controller-change` events seen (diagnostics). */
-  swControllerChanges: number;
-  /** The deciding probe's decision reached C4 (probe-eval.ts); else the preflight's C4 is `unknown`. */
-  c4Reached: boolean;
-  /**
-   * Where the one H1 insert was made: on the composer (`/create/story`), or on home (P5: msite's
-   * header input, whose insert starts the story session and SPA-navigates to the composer; it becomes
-   * `composer` once the tab shows /create/story). AM18's "the composer went away" applies only to
-   * `composer`. null before the insert.
-   */
-  injectAt: 'composer' | 'home' | null;
-  /**
-   * AM37: the portrait shim's reading in the current document (the screen orientation as the page reads
-   * it, and what the shim did), from the latest injection; null before the first. Each agent report is
-   * stamped with it (ProbeReport.orientation), and a load that reaches the composer with a landscape
-   * reading ends the session with SCREEN_LANDSCAPE.
-   */
-  pageOrientation: PageOrientation | null;
-  /**
-   * SH-1 (2026-10-13): since the previous injection, a commit moved the tab from another page onto
-   * /create/story (the pick's or the insert's SPA navigation; in `reloading`, only a commit after the
-   * reload's own one). The composer page then mounted before the next injection's shim could run, so
-   * a shim that installs itself there (`installed`) came too late: the reading gets
-   * `afterComposerMount`. Consumed (reset) by every agentInjected. Absent on stored sessions of earlier
-   * builds (read as false).
-   */
-  composerEntered: boolean;
+  compose: ComposeFacts | null;
+  /** Share-once (ux.md IR11): the Share command was sent. Persisted before the effect runs. */
+  shareSent: boolean;
+  shareSentAt: number | null;
+  /** The agent answered share-refused (nothing was clicked). */
+  shareRefused: ShareRefusal | null;
+  sharedAt: number | null;
+  sharedBy: 'autopilot' | 'owner' | null;
+  /** Resource entries after Share (raw paths; normalised on the record), at most MAX_NET_ENTRIES. */
+  net: NetEntry[];
+  /** The agent's latest `elapsedMs` and when it arrived (background clock). */
+  netElapsedMs: number;
+  netElapsedAt: number | null;
+  ui: UiFacts;
+  alarms: Alarm[];
+  /** §4.6: the page was hidden before Share and the window was raised once. */
+  raisedForVisibility: boolean;
+  /** The agent's latest visibility report. */
+  hidden: boolean;
+  /** Share test: rules 1002–1019 were verified for this tab. */
+  testRulesVerified: boolean;
+  steps: StepTimes;
+  /** The record was written (finished); later changes patch it. */
+  written: boolean;
 }
 
 /** W2: sub-steps of `fitting`. */
-export type FitStep =
-  /** measureTab issued: the runner lets the window settle, then reads it and its tab. */
-  | 'measure'
-  /** updateWindow (attempt 1) issued, with its verification. */
-  | 'update'
-  /** Attempt 1 did not verify: the `fitRetry` timer is pending. */
-  | 'retryWait'
-  /** updateWindow (attempt 2, the one retry) issued. */
-  | 'retry';
+export type FitStep = 'measure' | 'update' | 'retryWait' | 'retry';
 
 /** Sub-steps of `probing`, so stale effect results can be told apart. */
-export type ProbeStep =
-  /** A later document load started (AM2): waiting for its `complete`. */
-  | 'awaitComplete'
-  /** injectAgent issued: waiting for agentInjected. */
-  | 'injectAgent'
-  /** agent/probe sent: waiting for agentReport. */
-  | 'awaitReport'
-  /** Landscape refit: measureTab issued. */
-  | 'refitMeasure'
-  /** Landscape refit: updateWindow issued. */
-  | 'refitUpdate'
-  /**
-   * P5: the first probe that reached C4 found no story input (on `/` the input may mount after
-   * hydration), in a post (H1 or H0) or in probe mode (AL-1/AF-1): agent/watch is running and
-   * `inputWait` is armed; `input-appeared` re-probes once, the deadline decides on the probe as it is.
-   */
-  | 'awaitInput';
-
-/** How a session ended; decides the record outcome and the cleanup. */
-export type SessionResult =
-  | { kind: 'probe-done' }
-  | { kind: 'finished'; detectedPosted: boolean }
-  | { kind: 'cancelled' }
-  | { kind: 'failed'; code: ErrorCode }
-  | { kind: 'killed'; code: 'KILLED_CHALLENGE' | 'KILLED_OFFHOST' };
+export type ProbeStep = 'awaitComplete' | 'injectAgent' | 'awaitReport' | 'refitMeasure' | 'refitUpdate' | 'awaitInput';
 
 export interface IdleState {
   phase: 'idle';
-  /** The previous hand-off, so a late `handoff/outcome` can still be recorded. */
-  last: { handoffId: HandoffId; outcome: HandoffOutcome; endedAt: number } | null;
+  /** The previous hand-off, so a late mark can still be recorded. */
+  last: { handoffId: HandoffId; outcome: HandoffOutcome; endedAt: number; result?: RunResult } | null;
+}
+
+export interface QueuedState {
+  phase: 'queued';
+  handoffId: HandoffId;
+  request: StartRequest;
+  /** When the spacing frees the lane (epoch ms). */
+  startAt: number;
+  queuedAt: number;
 }
 
 export type ActiveState =
   | (SessionBase & { phase: 'opening' })
   | (WindowedSession & { phase: 'scoping' | 'navigating' | 'reloading' })
   | (WindowedSession & { phase: 'fitting'; fitStep: FitStep })
-  | (WindowedSession & {
-      phase: 'resizing';
-      /** Epoch ms of the WINDOW_NOT_FITTED deadline (for the editor's countdown). */
-      resizeUntil: number;
-    })
+  | (WindowedSession & { phase: 'resizing'; resizeUntil: number })
   | (WindowedSession & {
       phase: 'probing';
       step: ProbeStep;
       /** AM2: this probe follows a later document load, so isMobile must be exactly true. */
       strict: boolean;
-      /** The post-probe phase a later document load interrupted; null for the first probe. */
-      resumeFrom: 'injecting' | 'awaitingPick' | 'awaitingShare' | null;
-      /**
-       * AM16: this probe follows a `loading` of the armed tab. Whether it is a new document is known
-       * only at `agentInjected` (`fresh`): the same document resumes `resumeFrom` without a probe.
-       */
+      /** AM16: this probe follows a `loading` of the armed tab (same document or new, known at agentInjected). */
       amLoad: boolean;
-      /** AM16: agent events that arrived while the same document might still resume (replayed then). */
-      pending: AgentEventName[];
     })
-  | (WindowedSession & { phase: 'injecting'; level: 'H1' })
-  | (WindowedSession & { phase: 'awaitingPick'; level: 'H0'; degradedFrom: ErrorCode | null })
-  | (WindowedSession & { phase: 'awaitingShare'; level: HandoffLevel })
+  | (WindowedSession & { phase: 'awaitingAccount'; prompt: AccountPromptKind; until: number })
+  | (WindowedSession & { phase: 'openingEntry'; sub: 'dwell' | 'sent' })
+  | (WindowedSession & { phase: 'inserting'; sub: 'dwell' | 'sent' | 'served' | 'awaitComposer' })
+  /** awaitVisible: the Share dwell ran while the page was hidden: raised, Share waits for it to show (AP-5). */
+  | (WindowedSession & { phase: 'composeReady'; sub: 'verifyRules' | 'dwell' | 'awaitVisible' })
+  | (WindowedSession & { phase: 'sharing'; sentAt: number })
+  | (WindowedSession & { phase: 'confirmingUpload'; t0At: number })
+  | (WindowedSession & { phase: 'manual'; needs: 'pick' | 'share'; since: number; until: number })
   | (WindowedSession & {
       phase: 'finished';
-      level: HandoffLevel | null;
-      detectedPosted: boolean;
-      /**
-       * AM28: whether Share was tapped cannot be told, so "Posted?" has no pre-answer: an unknown
-       * page after Share (AM17), or C9 after an unconfirmed insert.
-       */
-      postedUnknown: boolean;
-      /** AM17: the path of the unknown www page that ended the session (UNEXPECTED_PAGE); else null. */
-      unexpectedPage: string | null;
-      /** The outcome written to the record (detection, then the owner's answer). */
-      outcome: HandoffOutcome;
-      /**
-       * AM19: C9 followed Share in a post with rehearsal off, so an upload may still be running in the
-       * popup: no 3 s close; it closes on the owner's "Posted?" answer, a cancel or inactivity. AM28:
-       * also after an unconfirmed insert (any rehearsal setting), so an H0 retry is not cut off.
-       */
-      holdOpen: boolean;
+      result: RunResult;
+      /** upload: Couldn't confirm while an upload may run; offerManual: Finish by hand is offered. */
+      hold: 'none' | 'upload' | 'offerManual';
+      /** When the window closes by itself (epoch ms). */
+      closeAt: number;
+      /** Posted: the close was moved to HOME_CLOSE_MS after Instagram went home. */
+      homeClose: boolean;
     })
   | (SessionBase & {
       phase: 'closing';
       windowId: number | null;
       tabId: number | null;
-      result: SessionResult;
-      level: HandoffLevel | null;
+      result: RunResult;
       /** The record is already written with this outcome. */
       outcome: HandoffOutcome;
     });
 
-export type HandoffState = IdleState | ActiveState;
+export type HandoffState = IdleState | QueuedState | ActiveState;
 
 export const IDLE: IdleState = { phase: 'idle', last: null };
 
 /** The kill switch is armed from the hard reload until the session closes. */
-export const ARMED_PHASES: readonly HandoffPhase[] = [
+export const ARMED_PHASES: readonly SessionPhase[] = [
   'reloading',
   'probing',
-  'injecting',
-  'awaitingPick',
-  'awaitingShare',
+  'awaitingAccount',
+  'openingEntry',
+  'inserting',
+  'composeReady',
+  'sharing',
+  'confirmingUpload',
+  'manual',
   'finished',
 ];
-export const isArmed = (s: HandoffState): boolean => ARMED_PHASES.includes(s.phase);
+export const isArmed = (s: HandoffState): boolean => ARMED_PHASES.includes(s.phase as SessionPhase);
 
 // ---------------------------------------------------------------------------------------
-// Events (inputs to the reducer). Agent events arrive only after acceptAgentMessage()
+// Events (inputs to the reducer). Agent messages arrive only after acceptAgentMessage()
 // (src/shared/protocol.ts) validated sender, tab, frame, origin, ids and phase.
 
 export type HandoffTimer =
   | 'closeDelay'
-  | 'inactivity'
   | 'navigation'
-  /** W2: the one windows.update retry, FIT_RETRY_DELAY_MS after the first attempt did not verify. */
   | 'fitRetry'
-  /** W3: RESIZE_TIMEOUT_MS (shorter in guarded test runs) → WINDOW_NOT_FITTED. */
   | 'resizeDeadline'
-  /** W3: read the tab size every RESIZE_POLL_MS, besides windows.onBoundsChanged. */
   | 'resizePoll'
-  /** P5: INPUT_WAIT_MS for `input-appeared` before the probe's INPUT_MISSING stands. */
-  | 'inputWait';
+  | 'inputWait'
+  /** The per-phase budget (§10); fires TIMEOUT before Share, ends `closing`. */
+  | 'stepDeadline'
+  /** PRE_SHARE_CAP_MS, paused during `resizing` and `awaitingAccount`. */
+  | 'preShareCap'
+  /** K11: the queued post starts. */
+  | 'queue'
+  /** The human-pace dwell before a tap, the insert or Share. */
+  | 'dwell'
+  | 'accountPrompt'
+  | 'hiddenWait'
+  | 'shareAck'
+  | 'confirmTick'
+  | 'uploadHold'
+  | 'offerManual'
+  | 'manualDeadline';
 
 /** Every timer, so a session's end can clear them all. */
 export const HANDOFF_TIMERS: readonly HandoffTimer[] = [
   'closeDelay',
-  'inactivity',
   'navigation',
   'fitRetry',
   'resizeDeadline',
   'resizePoll',
   'inputWait',
+  'stepDeadline',
+  'preShareCap',
+  'queue',
+  'dwell',
+  'accountPrompt',
+  'hiddenWait',
+  'shareAck',
+  'confirmTick',
+  'uploadHold',
+  'offerManual',
+  'manualDeadline',
 ];
 
 export type HandoffEvent =
   // editor (runtime.connect port 'handoff')
-  | {
-      type: 'start';
-      exportId: ExportId | null;
-      mode: HandoffMode;
-      rehearsal: boolean;
-      screen: ScreenAvail;
-      /** P6: the editor's detection. */
-      browser: BrowserFlavour;
-    }
+  | ({ type: 'start'; queue: boolean } & StartRequest)
+  /** Stop: honoured only before the Share command (and in finished, which closes the window). */
   | { type: 'cancel' }
-  | { type: 'outcome'; handoffId: HandoffId; posted: boolean }
+  | { type: 'accountChoice'; handoffId: HandoffId; proceed: boolean }
+  /** Finish by hand (ux.md §4.9). */
+  | { type: 'manual'; handoffId: HandoffId }
+  /** History's optional mark on a Couldn't confirm record. */
+  | { type: 'mark'; handoffId: HandoffId; posted: boolean }
   // results of effects (runner → reducer)
   | { type: 'windowCreated'; windowId: number; tabId: number }
   | { type: 'rulesInstalled' }
-  /**
-   * tabs.get(tabId) width/height (inner) and the window's outer box once it settled (two equal
-   * windows.get reads FIT_SETTLE_POLL_MS apart, at most FIT_SETTLE_MAX_MS); `zoom` = tabs.getZoom.
-   */
   | { type: 'tabMeasured'; inner: Size; outer: WindowBox; zoom?: number | null }
-  /**
-   * W2: updateWindow's verification. `fitted`: the tab came within FIT_TOLERANCE_PX of `target`
-   * within FIT_VERIFY_MAX_MS (and, with `reapply`, still was FIT_HOLD_MS after the first update).
-   * `inner`/`outer`: the tab and window when it stopped. `box`/`target` echo the effect. `applied`:
-   * the windows.update calls made (re-applies included).
-   */
   | {
       type: 'windowFitted';
       box: WindowBox;
@@ -658,30 +927,24 @@ export type HandoffEvent =
       outer: WindowBox;
       applied?: number;
     }
-  /** W3: readSize's answer: the tab and window right now. */
   | { type: 'windowSized'; inner: Size; outer: WindowBox }
-  /** W3: windows.onBoundsChanged for the composer window. */
   | { type: 'boundsChanged'; windowId: number }
-  /**
-   * `fresh` (AM16): the agent installed itself in this document; false when the sentinel was already
-   * set (a same-document `loading`: pushState, replaceState, hash). Missing counts as fresh.
-   * `orientation` (AM37): the portrait shim's result in that document (injected just before the agent).
-   */
   | { type: 'agentInjected'; fresh?: boolean; orientation?: PageOrientation }
+  /** verifyTestRules' answer: rules 1002–1019 are installed for the composer tab. */
+  | { type: 'rulesVerified'; ok: boolean }
   /** Any effect whose platform call rejected. */
   | { type: 'effectFailed'; effect: HandoffEffect['type']; message: string }
   // platform listeners
-  /** tabs.onUpdated for the composer tab. `url` is tab.url: undefined for hosts without permission. */
   | { type: 'tabUpdated'; tabId: number; status: 'loading' | 'complete' | undefined; url: string | undefined }
   | { type: 'windowRemoved'; windowId: number }
   | { type: 'tabRemoved'; tabId: number }
-  /** runtime.onStartup / onInstalled: idempotent cleanup of rules and state. */
   | { type: 'startup' }
   | { type: 'timer'; timer: HandoffTimer }
   // agent (validated)
   | { type: 'agentReport'; probe: ProbeReport }
   | { type: 'agentGetFile' }
-  | { type: 'agentEvent'; event: AgentEventName };
+  | { type: 'agentEvent'; event: AgentEventName }
+  | { type: 'agentFact'; fact: AgentFact };
 
 // ---------------------------------------------------------------------------------------
 // Effects (outputs of the reducer, executed in order by the runner).
@@ -690,104 +953,117 @@ export type HandoffEvent =
 export interface HandoffStatus {
   /** null when a guard refused before a hand-off existed. */
   handoffId: HandoffId | null;
-  phase: HandoffPhase;
-  level: HandoffLevel | null;
+  phase: SessionPhase;
+  mode?: HandoffMode;
+  /** The run view's current step. */
+  step?: RunStep;
   error?: ErrorCode;
   probe?: ProbeReport;
   banner?: 'FAKE_INSTAGRAM';
   /** For RATE_LIMITED and MSITE_LOCKED: when the lane frees up (epoch ms). */
   freeAt?: number;
-  /** C5 once known. `homeOnly`: the H0 text must say "tap + → Story". */
   route?: ComposerRoute;
-  /** `finished` only: the pre-answer for "Posted?" (C9 left from awaitingShare). */
-  detectedPosted?: boolean;
-  /** `finished` only (AM28): no pre-answer; whether Share was tapped cannot be told. */
-  postedUnknown?: boolean;
-  /** Which platform call failed (AGENT_UNREACHABLE), or the page UNEXPECTED_PAGE went to (`page /x/`). */
   detail?: string;
-  /**
-   * AM21: the open session's own switches (snapshot at start), on every status of an active hand-off.
-   * The panel shows these, not the stored settings, while a hand-off runs.
-   */
-  rehearsal?: boolean;
-  assistedInsert?: boolean;
-  /** `finished` only (AM19): the popup stays open until the owner answers "Posted?". */
-  holdOpen?: boolean;
-  /**
-   * W3 (`resizing`, and the status that leaves it): the tab size now, whether it is usable
-   * (isUsableInner), the WINDOW_NOT_FITTED deadline, and `maxW`, the widest usable tab in window px
-   * (MSITE_MAX_CSS_WIDTH × the tab zoom: maxMsiteInnerW), which the instruction names (AF-8).
-   */
+  /** W3 (`resizing`): the tab size now, whether it is usable, the deadline, the widest usable tab. */
   resize?: { tab: Size; ok: boolean; until: number; maxW: number };
-  /** W5: the popup's sizing, on the status that ends `fitting`/`resizing` and after a refit. */
   window?: WindowDiagnostics;
-  /** U1: the composer tab's path (query dropped), with the deciding probe. */
   path?: string;
-  /** U1: the preflight's C4 for the deciding probe (`unknown`: the decision never reached the input). */
   c4?: CheckResult;
+  account?: AccountFacts;
+  accountPrompt?: { kind: AccountPromptKind; detected: string | null; expected: string | null; until: number };
+  queuedUntil?: number;
+  result?: RunResult;
+  compose?: ComposeFacts;
+  entry?: EntryFacts;
+  evidence?: Evidence;
+  steps?: StepTimes;
+  startedAt?: number;
+  /** finished: the window is held (upload) or kept for Finish by hand (offerManual). */
+  held?: 'upload' | 'offerManual';
+  /** When a finished window closes by itself. */
+  closeAt?: number;
+  /** Stop is honoured (before the Share command). */
+  canStop?: boolean;
+  shareSent?: boolean;
+  manual?: { needs: 'pick' | 'share'; until: number };
+  /** The page was hidden and the window raised once (§4.6). */
+  raised?: boolean;
+}
+
+/** ux.md §8 `lane`: what a click on Post story would do now (pushed as `handoff/lane`). */
+export type LaneKind = 'ready' | 'spacing' | 'queued' | 'hourly' | 'daily' | 'paused' | 'busy';
+export interface Lane {
+  kind: LaneKind;
+  freeAt?: number;
+  /** busy/queued: the hand-off. */
+  handoffId?: HandoffId;
+  today: number;
+  hour: number;
+  caps: { hour: number; day: number };
+}
+
+/** storage.local `lastResult` (background-owned): the last run's result, for an editor opened later. */
+export interface LastResult {
+  handoffId: HandoffId;
+  mode: HandoffMode;
+  result: RunResult;
+  exportId: ExportId | null;
+  exportSha256: string | null;
+  docHash: string | null;
+  startedAt: number;
+  durationMs: number;
 }
 
 export type HandoffEffect =
-  /** windows.create({type:'popup', url:'about:blank', focused:true, state:'normal', ...box}) → windowCreated (W1). */
+  /** windows.create({type:'popup', url:'about:blank', focused:true, state:'normal', ...box}) → windowCreated. */
   | { type: 'openWindow'; box: WindowBox }
-  /** updateSessionRules({removeRuleIds, addRules}) → rulesInstalled. */
   | { type: 'installRules'; removeRuleIds: number[]; addRules: DnrRule[] }
-  /**
-   * W2: windows.get(windowId) until two reads FIT_SETTLE_POLL_MS apart agree (at most
-   * FIT_SETTLE_MAX_MS), then tabs.get(tabId) and tabs.getZoom(tabId) → tabMeasured. `settle` is true
-   * for the new popup in `fitting` only; the refit (kill switch armed, the window not new) reads the
-   * window once, so the event queue is never held up (AL-3).
-   */
   | { type: 'measureTab'; tabId: number; windowId: number; settle: boolean }
-  /**
-   * windows.update(windowId, {state:'normal', ...box}), then tabs.get every FIT_VERIFY_POLL_MS until
-   * the tab is within FIT_TOLERANCE_PX of `inner`, for at most FIT_VERIFY_MAX_MS → windowFitted.
-   * `reapply` (W2, `fitting` only, the tab still about:blank): the box is re-applied at FIT_REAPPLY_MS
-   * while the tab is not fitted, and the fit must hold until FIT_HOLD_MS. false for the refit after
-   * the navigation: one windows.update, no hold, and the verification runs beside the event queue
-   * (its windowFitted is queued when it ends), so a kill-switch update is never held up (AL-3).
-   */
   | { type: 'updateWindow'; windowId: number; tabId: number; box: WindowBox; inner: Size; reapply: boolean }
-  /** W3: tabs.get(tabId) + windows.get(windowId), no waiting → windowSized. */
   | { type: 'readSize'; windowId: number; tabId: number }
-  /** tabs.update(tabId, {url}). */
   | { type: 'navigate'; tabId: number; url: string }
-  /** tabs.reload(tabId, {bypassCache:true}), exactly once per hand-off. */
   | { type: 'hardReload'; tabId: number }
-  /**
-   * AM37: first the portrait shim, scripting.executeScript({target:{tabId, frameIds:[0]}, world:'MAIN',
-   * injectImmediately:true, func}) (src/agent/portrait-shim.ts; read-only when a guarded build's E2E flag
-   * switches it off), then scripting.executeScript({target:{tabId, frameIds:[0]}, files:['/composer-agent.js']})
-   * → agentInjected with the shim's `orientation`. Emitted for every document of the composer tab after
-   * the hard reload (AM2/AM16), and only for that tab.
-   */
+  /** AM37: the portrait shim, then the agent → agentInjected (fresh, orientation). */
   | { type: 'injectAgent'; tabId: number }
-  /** tabs.sendMessage(tabId, {v:1, ...command, handoffId, nonce}, {frameId:0}). */
   | { type: 'sendAgent'; tabId: number; command: AgentCommand }
-  /** Answer the pending agent/get-file with the export's bytes (base64). */
   | { type: 'serveFile'; exportId: ExportId }
   | { type: 'notifyEditor'; status: HandoffStatus }
   | { type: 'closeWindow'; windowId: number }
-  /** Always the full 1001..1019 range on cleanup. */
   | { type: 'removeRules'; ruleIds: number[] }
   | { type: 'writeRecord'; record: HandoffRecord }
-  /** A late "Posted?" answer for an already written record. */
-  | { type: 'patchRecordOutcome'; handoffId: HandoffId; outcome: HandoffOutcome }
-  /** settings.msiteLockedUntil = until. */
-  | { type: 'lockMsite'; until: number }
-  /** Append to the rate-guard open log. */
+  /** A later result for a written record (Finish by hand, §6.4 late answer, a kill after finished). */
+  | {
+      type: 'patchRecordOutcome';
+      handoffId: HandoffId;
+      outcome: HandoffOutcome;
+      result: RunResult;
+      patch?: Partial<HandoffRecord>;
+    }
+  /** History's mark on a Couldn't confirm record; the runner applies it only to an `unknown` record. */
+  | { type: 'markRecord'; handoffId: HandoffId; posted: boolean }
+  /** The kill switch or TEST_LEAK: pause desktop posting until `until`, and say why (AP-12). */
+  | { type: 'lockMsite'; until: number; reason: MsiteLockReason }
   | { type: 'noteOpen'; t: number }
-  /**
-   * AM22: storage.local `composerWindow` = this popup, so a reloaded or re-enabled extension (whose
-   * storage.session is gone) can still close it.
-   */
   | { type: 'rememberWindow'; windowId: number; tabId: number; handoffId: HandoffId }
-  /** Clears storage.local `composerWindow`. */
   | { type: 'forgetWindow' }
-  /** Replaces any pending timer of the same name; fires `{type:'timer', timer}` after `ms`. */
   | { type: 'armTimer'; timer: HandoffTimer; ms: number }
-  /** No-op when none is pending. */
-  | { type: 'clearTimer'; timer: HandoffTimer };
+  | { type: 'clearTimer'; timer: HandoffTimer }
+  /** §4.6: windows.update(windowId, {focused: true}). */
+  | { type: 'raiseWindow'; windowId: number }
+  /** action.setBadgeText / setBadgeBackgroundColor ('' clears). */
+  | { type: 'setBadge'; text: string; color: string | null }
+  /** §4.6: focus the editor's window again, only if `windowId` (the composer) is the last focused one. */
+  | { type: 'focusEditor'; ifFocused: number }
+  /** dnr.getSessionRules: rules 1002–1019 present with `tabIds` naming the tab → rulesVerified. */
+  | { type: 'verifyTestRules'; tabId: number }
+  /** storage.local `menuFingerprint` (background-owned). */
+  | { type: 'storeFingerprint'; fingerprint: MenuFingerprint }
+  /** storage.local `expectedAccount` (background-owned). */
+  | { type: 'setExpectedAccount'; account: ExpectedAccount }
+  /** storage.local `lastTestPassAt` (background-owned). */
+  | { type: 'setLastTestPass'; at: number }
+  /** storage.local `lastResult` (background-owned). */
+  | { type: 'writeLastResult'; last: LastResult };
 
 // ---------------------------------------------------------------------------------------
 // Reducer context: everything impure, sampled by the runner per event.
@@ -796,21 +1072,21 @@ export interface HandoffCtx {
   now: number;
   /** MODE !== 'live'. */
   guarded: boolean;
-  /** From the background's navigator.userAgent. */
   chromeMajor: number;
   settings: Settings;
-  /** checkRate() at `now`; consulted on `start` only. */
+  /** checkRate() at `now`; consulted on `start` and when the queue fires. */
   rate: RateDecision;
-  /** crypto.randomUUID. */
   uuid: () => string;
-  /**
-   * AM23: the background's navigator.userAgentData names a branded browser (Google Chrome, Microsoft
-   * Edge). Sealed browsers (CfT, Playwright's Chromium) do not, so a guarded build refuses at once.
-   */
+  /** [0, 1), for the human-pace dwell. */
+  random: () => number;
+  /** The stored menu fingerprint (storage.local `menuFingerprint`), or null. */
+  fingerprint: MenuFingerprint | null;
+  /** AM23: the background's navigator.userAgentData names a branded browser. */
   brandedBrowser: boolean;
-  /**
-   * W3: a shorter guided-resize deadline from a guarded build's E2E flag (storage.local
-   * `__e2eResizeTimeoutMs`). Ignored in live builds and when not below RESIZE_TIMEOUT_MS.
-   */
+  /** W3: a shorter guided-resize deadline from a guarded build's E2E flag. */
   resizeTimeoutMs?: number;
+  /** Guarded E2E hook `__e2eDwellScale` (0 = no dwell); ignored in live builds. */
+  dwellScale?: number;
+  /** Guarded E2E hook `__e2eBudgetScale` (shrinks the 75/120 s outcome budgets); ignored in live builds. */
+  budgetScale?: number;
 }

@@ -1,7 +1,9 @@
 /**
- * U16 (strategy §7.11): the fake Instagram's transport-free core, its knobs, store and
- * geometry. Never depends on src/core's parseIsMobile (U15 owns that); the UA JSON is read here
- * with JSON.parse.
+ * U16 (strategy §7.11) and U27 (ux.md): the fake Instagram's transport-free core, its knobs, store and
+ * geometry; the upload and publish routes (C13) with their knobs, the CORS echo, server truth (a story
+ * only after a successful publish of a known upload), the control reports (IF9) and the telemetry log
+ * (IF8). Never depends on src/core's parseIsMobile (U15 owns that); the UA JSON is read here with
+ * JSON.parse.
  */
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,20 +23,26 @@ import {
   matchWriteFilter,
   normalizeHost,
   parseComposerView,
+  parseControlReport,
+  parseLogInput,
 } from './core.ts';
 import {
+  accountShape,
   BASELINE,
+  CONFIGURE_CHOICES,
   DEFAULT_KNOBS,
   deriveKnobs,
+  FAKE_ACCOUNT,
   KNOB_CHOICES,
   KNOB_NAMES,
   type Knobs,
   parseGeometryModel,
   parseKnobPatch,
+  RUPLOAD_CHOICES,
   STORY_ACCEPT_LISTS,
 } from './knobs.ts';
 import type { FakeBoot, FakeShareMeta } from './protocol.ts';
-import { createStore, jpegSize, type StoryRecord } from './store.ts';
+import { createStore, jpegSize, type LogRecord, type StoryRecord, type UploadRecord } from './store.ts';
 import { classify, type UaClassification } from './ua.ts';
 
 const ANDROID = androidReducedUa(155);
@@ -105,6 +113,8 @@ function meta(isTrusted: boolean): FakeShareMeta {
     sessionStarted: true,
     sessionId: '0b4f8e1c-2d5a-4c11-9a0e-6f3b7c2d1e90',
     screenOrientation: 'portrait-primary',
+    variant: 'v1',
+    fbAuto: false,
   };
 }
 
@@ -132,21 +142,63 @@ function setup(dir: string | null = null) {
   const postJson = (path: string, value: unknown) =>
     send('POST', WWW, path, { 'content-type': 'application/json' }, new TextEncoder().encode(JSON.stringify(value)));
   const api = <T>(name: string): T => JSON.parse(text(get(`/__fake__/api/${name}`))) as T;
-  const share = (m: FakeShareMeta | null | string, body = fakeJpeg(1022, 1816), ua = ANDROID) =>
+  const knobs = (patch: Record<string, unknown>) => {
+    const r = postJson('/__fake__/api/knobs', patch);
+    if (r.status !== 200) throw new Error(text(r));
+  };
+  /** The page's photo upload (C13), as the fake's client sends it. */
+  const upload = (
+    uploadId: string,
+    m: FakeShareMeta | null | string = meta(false),
+    body = fakeJpeg(1022, 1816),
+    origin = 'https://www.instagram.com',
+  ) =>
     send(
       'POST',
-      WWW,
-      '/__fake__/stories',
+      I,
+      `/rupload_igphoto/fb_uploader_${uploadId}`,
       {
         'content-type': 'image/jpeg',
-        'user-agent': ua,
+        'x-entity-type': 'image/jpeg',
+        'user-agent': ANDROID,
         'sec-ch-ua-mobile': '?1',
         'sec-ch-ua-platform': '"Android"',
+        origin,
         ...(m === null ? {} : { 'x-fake-meta': typeof m === 'string' ? m : JSON.stringify(m) }),
       },
       body,
     );
-  return { store, core, send, get, postJson, api, share };
+  /** The page's publish request (C13). */
+  const publish = (uploadId: string, extra: Record<string, string> = {}) =>
+    send(
+      'POST',
+      WWW,
+      '/api/v1/media/configure_to_story/',
+      {
+        'content-type': 'application/x-www-form-urlencoded',
+        'user-agent': ANDROID,
+        origin: 'https://www.instagram.com',
+      },
+      new TextEncoder().encode(
+        new URLSearchParams({
+          caption: '',
+          configure_mode: '1',
+          share_to_facebook: '',
+          upload_id: uploadId,
+          ...extra,
+        }).toString(),
+      ),
+    );
+  /** Upload, then publish: what one Share does. Returns the publish answer. */
+  const share = (
+    m: FakeShareMeta | null | string = meta(false),
+    body = fakeJpeg(1022, 1816),
+    uploadId = '1791747574517',
+  ) => {
+    upload(uploadId, m, body);
+    return publish(uploadId);
+  };
+  return { store, core, send, get, postJson, api, knobs, upload, publish, share };
 }
 
 const text = (r: FakeResponse) => (typeof r.body === 'string' ? r.body : new TextDecoder().decode(r.body));
@@ -504,17 +556,26 @@ describe('U16 fake core: write recording', () => {
     ['POST', WWW, '/api/v1/media/configure_to_longform/'],
   ];
 
-  it.each(samples)('%s %s%s is logged as WRITE_PATH_REACHED and answered 200', (method, host, path) => {
+  it.each(samples)('%s %s%s is logged as WRITE_PATH_REACHED', (method, host, path) => {
     const { send, api } = setup();
     const body = new Uint8Array([1, 2, 3]);
-    const r = send(method, host, path, { 'user-agent': ANDROID, origin: 'https://www.instagram.com' }, body);
-    expect(r.status).toBe(200);
-    expect(json(r)).toEqual({ status: 'fake-ok' });
-    expect(r.headers['access-control-allow-origin']).toBe('https://www.instagram.com');
+    send(method, host, path, { 'user-agent': ANDROID, origin: 'https://www.instagram.com' }, body);
     const writes = api<Array<Record<string, unknown>>>('writes');
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({ tag: 'WRITE_PATH_REACHED', host, method, path, ua: ANDROID, bytes: 3 });
     expect(api<Array<{ tag: string | null }>>('requests')[0]?.tag).toBe('WRITE_PATH_REACHED');
+  });
+
+  it('write paths the fake’s client never uses are answered 200 with CORS for www', () => {
+    const { send } = setup();
+    const r = send('POST', WWW, '/api/v1/media/configure_sidecar/', { origin: 'https://www.instagram.com' });
+    expect(r.status).toBe(200);
+    expect(json(r)).toEqual({ status: 'fake-ok' });
+    expect(r.headers['access-control-allow-origin']).toBe('https://www.instagram.com');
+    // Another origin gets no CORS grant.
+    expect(
+      send('POST', WWW, '/api/v1/media/configure/', { origin: 'https://evil.example' }).headers,
+    ).not.toHaveProperty('access-control-allow-origin');
   });
 
   it('every WRITE_URL_FILTERS entry is exercised by a sample', () => {
@@ -531,67 +592,195 @@ describe('U16 fake core: write recording', () => {
     expect(api<unknown[]>('writes')).toEqual([]);
   });
 
-  it('a CORS preflight to a write path is answered and still counted', () => {
+  it('IF5: the upload’s CORS preflight echoes the requested headers for www, with credentials; still counted', () => {
     const { send, api } = setup();
-    const r = send('OPTIONS', I, '/rupload_igphoto/fb_uploader_1', { origin: 'https://www.instagram.com' });
+    const asked = 'offset,x-entity-length,x-entity-name,x-entity-type,x-instagram-rupload-params,x-fake-meta';
+    const r = send('OPTIONS', I, '/rupload_igphoto/fb_uploader_1', {
+      origin: 'https://www.instagram.com',
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': asked,
+    });
     expect(r.status).toBe(204);
-    expect(r.headers['access-control-allow-credentials']).toBe('true');
-    expect(api<unknown[]>('writes')).toHaveLength(1);
+    expect(r.headers).toMatchObject({
+      'access-control-allow-origin': 'https://www.instagram.com',
+      'access-control-allow-credentials': 'true',
+      'access-control-allow-headers': asked,
+    });
+    // `*` would not cover a credentialed request: the echo is exact.
+    expect(r.headers['access-control-allow-headers']).not.toBe('*');
+    // Another origin is not granted.
+    const other = send('OPTIONS', I, '/rupload_igphoto/fb_uploader_1', { origin: 'https://evil.example' });
+    expect(other.headers['access-control-allow-origin']).toBeUndefined();
+    expect(api<unknown[]>('writes')).toHaveLength(2);
+    expect(api<unknown[]>('uploads')).toEqual([]);
   });
 });
 
-describe('U16 fake core: stories and violations', () => {
-  it('records a trusted Share with its JPEG size, bytes and headers', () => {
+describe('U27 fake core: the upload, the publish request and server truth (C13, IF5)', () => {
+  it('a Share (upload, then publish) stores one story with the upload’s JPEG, headers and meta', () => {
     const { share, api, get } = setup();
     const body = fakeJpeg(1022, 1816);
-    const r = share(meta(true), body);
+    const r = share(meta(false), body);
     expect(r.status).toBe(200);
-    const { id } = json<{ id: string }>(r);
+    expect(r.headers['content-type']).toMatch(/^application\/json/);
+    const answer = json<{ media: { pk: string }; status: string }>(r);
+    expect(answer.status).toBe('ok');
     const [story] = api<StoryRecord[]>('stories');
     expect(story).toMatchObject({
-      id,
+      id: answer.media.pk,
       bytes: body.length,
       size: { w: 1022, h: 1816 },
-      isTrusted: true,
+      isTrusted: false,
       contentType: 'image/jpeg',
       ua: ANDROID,
       ch: { 'sec-ch-ua-mobile': '?1', 'sec-ch-ua-platform': '"Android"' },
       metaError: null,
+      uploadId: '1791747574517',
+      shareToFacebook: false,
     });
     expect(story?.meta?.geometry.canvas).toEqual({ w: 1022, h: 1816 });
-    const img = get(`/__fake__/stories/${id}.jpg`);
+    const img = get(`/__fake__/stories/${story?.id}.jpg`);
     expect(img.headers['content-type']).toBe('image/jpeg');
     expect(img.body).toEqual(body);
+    // ux.md P2: the autopilot's Share is untrusted by design; no violation.
     expect(api<unknown[]>('violations')).toEqual([]);
-    // /__fake__ traffic is not part of the request log.
-    expect(api<unknown[]>('requests')).toEqual([]);
+    expect(api<UploadRecord[]>('uploads').map((u) => [u.uploadId, u.answer])).toEqual([['1791747574517', 'ok']]);
   });
 
-  it('an untrusted Share is recorded and is a violation', () => {
-    const { share, api } = setup();
-    const { id } = json<{ id: string }>(share(meta(false)));
-    expect(api<StoryRecord[]>('stories')[0]?.isTrusted).toBe(false);
-    expect(api<unknown[]>('violations')).toEqual([expect.objectContaining({ kind: 'UNTRUSTED_SHARE', storyId: id })]);
+  it('the upload answers 200 JSON with its upload id and CORS for www', () => {
+    const { upload } = setup();
+    const r = upload('42');
+    expect(r.status).toBe(200);
+    expect(json(r)).toMatchObject({ upload_id: '42', status: 'ok' });
+    expect(r.headers).toMatchObject({
+      'access-control-allow-origin': 'https://www.instagram.com',
+      'access-control-allow-credentials': 'true',
+    });
+    expect(r.wire).toBeUndefined();
+  });
+
+  it('server truth: no story without a publish, nor for a publish of an unknown upload', () => {
+    const { upload, publish, api } = setup();
+    upload('7');
+    expect(api<unknown[]>('stories')).toEqual([]);
+    const r = publish('8');
+    expect(r.status).toBe(400);
+    expect(api<unknown[]>('stories')).toEqual([]);
+    expect(publish('7').status).toBe(200);
+    expect(api<StoryRecord[]>('stories').map((s) => s.uploadId)).toEqual(['7']);
+  });
+
+  it('share_to_facebook=true is recorded on the story (fb=auto, OD12)', () => {
+    const { upload, publish, api } = setup();
+    upload('9', { ...meta(false), variant: 'v2', fbAuto: true });
+    publish('9', { share_to_facebook: 'true' });
+    expect(api<StoryRecord[]>('stories')[0]).toMatchObject({
+      shareToFacebook: true,
+      meta: { variant: 'v2', fbAuto: true },
+    });
   });
 
   it.each([
-    ['missing', null],
-    ['not JSON', '{nope'],
-    ['without isTrusted', JSON.stringify({ canvas: { w: 1, h: 1 } })],
-  ] as const)('a Share with %s meta is recorded as SHARE_META_INVALID', (_name, m) => {
-    const { share, api } = setup();
-    share(m);
-    expect(api<StoryRecord[]>('stories')[0]).toMatchObject({ isTrusted: null, meta: null });
-    expect(api<Array<{ kind: string }>>('violations').map((v) => v.kind)).toEqual(['SHARE_META_INVALID']);
+    ['500', 500, 'application/json', null, false],
+    ['cors', 200, 'application/json', null, false],
+    ['reset', 200, 'application/json', 'reset', false],
+    ['hang', 200, 'application/json', 'hang', false],
+    ['slow:2500', 200, 'application/json', 2500, false],
+  ] as const)('rupload=%s: answers %i, wire %s; the upload is recorded either way', (knob, status, type, wire, _x) => {
+    const { knobs, upload, api } = setup();
+    knobs({ rupload: knob });
+    const r = upload('11');
+    expect(r.status).toBe(status);
+    expect(r.headers['content-type']).toMatch(new RegExp(`^${type}`));
+    if (wire === 'reset' || wire === 'hang') expect(r.wire).toEqual({ drop: wire });
+    else if (typeof wire === 'number') expect(r.wire).toEqual({ delayMs: wire });
+    else expect(r.wire).toBeUndefined();
+    // `cors`: the server got the upload, but the page cannot read the answer (no CORS grant).
+    if (knob === 'cors') expect(r.headers['access-control-allow-origin']).toBeUndefined();
+    else expect(r.headers['access-control-allow-origin']).toBe('https://www.instagram.com');
+    expect(api<UploadRecord[]>('uploads').map((u) => u.answer)).toEqual([knob]);
   });
 
-  it('rejects an empty body and non-POST methods; unknown ids are 404', () => {
-    const { share, get, api } = setup();
-    expect(share(meta(true), new Uint8Array()).status).toBe(400);
-    expect(get('/__fake__/stories').status).toBe(405);
-    expect(get('/__fake__/stories/s0-000000.jpg').status).toBe(404);
-    expect(get('/__fake__/stories/..%2F..%2Fcert.jpg').status).toBe(404);
-    expect(api<unknown[]>('stories')).toEqual([]);
+  it.each([
+    // knob, status, content type, wire, a story exists (server truth), answer body check
+    ['ok', 200, 'application/json', null, true],
+    ['400', 400, 'application/json', null, false],
+    ['feedback', 400, 'application/json', null, false],
+    ['login401', 401, 'application/json', null, false],
+    ['checkpoint', 400, 'application/json', null, false],
+    ['500', 500, 'application/json', null, false],
+    ['reset', 200, 'application/json', 'reset', true],
+    ['hang', 200, 'application/json', 'hang', true],
+    ['redirectLogin', 302, '', null, false],
+    ['html200', 200, 'text/html', null, false],
+    ['slow:1200', 200, 'application/json', 1200, true],
+  ] as const)('configure=%s answers %i (%s), wire %s; story stored: %s', (knob, status, type, wire, stored) => {
+    const { knobs, share, api } = setup();
+    knobs({ configure: knob });
+    const r = share();
+    expect(r.status).toBe(status);
+    if (type) expect(r.headers['content-type']).toMatch(new RegExp(`^${type.replace('/', '\\/')}`));
+    if (wire === 'reset' || wire === 'hang') expect(r.wire).toEqual({ drop: wire });
+    else if (typeof wire === 'number') expect(r.wire).toEqual({ delayMs: wire });
+    else expect(r.wire).toBeUndefined();
+    expect(api<unknown[]>('stories')).toHaveLength(stored ? 1 : 0);
+    if (knob === 'checkpoint')
+      expect(json(r)).toMatchObject({ message: 'checkpoint_required', checkpoint_url: '/challenge/?next=%2F' });
+    if (knob === 'feedback') expect(json(r)).toMatchObject({ message: 'feedback_required' });
+    if (knob === 'login401') expect(json(r)).toMatchObject({ require_login: true });
+    if (knob === 'redirectLogin') expect(r.headers.location).toBe('/accounts/login/?next=%2F');
+  });
+
+  it('a repeated publish of one upload id (Chrome resending after a reset) is one story, the same media', () => {
+    const { knobs, share, publish, api } = setup();
+    knobs({ configure: 'reset' });
+    share();
+    // Chrome resends a POST whose reused connection was reset before any answer byte (observed 2026-10-13).
+    publish('1791747574517');
+    publish('1791747574517');
+    knobs({ configure: 'ok' });
+    const again = publish('1791747574517');
+    const stories = api<Array<{ id: string; uploadId: string }>>('stories');
+    expect(stories).toHaveLength(1);
+    expect(json<{ media: { pk: string } }>(again).media.pk).toBe(stories[0]?.id);
+    expect(api<unknown[]>('writes').filter((w) => JSON.stringify(w).includes('configure_to_story'))).toHaveLength(4);
+    // Another upload id is another story (a second Share uploads again: DOUBLE_SHARE's harm).
+    share(undefined, undefined, '1791747574999');
+    expect(api<unknown[]>('stories')).toHaveLength(2);
+  });
+
+  it('every documented rupload and configure value is a valid knob; others are refused', () => {
+    for (const v of RUPLOAD_CHOICES) expect(parseKnobPatch({ rupload: v }).ok).toBe(true);
+    for (const v of CONFIGURE_CHOICES) expect(parseKnobPatch({ configure: v }).ok).toBe(true);
+    expect(parseKnobPatch({ rupload: 'slow:60000' }).ok).toBe(true);
+    for (const bad of ['slow:', 'slow:60001', 'slow:-1', '404', 'OK']) {
+      expect(parseKnobPatch({ rupload: bad }).ok, bad).toBe(false);
+      expect(parseKnobPatch({ configure: bad }).ok, bad).toBe(false);
+    }
+  });
+
+  it('an upload without (or with an invalid) x-fake-meta is SHARE_META_INVALID (the fake’s own client is broken)', () => {
+    const { upload, api } = setup();
+    upload('1', null);
+    upload('2', '{nope');
+    upload('3', JSON.stringify({ canvas: { w: 1, h: 1 } }));
+    expect(api<Array<{ kind: string }>>('violations').map((v) => v.kind)).toEqual([
+      'SHARE_META_INVALID',
+      'SHARE_META_INVALID',
+      'SHARE_META_INVALID',
+    ]);
+    expect(api<UploadRecord[]>('uploads').map((u) => u.meta)).toEqual([null, null, null]);
+  });
+
+  it('IF6: the tray refresh answers 200 JSON; tray=fail answers 500; GET is refused', () => {
+    const { send, knobs } = setup();
+    const post = () => send('POST', WWW, '/graphql/query', { 'content-type': 'application/x-www-form-urlencoded' });
+    expect(post().status).toBe(200);
+    knobs({ tray: 'fail' });
+    expect(post().status).toBe(500);
+    knobs({ tray: 'throw' });
+    expect(post().status).toBe(200);
+    expect(send('GET', WWW, '/graphql/query', {}).status).toBe(405);
   });
 
   it('jpegSize reads SOF0/SOF2 and refuses non-JPEG bytes', () => {
@@ -601,6 +790,13 @@ describe('U16 fake core: stories and violations', () => {
     expect(jpegSize(progressive)).toEqual({ w: 720, h: 1280 });
     expect(jpegSize(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBeNull();
     expect(jpegSize(new Uint8Array())).toBeNull();
+  });
+
+  it('the direct /__fake__/stories share is gone; story JPEGs are still served; unknown ids are 404', () => {
+    const { send, get } = setup();
+    expect(send('POST', WWW, '/__fake__/stories', {}, fakeJpeg(1, 1)).status).toBe(404);
+    expect(get('/__fake__/stories/s0-000000.jpg').status).toBe(404);
+    expect(get('/__fake__/stories/..%2F..%2Fcert.jpg').status).toBe(404);
   });
 });
 
@@ -641,17 +837,19 @@ describe('U16 fake core: knobs API and reset', () => {
     expect(api<Knobs>('knobs')).toMatchObject({ locale: 'es', sw: 'claimLate' });
   });
 
-  it('POST /__fake__/api/reset clears stories, requests, writes, violations and knobs', () => {
+  it('POST /__fake__/api/reset clears stories, uploads, the log, requests, writes, violations and knobs', () => {
     const { send, share, get, postJson, api } = setup();
-    postJson('/__fake__/api/knobs', { auth: 'out' });
     share(meta(false));
+    postJson('/__fake__/api/knobs', { auth: 'out' });
+    postJson('/__fake__/control', { control: 'close', isTrusted: false, doc: 'd1' });
+    postJson('/__fake__/log', { step: 'enter', doc: 'd1', fields: { waterfall_id: 'x' } });
     get('/');
-    send('POST', I, '/rupload_igphoto/fb_uploader_1');
-    expect(api<unknown[]>('writes')).toHaveLength(1);
+    expect(api<unknown[]>('writes')).toHaveLength(2);
+    expect(api<unknown[]>('stories')).toHaveLength(1);
     expect(get('/__fake__/api/reset').status).toBe(405);
     const r = send('POST', WWW, '/__fake__/api/reset');
     expect(json(r)).toEqual({ ok: true, knobs: DEFAULT_KNOBS });
-    for (const name of ['stories', 'requests', 'writes', 'violations']) expect(api(name)).toEqual([]);
+    for (const name of ['stories', 'uploads', 'log', 'requests', 'writes', 'violations']) expect(api(name)).toEqual([]);
     expect(api('knobs')).toEqual(DEFAULT_KNOBS);
   });
 
@@ -665,9 +863,10 @@ describe('U16 fake core: knobs API and reset', () => {
 });
 
 describe('U16 fake core: dashboard', () => {
-  it('renders stories, the knob form and escaped request data', () => {
-    const { get, share } = setup();
+  it('renders stories, uploads, the log, the knob form and escaped request data', () => {
+    const { get, share, postJson } = setup();
     share(meta(true));
+    postJson('/__fake__/log', { step: 'enter', doc: 'd1', fields: { waterfall_id: '<b>x</b>' } });
     get('/', '<img src=x onerror=alert(1)>');
     const r = get('/__fake__/');
     expect(r.status).toBe(200);
@@ -675,7 +874,9 @@ describe('U16 fake core: dashboard', () => {
     expect(html).toContain('<form id="knobs"');
     for (const name of KNOB_NAMES) expect(html).toContain(`name="${name}"`);
     expect(html).toContain('1022×1816');
-    expect(html).toContain('isTrusted');
+    expect(html).toContain('Share by hand');
+    expect(html).toContain('Autopilot evidence');
+    expect(html).not.toContain('<b>x</b>');
     expect(html).not.toContain('<img src=x');
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
   });
@@ -699,7 +900,7 @@ describe('U16 fake core: story persistence', () => {
     const dir = mkdtempSync(join(tmpdir(), 'fake-ig-test-'));
     dirs.push(dir);
     const first = setup(dir);
-    const { id } = json<{ id: string }>(first.share(meta(true)));
+    const id = json<{ media: { pk: string } }>(first.share(meta(true))).media.pk;
     expect(readdirSync(dir).sort()).toEqual([`${id}.jpg`, `${id}.json`]);
 
     const second = setup(dir);
@@ -712,16 +913,61 @@ describe('U16 fake core: story persistence', () => {
   });
 });
 
-describe('U16 fake core: control clicks report isTrusted (FID-2)', () => {
-  it('a trusted control click is fine; an untrusted one is an UNTRUSTED_CONTROL violation', () => {
+describe('U27 fake core: control reports (IF9) and the telemetry log (IF8)', () => {
+  const report = (
+    postJson: (p: string, v: unknown) => FakeResponse,
+    control: string,
+    isTrusted: boolean,
+    repeat = false,
+  ) => postJson('/__fake__/control', { control, isTrusted, repeat, doc: 'd1' });
+
+  it('the autopilot’s untrusted taps of +, Story, Post (the trial) and one Share are allowed', () => {
     const { postJson, api } = setup();
-    expect(postJson('/__fake__/control', { control: 'create', isTrusted: true }).status).toBe(200);
+    for (const control of ['create', 'story', 'post', 'share']) {
+      expect(report(postJson, control, false).status).toBe(200);
+    }
     expect(api<unknown[]>('violations')).toEqual([]);
-    expect(postJson('/__fake__/control', { control: 'story', isTrusted: false }).status).toBe(200);
-    expect(api<unknown[]>('violations')).toEqual([
-      expect.objectContaining({ kind: 'UNTRUSTED_CONTROL', storyId: null, detail: expect.stringContaining('story') }),
+    // Every report is logged as a tap, with its trust.
+    expect(api<LogRecord[]>('log').map((l) => [l.step, l.fields.isTrusted])).toEqual([
+      ['tap:create', false],
+      ['tap:story', false],
+      ['tap:post', false],
+      ['tap:share', false],
     ]);
   });
+
+  it('a second Share in one composer session is DOUBLE_SHARE, whoever clicked', () => {
+    const { postJson, api } = setup();
+    report(postJson, 'share', false);
+    report(postJson, 'share', false, true);
+    report(postJson, 'share', true, true);
+    expect(api<{ kind: string }[]>('violations').map((v) => v.kind)).toEqual(['DOUBLE_SHARE', 'DOUBLE_SHARE']);
+  });
+
+  it('an untrusted Retry is RETRY_CLICKED; a trusted one (the owner) is fine', () => {
+    const { postJson, api } = setup();
+    report(postJson, 'retry', true);
+    expect(api<unknown[]>('violations')).toEqual([]);
+    report(postJson, 'retry', false);
+    expect(api<{ kind: string }[]>('violations').map((v) => v.kind)).toEqual(['RETRY_CLICKED']);
+  });
+
+  it.each(['close', 'save', 'text', 'draw', 'aiLabel', 'toastAction', 'dialog', 'home', 'profile', 'menuExtra'])(
+    'an untrusted %s is TAP_OUTSIDE_ALLOWLIST; a trusted one is fine',
+    (control) => {
+      const { postJson, api } = setup();
+      report(postJson, control, true);
+      expect(api<unknown[]>('violations')).toEqual([]);
+      report(postJson, control, false);
+      expect(api<{ kind: string; detail: string }[]>('violations')).toEqual([
+        expect.objectContaining({
+          kind: 'TAP_OUTSIDE_ALLOWLIST',
+          storyId: null,
+          detail: expect.stringContaining(control),
+        }),
+      ]);
+    },
+  );
 
   it('a malformed report is refused; a missing isTrusted counts as untrusted', () => {
     const { postJson, api, get } = setup();
@@ -729,7 +975,57 @@ describe('U16 fake core: control clicks report isTrusted (FID-2)', () => {
     expect(postJson('/__fake__/control', { control: 'x'.repeat(40), isTrusted: true }).status).toBe(400);
     expect(get('/__fake__/control').status).toBe(405);
     postJson('/__fake__/control', { control: 'close' });
-    expect(api<{ kind: string }[]>('violations').map((v) => v.kind)).toEqual(['UNTRUSTED_CONTROL']);
+    expect(api<{ kind: string }[]>('violations').map((v) => v.kind)).toEqual(['TAP_OUTSIDE_ALLOWLIST']);
+    expect(parseControlReport({ control: 'share', isTrusted: false, repeat: true, doc: 'BAD DOC' })).toEqual({
+      control: 'share',
+      isTrusted: false,
+      repeat: true,
+      doc: '-',
+    });
+  });
+
+  it('the log keeps the page’s steps in order, per document; GET /__fake__/api/log?since=', () => {
+    const { postJson, api, get } = setup();
+    expect(
+      postJson('/__fake__/log', {
+        step: 'enter',
+        doc: 'd1',
+        fields: { waterfall_id: 'w1', entry_point: 'quick_cam_button' },
+      }).status,
+    ).toBe(200);
+    expect(
+      postJson('/__fake__/log', {
+        step: 'image_process_success',
+        doc: 'd1',
+        fields: { waterfall_id: 'w1', waterfall_duration: 1.5 },
+      }).status,
+    ).toBe(200);
+    const log = api<LogRecord[]>('log');
+    expect(log.map((l) => [l.step, l.doc, l.fields.waterfall_id])).toEqual([
+      ['enter', 'd1', 'w1'],
+      ['image_process_success', 'd1', 'w1'],
+    ]);
+    const since = JSON.parse(text(get(`/__fake__/api/log?since=${log[0]?.seq}`))) as LogRecord[];
+    expect(since.map((l) => l.step)).toEqual(['image_process_success']);
+    expect(get('/__fake__/log').status).toBe(405);
+  });
+
+  it('parseLogInput refuses anything but a short step, a doc id and primitive fields', () => {
+    expect(parseLogInput({ step: 'enter', doc: 'd1', fields: { a: 1, b: 'x', c: null, d: true } })).toEqual({
+      step: 'enter',
+      doc: 'd1',
+      fields: { a: 1, b: 'x', c: null, d: true },
+    });
+    for (const bad of [
+      null,
+      { step: 'Enter', doc: 'd1' },
+      { step: 'enter', doc: 'bad doc' },
+      { step: 'enter', doc: 'd1', fields: { a: { nested: 1 } } },
+      { step: 'enter', doc: 'd1', fields: { a: 'x'.repeat(201) } },
+      { step: 'enter', doc: 'd1', fields: Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`f${i}`, i])) },
+    ]) {
+      expect(parseLogInput(bad)).toBeNull();
+    }
   });
 });
 
@@ -794,10 +1090,10 @@ describe('U16 fake core: composer views and the story session (AM37)', () => {
     expect(parseComposerView(null)).toBeNull();
   });
 
-  it('a story keeps whether + → Story started the session (the insert never does)', () => {
+  it('a story keeps whether + → Story started the session (a file set directly never does)', () => {
     const { share, api } = setup();
-    share(meta(true));
-    share({ ...meta(true), sessionStarted: false, sessionId: null });
+    share(meta(true), fakeJpeg(1022, 1816), '1');
+    share({ ...meta(true), sessionStarted: false, sessionId: null }, fakeJpeg(1022, 1816), '2');
     const stories = api<{ meta: FakeShareMeta }[]>('stories');
     expect(stories.map((s) => [s.meta.sessionStarted, s.meta.sessionId === null])).toEqual([
       [true, false],
@@ -864,6 +1160,10 @@ describe('U16 knobs: defaults and baseline', () => {
       fileEvent: 'drop',
       swFetchHandler: true,
       geometry: { model: 'fixed:1080x1920', insets: [44, 52], saveExposed: false },
+      menuOrder: 'storyPost',
+      menuItemCount: 3,
+      shareFooter: 'v2',
+      configureContentType: 'application/json; charset=utf-8',
     };
     expect(deriveKnobs(b)).toEqual({
       ...DEFAULT_KNOBS,
@@ -876,6 +1176,10 @@ describe('U16 knobs: defaults and baseline', () => {
       geometry: 'fixed:1080x1920',
       insets: [44, 52],
       save: 'off',
+      menuOrder: 'storyPost',
+      menuItems: '3',
+      shareControl: 'v2',
+      fb: 'linked',
     });
     expect(deriveKnobs({ ...BASELINE, accept: ['image/png', 'image/jpeg', 'image/avif'] }).accept).toBe('default');
   });
@@ -933,8 +1237,54 @@ describe('U16 knobs: defaults and baseline', () => {
       { swControlledAfterHardReload: true, swClaimsOnLoad: false },
     ],
     ['a breakpoint other than the contract’s 767 CSS px', { msiteMaxCssWidth: 800 }],
+    ['a + menu of 4 items', { menuItemCount: 4 }],
+    ['a publish answer that is not JSON', { configureContentType: 'text/html' }],
   ] as Array<[string, Partial<Baseline>]>)('throws for %s, forcing the fake to be extended', (_name, patch) => {
     expect(() => deriveKnobs({ ...BASELINE, ...patch })).toThrow(/not modelled/);
+  });
+
+  it('IF11: the autopilot facts are unknown until L18–L20; the fake then models Post first, two items, v1, JSON', () => {
+    expect(BASELINE).toMatchObject({
+      menuOrder: 'unknown',
+      menuItemCount: 'unknown',
+      shareFooter: 'unknown',
+      configureContentType: 'unknown',
+    });
+    for (const fact of ['menuOrder', 'menuItemCount', 'shareFooter', 'configureContentType']) {
+      expect(BASELINE.provenance?.[fact], fact).toMatch(/L18|L20/);
+    }
+    expect(DEFAULT_KNOBS).toMatchObject({
+      menuOrder: 'postStory',
+      menuItems: '2',
+      shareControl: 'v1',
+      fb: 'none',
+      rupload: 'ok',
+      configure: 'ok',
+      tray: 'ok',
+      rtClear: 'on',
+      account: FAKE_ACCOUNT,
+    });
+    // A baseline without the autopilot fields (an older file) derives the same knobs.
+    const { menuOrder: _a, menuItemCount: _b, shareFooter: _c, configureContentType: _d, ...older } = BASELINE;
+    expect(deriveKnobs(older as Baseline)).toEqual(DEFAULT_KNOBS);
+  });
+
+  it('IF10: the account knob takes a handle, none, ambiguous or other:<handle>', () => {
+    expect(accountShape(FAKE_ACCOUNT)).toEqual({ kind: 'one', handle: FAKE_ACCOUNT });
+    expect(accountShape('other:someone.else')).toEqual({ kind: 'one', handle: 'someone.else' });
+    expect(accountShape('none')).toEqual({ kind: 'none' });
+    expect(accountShape('ambiguous')).toMatchObject({ kind: 'ambiguous', handles: [FAKE_ACCOUNT, expect.any(String)] });
+    for (const ok of ['someone_else', 'other:x.y', 'none', 'ambiguous'])
+      expect(parseKnobPatch({ account: ok }).ok, ok).toBe(true);
+    for (const bad of ['', 'explore', 'other:', 'a b', '.dot', 'x'.repeat(31)]) {
+      expect(parseKnobPatch({ account: bad }).ok, bad).toBe(false);
+    }
+    // menuItems also as a number (the dashboard sends strings).
+    expect(parseKnobPatch({ menuItems: 3 })).toEqual({ ok: true, patch: { menuItems: '3' } });
+    expect(parseKnobPatch({ menuDelayMs: '0', fbDelayMs: 1200 })).toEqual({
+      ok: true,
+      patch: { menuDelayMs: 0, fbDelayMs: 1200 },
+    });
   });
 
   it('parseKnobPatch accepts every documented value', () => {

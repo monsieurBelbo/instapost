@@ -1,7 +1,9 @@
 /**
- * Editor side of the hand-off port (strategy §3.5): `runtime.connect({name: 'handoff'})`.
- * Editor → background: handoff/start, handoff/cancel, handoff/outcome, handoff/enable-msite. Background → editor:
- * handoff/status, validated with the protocol guard before any listener sees it.
+ * Editor side of the hand-off port (strategy §3.5, ux.md IP1/IP2): `runtime.connect({name: 'handoff'})`.
+ * Editor → background: handoff/start, handoff/cancel (Stop), handoff/account-choice, handoff/manual
+ * (Finish by hand), handoff/mark, handoff/enable-msite (Resume), ui/open-instagram, ui/forget-account,
+ * ui/result-seen. Background → editor: handoff/status and handoff/lane, validated with the protocol guard
+ * before any listener sees them.
  *
  * The port drops whenever the background service worker restarts. While a hand-off is active
  * the client reconnects on its own (with backoff), so statuses keep flowing; the background is
@@ -18,6 +20,7 @@ import {
   type BackgroundToEditor,
   type EditorToBackground,
   HANDOFF_PORT,
+  type HandoffLaneMsg,
   type HandoffStatusMsg,
   isBackgroundToEditor,
 } from '../shared/protocol.ts';
@@ -33,23 +36,37 @@ export interface PortLike {
 export type ConnectFn = () => PortLike;
 
 export interface StartRequest {
-  /** null for mode 'probe' (no file). */
+  /** null for mode 'check' (no file). */
   exportId: ExportId | null;
   mode: HandoffMode;
-  rehearsal: boolean;
   screen: ScreenAvail;
   /** P6: the editor's detection (src/ui/browser-flavour.ts). */
   browser: BrowserFlavour;
+  /** K10/K11: queue behind the 60 s spacing. */
+  queue: boolean;
+  exportSample?: string;
+  exportSha256?: string;
+  docHash?: string;
 }
 
 export interface HandoffClient {
   start(req: StartRequest): void;
+  /** Stop (before Share). */
   cancel(): void;
-  outcome(handoffId: HandoffId, posted: boolean): void;
-  /** ENABLE (§11 AM25): asks the background to lift the kill-switch lock the editor showed. */
+  accountChoice(handoffId: HandoffId, proceed: boolean): void;
+  manual(handoffId: HandoffId): void;
+  mark(handoffId: HandoffId, posted: boolean): void;
+  /** Resume (§11 AM25): asks the background to lift the kill-switch lock the editor showed. */
   enableMsite(lockedUntil: number | null): void;
+  openInstagram(page: 'home' | 'story', handle?: string): void;
+  forgetAccount(): void;
+  /** AP-4: a check's "Use @account": the account that check read becomes the expected one. */
+  useAccount(handoffId: HandoffId): void;
+  resultSeen(handoffId: HandoffId): void;
   /** Subscribes to validated statuses (connects if needed). Returns the unsubscribe function. */
   onStatus(listener: (status: HandoffStatusMsg) => void): () => void;
+  /** Subscribes to the lane (connects if needed). */
+  onLane(listener: (lane: HandoffLaneMsg) => void): () => void;
   /** Port connected (true) or dropped (false). Returns the unsubscribe function. */
   onConnection(listener: (connected: boolean) => void): () => void;
   /** Disconnects for good: no reconnects, sends throw. */
@@ -81,6 +98,7 @@ export function createHandoffClient(opts: HandoffClientOptions = {}): HandoffCli
   const log = opts.log ?? ((msg: string, detail?: unknown) => console.warn(`[instapost] ${msg}`, detail ?? ''));
 
   const statusListeners = new Set<(s: HandoffStatusMsg) => void>();
+  const laneListeners = new Set<(s: HandoffLaneMsg) => void>();
   const connListeners = new Set<(c: boolean) => void>();
   let port: PortLike | null = null;
   let closed = false;
@@ -106,8 +124,12 @@ export function createHandoffClient(opts: HandoffClientOptions = {}): HandoffCli
       return;
     }
     const msg = raw as BackgroundToEditor;
-    active = msg.phase !== 'idle';
     delay = baseDelay;
+    if (msg.type === 'handoff/lane') {
+      for (const l of laneListeners) l(msg);
+      return;
+    }
+    active = msg.phase !== 'idle';
     for (const l of statusListeners) l(msg);
   };
 
@@ -164,24 +186,50 @@ export function createHandoffClient(opts: HandoffClientOptions = {}): HandoffCli
         type: 'handoff/start',
         exportId: req.exportId,
         mode: req.mode,
-        rehearsal: req.rehearsal,
         screen: req.screen,
         browser: req.browser,
+        queue: req.queue,
+        ...(req.exportSample ? { exportSample: req.exportSample } : {}),
+        ...(req.exportSha256 ? { exportSha256: req.exportSha256 } : {}),
+        ...(req.docHash ? { docHash: req.docHash } : {}),
       });
     },
     cancel() {
       send({ v: 1, type: 'handoff/cancel' });
     },
-    outcome(handoffId, posted) {
-      send({ v: 1, type: 'handoff/outcome', handoffId, posted });
+    accountChoice(handoffId, proceed) {
+      send({ v: 1, type: 'handoff/account-choice', handoffId, proceed });
+    },
+    manual(handoffId) {
+      send({ v: 1, type: 'handoff/manual', handoffId });
+    },
+    mark(handoffId, posted) {
+      send({ v: 1, type: 'handoff/mark', handoffId, posted });
     },
     enableMsite(lockedUntil) {
       send({ v: 1, type: 'handoff/enable-msite', lockedUntil });
+    },
+    openInstagram(page, handle) {
+      send({ v: 1, type: 'ui/open-instagram', page, ...(handle ? { handle } : {}) });
+    },
+    forgetAccount() {
+      send({ v: 1, type: 'ui/forget-account' });
+    },
+    useAccount(handoffId) {
+      send({ v: 1, type: 'ui/use-account', handoffId });
+    },
+    resultSeen(handoffId) {
+      send({ v: 1, type: 'ui/result-seen', handoffId });
     },
     onStatus(listener) {
       statusListeners.add(listener);
       if (!closed) ensurePort();
       return () => statusListeners.delete(listener);
+    },
+    onLane(listener) {
+      laneListeners.add(listener);
+      if (!closed) ensurePort();
+      return () => laneListeners.delete(listener);
     },
     onConnection(listener) {
       connListeners.add(listener);

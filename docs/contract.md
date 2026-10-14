@@ -2,12 +2,14 @@
 
 This file has two parts:
 
-1. **Contract C1–C9** (strategy §3.9): what instapost relies on in Instagram's mobile-web story composer, how each item is probed, the evidence for it, and when it was last verified. The code is `src/core/ig-contract/contract.ts` (`CONTRACT_VERSION = 1`).
+1. **Contract C1–C14** (strategy §3.9): what instapost relies on in Instagram's mobile-web story composer, how each item is probed, the evidence for it, and when it was last verified. The code is `src/core/ig-contract/contract.ts` (`CONTRACT_VERSION = 1`) for C1–C9, and the agent's locators (`src/agent/locators.ts`, `drive.ts`, `net.ts`) with `src/core/handoff/outcome.ts` and `src/core/ig-contract/account.ts` for C10–C14 (the autopilot, strategy §11 AM39–AM40).
 2. **Spike results** from strategy §8 (S3–S10): facts about the dev environment that several streams depend on.
 
 ---
 
-## Contract C1-C9
+## Contract C1-C14
+
+**Status, 2026-10-13 (autopilot, strategy §11 AM39–AM42).** The first real post worked (L17: Arc, secondary account, H0 with the portrait shim: the owner tapped + → Story, picked the file, tapped Share). Since AM39 instapost does those taps itself, so the contract gains C10–C14: the + entry and its menu, the armed story input, the Share control, the outcome endpoints and the account link. They are read from Instagram's saved, logged-out msite bundles and spiked against the fake (§ "Autopilot spike (2026-10-13)" below); none is verified live yet (L18–L22). C6 decides nothing any more (the compose watch reads Instagram's own canvas, C12) and C9 is diagnostic (the result comes from the publish answer, C13). Since AM39 the agent also taps +, Story and Share, through one audited helper; "no clicks" in the rules below now means no clicks but those three.
 
 **Status, 2026-10-12:** the first live hand-off ran (Arc 155, live build, new secondary account; § "First live run" below). It confirmed C1 and C2 live; C3, C4 and C5 failed there for reasons now understood (Arc ignored the window size; msite has no story input above 767 CSS px; `/create/story/` lands on `/` by design), and its facts, with those of a logged-out reading of Instagram's production code the same day (F2, F3), are in `src/core/ig-contract/baseline.json` with their `provenance`. L4 has not passed yet: `capturedAt` stays `pre-L4`. The fake's default knobs are derived from the baseline (U16) and have the production shape since strategy §11 AM35. A second run the same day (§ "Second live run" below) found that msite makes two different orientation checks, so C3 is split since AM37: **C3a** (the viewport, at + → Story) and **C3b** (the screen orientation, in the composer page), which a landscape monitor fails in any window; the portrait shim answers it.
 
@@ -25,10 +27,15 @@ This file has two parts:
 | C3b | The composer page reads a portrait screen orientation (AM37) | Yes (`SCREEN_LANDSCAPE` on the composer) | **live, 2026-10-12: failed** (`landscape-primary` on a landscape monitor, before the shim); fake, 2026-10-12 (with and without the shim) |
 | C4 | Story input | Yes | fake, 2026-10-12; live 2026-10-12: failed in the first run (no file input at 1512 CSS px, F3); in the second the H1 insert went into the header's input |
 | C5 | `/create/story/` reachable directly (a fact; `homeOnly` is the norm, AM32) | Only the H0 text | fake, 2026-10-12; live 2026-10-12: `homeOnly` |
-| C6 | Composer ready | Yes | fake, 2026-10-12 |
-| C7 | Error toasts | No (diagnostics only) | not probed |
-| C8 | Canvas geometry | The owner's (OD4); the code only records it | fake, 2026-10-12 |
-| C9 | Composer left | Yes | fake, 2026-10-12 |
+| C6 | Composer ready | No since AM39 (C12 decides) | fake, 2026-10-12 |
+| C7 | Error toasts | No (diagnostics only; since AM40 a new toast after Share, and whether it has an action button, is recorded as corroboration) | not probed |
+| C8 | Canvas geometry | The owner's (OD4); the code only records it | fake, 2026-10-13 (E13 through the autopilot) |
+| C9 | Composer left | No since AM40 (`wentHome`, corroboration) | fake, 2026-10-13 |
+| C10 | The + entry and its menu (AM39) | Yes (`STORY_ENTRY_MISSING`) | fake, 2026-10-13; code reading 2026-10-13; live: L18 |
+| C11 | Story armed: the story input receives Story's click (AM39) | Yes (`LANDSCAPE` "story session refused", `STORY_ENTRY_MISSING`) | fake, 2026-10-13; live: L18 |
+| C12 | The Share control (AM39) | Yes (`SHARE_MISSING`, `SCREEN_LANDSCAPE`, `INJECTION_IGNORED`) | fake, 2026-10-13; live: L18 (variant, Facebook badge) |
+| C13 | The outcome endpoints (AM40) | Yes (Posted, Not posted, Couldn't confirm) | fake and spike, 2026-10-13; live: L19, L20 |
+| C14 | The account link (AM39) | Yes (the account prompt) | fake, 2026-10-13; live: L18, L22 |
 
 ### C1: `is_mobile`
 
@@ -72,8 +79,8 @@ Stored as `C3` on the preflight (the id predates the split).
 
 ### C4: story input
 
-- **Probe (agent, `findStoryInput`).** An `input[type=file]` whose `accept` list, split on commas and trimmed, set-equals `{image/avif, image/jpeg, image/png}`. An input whose list names only image types is a candidate; the post input also accepts video, so it never counts.
-- **Decision.** No candidate gives `INPUT_MISSING`, and a candidate with another list gives `ACCEPT_DRIFT`. Both degrade to H0 in the same window; nothing is inserted.
+- **Probe (agent, `findStoryInput`).** An `input[type=file]` whose `accept` list, split on commas and trimmed, set-equals `{image/avif, image/jpeg, image/png}`. An input whose list names only image types is a candidate; the post input never counts: its list is `image/jpeg` in the 2026-10-13 bundles (`PolarisMobileCreationNavItem`; earlier readings had video types), which is not the story set (`POST_ACCEPT` in contract.ts).
+- **Decision.** No candidate gives `INPUT_MISSING`, and a candidate with another list gives `ACCEPT_DRIFT`. ~~Both degrade to H0 in the same window~~ Since AM39 nothing is tapped or inserted; a post keeps the window 60 s for Finish by hand, a test closes it. Since AM39 the story input is also how C10 finds the + entry.
 - **Evidence.** Research §5.5 and §2 fn 5: a hidden `<input type=file accept="image/avif,image/jpeg,image/png">`. Spike S7: inserting through `DataTransfer` plus a synthetic `change` fires React 19's `onChange` (AM3).
 - **Where (F3, 2026-10-12, AM32).** The story input is the hidden `<input type=file accept="image/avif,image/jpeg,image/png">` of PolarisImageFileForm beside the header's + / Story entry, on `/` too, present whenever that entry is rendered: only at ≤ 767 CSS px. It may mount after hydration, so the first probe that reaches C4 and finds none waits once, up to 6 s, for the agent's `input-appeared`, then probes again: in a post (H1 or H0) and in probe mode alike (AM36), so C4 is never read from a snapshot taken before hydration; a session that ends during the wait records C4 `unknown`. Inserting into it (or picking a file) starts msite's story session and SPA-navigates to `/create/story/` with the composer.
 - **Recorded as.** `unknown` when the decision stopped before C4 (guard, login, desktop site, interception, layout rows), with the panel's "(not checked: stopped before this step)"; the panel's Story input row is `storyInputText()` (AM33).
@@ -90,6 +97,8 @@ Stored as `C3` on the preflight (the id predates the split).
 - **Live:** **`homeOnly` on 2026-10-12** (as F3 says). L4.
 
 ### C6: composer ready
+
+**Since AM39 C6 decides nothing.** The autopilot's compose watch (C12) reads Instagram's own composer canvas (`canvas._aa3c`, drawn = a backing store), so a small fixed canvas (`cssFixed:360x640`, under half of the default window) no longer stalls the run (E13 runs it in the default window). The text below is the H0/H1 era's.
 
 - **Probe (agent watch, `isComposerReady`, every 250 ms).** A visible `<canvas>` with a backing size greater than 0 whose CSS area inside the viewport is at least 50% of the viewport (`C6_MIN_VIEWPORT_AREA`).
 - **Decision.** It moves H1 and H0 to `awaitingShare`. In H1, no C6 within 10 s of the insert gives `INJECTION_IGNORED`, and the session degrades to H0. AM28: the agent tells the two cases apart: `inject-unconfirmed` when the insert was dispatched (the photo may be in the composer), `inject-ignored` when it could not be made. After `inject-unconfirmed`, leaving the composer is C9 with no pre-answer (see C9). AM24: only a canvas that was not already ready when the watch first started in that document counts, H1 reports it only after the insert, and the background accepts it in `injecting` only once the file was served, so a pre-existing canvas (a camera preview) never passes for an inserted photo.
@@ -114,11 +123,55 @@ Stored as `C3` on the preflight (the id predates the split).
 
 ### C9: composer left
 
+**Since AM40 C9 is diagnostic.** Going home after Share is recorded on the evidence (`ui.wentHomeAt`) and only corroborates; Posted needs C13's publish answer (Instagram goes home on any 2xx, so going home adds no protection). A Posted run closes 2 s after Instagram went home, else 8 s after the confirmation. The text below is the H0/H1 era's ("Posted?" is gone).
+
 - **Probe.** Background: the tab's URL leaves `/create/story` after having been on it (`urls.ts`, `composer-left`). Agent: the path leaves `/create/story`, or the C6 canvas has been gone for more than 2 s (`C9_CANVAS_GONE_MS`).
 - **Decision.** Once the composer is engaged (AM18: C6 seen, the H1 file served, or, AM28, an insert dispatched that C6 never confirmed), the session finishes. The editor asks "Posted?", pre-answered "posted" when C9 followed `awaitingShare`; the record is written. The window closes 3 s later, except after Share in a post with rehearsal off, where it stays open until the owner answers (AM19), so an upload that is still running in the page is never cut off. Only `/` counts as "composer left" (AM17); any other www page ends it with `UNEXPECTED_PAGE`, naming the page (AM28). With no Share detected but one possible (an unknown page after Share, or C9 after an unconfirmed insert), "Posted?" has no pre-answer (`postedUnknown`), and after an unconfirmed insert the popup is held open whatever rehearsal says (AM28). Engagement belongs to one document: once a later load is known to be a new document, a Share or insert made in the old one no longer counts (AM28). The agent's watch keeps running after a `composer-left`.
 - **Evidence.** None from research yet: where the real composer goes after Share is (unverified). The URL rule and the canvas rule are both structural, so either a navigation or the composer unmounting counts. The fake navigates in-page to `/`.
 - **Verified on the fake by:** U9, U14; E5, E6, E8, E9, E11 and E12 f–j, l, m (Share, then the in-page navigation to `/`, then `posted-confirmed`); E12 r (`share=background`: an upload that runs after the composer went home lands only because the popup is held open, AM19); E12 v (`geometry=cssFixed:360x640`: C6 never confirms the insert, Share from H0 is C9 with no pre-answer, held open, AM28).
 - **Live:** L8 (the first real post): whether the composer goes to `/` after Share, and whether the upload finishes before or after that.
+
+### C10: the + entry and its menu (AM39)
+
+- **What Instagram renders (code reading 2026-10-13, `PolarisMobileCreationNavItem`).** In msite's mobile header (≤ 767 CSS px): a box holding the popover trigger, a link `a[href="#"][role=link][tabindex=0]._a6hd` with an svg (its `aria-label` is Instagram's "Home" string, by a bug of theirs, so it is never used), and the next box holding two `form[role=presentation][method=POST][enctype=multipart/form-data]`: the story form (`accept="image/avif,image/jpeg,image/png"`, C4) and the post form (`accept="image/jpeg"`). A tap of + lazily loads the menu popover (`PolarisMobileCreationMenuPopover`, not readable logged out) with the two actions it is given: Story (`handleCameraIconClick`) and Post (`handlePostIconClick`).
+- **Probe (agent, `findEntry`, `pressables`, `newDialogs`, `glyphHash`).** From the story input up to 4 ancestors: the previous sibling box holding exactly one pressable (`button, [role=button], a[href], [role=link], [role=menuitem]`) that contains an svg. After the tap of +: a new visible `[role=dialog]` within 6 s (one re-tap of + if none appeared), with exactly two outermost pressables. The Story item is the stored fingerprint's index when the count and the glyph hash (fnv1a over the svg's viewBox and shapes) match, else item 0 by trial; a wrong item only clicks the post input (no chooser without activation), then + again and the other item, once.
+- **Decision.** No entry, no menu, a third item (never tapped), neither item arming the story input, or a tap the helper refused: `STORY_ENTRY_MISSING` with that detail (`no + entry beside the story input`, `no menu after +`, `menu 3 items`, `neither menu item started a story`, `tap refused`). The tap helper taps + and Story only on `/`. The fingerprint is stored (`menuFingerprint`) when an armed run learned it.
+- **Verified on the fake by:** U29, B11; E29 (both orders), E30, E33 (`trusted=require`, `menuItems=3`, the trial and the fingerprint), E12 i (`route=direct`: + is not tapped off home).
+- **Live:** L18 (count, order, Story index, glyph hash, tag and role of the items), L21 (Spanish).
+
+### C11: Story armed (AM39)
+
+- **What Instagram does.** The Story item runs `handleStoryCreationClick`: `onStartStoryCreation(entryPoint).then(() => selectFile())`. `startStoryCreationSession` checks `innerHeight < innerWidth` (C3a: a "Rotate your device" toast and nothing else) and otherwise dispatches `STORY_CREATION_SESSION_STARTED` with a uuid `sessionId`; `selectFile` clears the story input and calls its `click()`. Without user activation Chrome refuses the chooser (a console warning only). `onFileChange` → `storyCreationSelectMedia` → `readImageFile` → `STORY_CREATION_IMAGE_PROCESSED` → `browserHistory.push('/create/story/')`.
+- **Probe (agent, `observeClick`).** One capture-phase `click` listener on the story input (and one on the post input) while Story is tapped: armed when the story input receives the click within 3 s. Then the insert (AM3) into that input only.
+- **Decision.** No click on either input in a landscape viewport: `LANDSCAPE` ("story session refused"); otherwise `STORY_ENTRY_MISSING` (`story input not armed`). Within about 5 s of a real click in the window the same path would open the OS chooser, so every tap first waits for `navigator.userActivation.isActive` to be false (6 s, else `WINDOW_IN_USE`).
+- **Evidence.** Code reading 2026-10-13; the autopilot spike (the chooser was refused without activation; the story session started with a uuid; its telemetry had an `enter` event and a non-empty `waterfall_id`, where the H1 insert of AM37 had none).
+- **Verified on the fake by:** B11, B14; E29 (`sessionStarted`, uuid, `waterfall_id`), E28 (d) (C3a: `LANDSCAPE`), E34 (no file chooser after the owner's click).
+- **Live:** L18 (no chooser opened; armed time).
+
+### C12: the Share control (AM39)
+
+- **What Instagram renders (`PolarisStoryImageCreationContainer`, `PolarisStoryCreationShareFooter`, `…V2`).** `canvas._aa3c` (0×0 until the photo is drawn), `header._aa3d` (Close `._aa3e`; `._aa3f` with Save `._aa3g`, text `._aa3i`, draw `._aa3j`), the landscape snackbar `._aa3b` instead of header and footer (C3b), and the Share footer: ShareFooter (`footer` → one `button`) while the account has no Facebook destination, ShareFooterV2 (`footer` → one `[role=button]` with the avatar, and a badge svg when Instagram cross-posts to Facebook automatically) once its GraphQL answer says so, which can switch v1 → v2 after the composer appeared. A trash footer (`footer._aa3k`) shows only while a sticker moves.
+- **Probe (agent, `composerState`, `watchCompose`).** On `/create/story`: the named canvas (else the largest visible one) with a backing store, the snackbar, exactly one visible footer (not `_aa3k`) with pressables, its controls (`button` or `[role=button]`), the variant and the badge; the footer quiet for 1.5 s (cap 8 s from the first footer; deadline 20 s). Each class has a structural fallback (E12 m, `drift=renamed`).
+- **Decision.** Not drawn: `INJECTION_IGNORED` ("composer not drawn"); the snackbar: `SCREEN_LANDSCAPE`; not exactly one control: `SHARE_MISSING` (nothing pressed; Share it myself). Share is tapped once, after re-checking all of it and the page's activation and visibility.
+- **Verified on the fake by:** U29, B13; E29, E35 (`fb=auto` after a delay: v2, the badge, `share_to_facebook=true`; `shareControl=missing|two`), E12 m.
+- **Live:** L18 (variant and badge), L20.
+
+### C13: the outcome endpoints (AM40)
+
+- **What Instagram sends after Share (`PolarisStoryCreationActions.uploadStory`).** `UPLOAD_REQUESTED`; the photo upload `POST https://i.instagram.com/rupload_igphoto/fb_uploader_<id>` (XHR, credentials, no timeout, no retry); only after a 2xx, the publish `POST /api/v1/media/configure_to_story/` on www (XHR, form body, 60 s timeout), whose any 2xx Instagram's client treats as success. Success: a toast ("…added to …", or "…and Facebook"), the tray refresh (`POST /graphql/query`), `pushState('/')`. Failure: the "Upload failed." toast with Retry, no navigation. Never settles: `feedback_required` (a dialog), 401 `require_login` (to the login page), a `checkpoint_url` (a full navigation; the kill switch acts).
+- **Probe (agent, `net.ts`).** A `PerformanceObserver({type:'resource', buffered:true})` from the agent's start (Instagram clears its own resource-timing buffer, so polling would miss entries): every XHR/fetch entry that ends after the Share click, as host (`www`, `i`, `other`), pathname without the query (≤ 200 characters), `responseStatus` (0 for blocked, failed, opaque or CORS-refused), `contentType` (≤ 64), redirected, start and end relative to the click, in 250 ms batches with a heartbeat.
+- **Decision (background, `outcome.ts` `decide()`, O1–O10, strategy AM40).** Posted only on a publish 2xx with a JSON content type, not redirected.
+- **Evidence.** The saved bundles; the autopilot spike: `responseStatus` and `contentType` readable from the isolated world in CfT 155 and Chromium 156, cross-origin when CORS passes; a dNR block reads as status 0; a credentialed CORS preflight needs the requested headers echoed (`*` fails).
+- **Verified on the fake by:** U18, B12; E29, E31, E32 (400, 500, reset, html200, redirectLogin, rupload 500 and cors, `tray=throw`), E37 (`rtClear=on` during a slow upload), E38, E11 (`DUPLICATE_UPLOAD`).
+- **Live:** L19 (the blocked upload, status 0, the failure toast), L20 (the publish answer's status and type; whether the upload's 200 is readable through CORS).
+
+### C14: the account link (AM39)
+
+- **What Instagram renders (`PolarisProfileNavItem`).** One navigation link to `/<username>/` holding the avatar.
+- **Probe (agent, `readAccount`).** Links to `/<handle>/` (relative or on www) holding an img or svg, outside `article` (feed authors), those inside a navigation landmark preferred; one distinct handle is the account, none or several is unreadable. Handles match `^[A-Za-z0-9._]{1,30}$` and reserved first segments (`explore`, `accounts`, `stories`, …) are rejected. The first probe waits once (P5) for a link that mounts after hydration.
+- **Decision.** Compared with `expectedAccount` before any tap: a mismatch, an unreadable account or no expected account asks (§4.8 of `docs/ux.md`), unless "Only post as" is off; a Test run or a check learns it.
+- **Verified on the fake by:** U25, U29; E4 (learned by a check), E30 (learned by the setup test), E36 (mismatch, unreadable, timeout), E7, E15, E16, E19 (the prompt holds a run on home).
+- **Live:** L18 (exactly one candidate), L22 (another account logged in).
 
 ### Also probed on every hand-off
 
@@ -314,7 +367,7 @@ These are not C items, but the same probe reports them:
 - The `-1` in the rehearsal rules is essential: without it, uploads made by Instagram's SW escape.
 - E8 (mock) may assert `onRuleMatchedDebug`.
 - E9 (live) must assert through the fake's `writes()` log and `requestfailed` `net::ERR_BLOCKED_BY_CLIENT`.
-- The fake's `share=real-paths` canary must use subresource requests, never navigations, because `main_frame` is intentionally excluded.
+- The fake's `share=real-paths` canary must use subresource requests, never navigations, because `main_frame` is intentionally excluded. (Since AM42 the canary is the fake's own Share: Instagram-shaped XHRs, which are subresources.)
 
 ### S7: DataTransfer injection into React 19 (A5 on the fake)
 
@@ -500,3 +553,26 @@ The owner, a test account, the live build with AM29–AM36, in Arc on the MacBoo
 - **What happened.** On home + → Story opened the file chooser (C3a passed). After a photo was picked, `/create/story/` showed a bottom snackbar "Rotate your device to add to your story." instead of the share footer. The same after the H1 insert into the header input (H1) and after the owner's own + → Story → pick (H0).
 - **Why** (Instagram's public bundles, read the same day). Two different checks (research §5.1, §5.2): the session start at + → Story reads the viewport (`innerHeight < innerWidth`), but the composer page's `isLandscape` reads `screen.orientation.type` first, at mount and on `resize`. A landscape monitor is therefore "landscape" to the composer in any window. The H1 insert also bypasses the session start (`onFileChange` → `storyCreationSelectMedia`), so its `sessionId` stays null.
 - **Consequences** (strategy §11 AM37). C3 split into C3a and C3b; the portrait shim in the composer tab; new error `SCREEN_LANDSCAPE`; assisted insert stays off by default in the live build; `baseline.json` `composerLandscapeCheck: "screen"` with its provenance; the fake models both checks (knob `landscapeCheck`); live checklist L16, L17.
+
+## First real post (Arc, 2026-10-13)
+
+L17 passed on the secondary account: the live build with the portrait shim, H0. The composer window was fitted before Instagram loaded; on home the owner tapped + → Story, picked the PNG from `Downloads/instapost/`, saw the composer with its Share footer (no snackbar: C3b passed with the shim), tapped Share, and answered "Posted?" in the panel. The owner's decision the same day (strategy §11 AM39): no interactive steps after Post story. C10–C14 above come from that decision.
+
+## Autopilot spike (2026-10-13)
+
+Read from Instagram's saved, logged-out msite bundles (`PolarisMobileCreationNavItem.react`, `PolarisStoryCreationFileForm.react`, `PolarisImageFileForm.react`, `PolarisStoryCreationActions`, `usePolarisDisplayProperties`, `PolarisToastActions`, `PolarisStoryCreationPage.react`, `PolarisStoryImageCreationContainer`, `PolarisStoryCreationShareFooter.react` and `…V2`) and spiked in sealed CfT 155 and Chromium 156 against local pages. Nothing here touched real Instagram.
+
+- **The only path that starts Instagram's story session** is + → Story: `handleStoryCreationClick` is `startStoryCreationSession`'s only caller and is reached only from the lazy + menu's Story item. It checks the viewport (`innerHeight < innerWidth` → the rotate toast), dispatches `STORY_CREATION_SESSION_STARTED` with a uuid `sessionId`, then `selectFile()` clears the story input and calls its `click()`. A file set on the input without it (AM37's H1) runs `onFileChange` → `storyCreationSelectMedia` → `readImageFile` → `STORY_CREATION_IMAGE_PROCESSED` → `browserHistory.push('/create/story/')` with `sessionId` null: empty `waterfall_id` and a duration of about 1.76×10⁹ s in the telemetry. With + → Story first, the session is consistent.
+- **The menu's props** are exactly two actions (Story, Post); the popover module itself was not readable logged out (C10, L18).
+- **No user activation, no chooser.** The Story item's `input.click()` without user activation opens no chooser (a console warning); a capture listener sees the click, so the session is armed and the file can be set. Within about 5 s of a real click in that window the same click opens the OS chooser: hence the activation guard (R22).
+- **Every handler on the path is a React `onClick`**, and no module in the saved bundles reads `isTrusted` or `userActivation`: `element.click()` from the isolated world drives +, Story and Share.
+- **Share has no in-flight guard** (`uploadStory`): a second click uploads and publishes again. Hence Share once (IR11) and the fake's `DOUBLE_SHARE`.
+- **Outcome evidence.** `PerformanceResourceTiming.responseStatus` and `contentType` are readable from the isolated world for the page's XHRs, cross-origin too when CORS passes; a request blocked by dNR reads as status 0; Instagram's client calls `performance.clearResourceTimings()`, so only an observer created early (`buffered: true`) sees every entry. A credentialed cross-origin preflight must be answered with the requested headers echoed (`Access-Control-Allow-Headers: *` does not cover credentialed requests).
+- **The Share footer** is ShareFooter (a `button`) while the account has no Facebook destination, else ShareFooterV2 (a `[role=button]` with the avatar, plus a badge when cross-posting is automatic), and can switch after a GraphQL answer: hence the 1.5 s settle (C12).
+
+### Observed in the sealed browser while rewriting the E2E suite (2026-10-13)
+
+- **Chrome resends a POST on a reset reused connection.** With the fake's `configure=reset` (the server destroys the socket after reading the request), Chromium sent the same publish request four times on fresh connections before giving up; the page's XHR failed once and its resource timing showed one entry. So a publish whose connection resets before any answer byte may reach Instagram more than once without the page or instapost seeing it. The fake now answers a repeated upload id with the same story (one story per upload id); whether Instagram's `configure_to_story` is idempotent per `upload_id` is unverified (strategy R19).
+- **Playwright's `page.evaluate` and locator actions give the page user activation** (`Runtime.callFunctionOn` with `userGesture: true`), which the autopilot then waits out (R22). Specs read the Instagram window mid-run through CDP `Runtime.evaluate` without a gesture.
+- **Headless Chromium keeps a minimised or covered popup's page `visible`**, so the "hidden before a tap" case (E41) cannot be produced there; it is a reducer test (U19) and a live check (L23).
+- **Chromium refuses window bounds less than half on screen** ("Bounds must be at least 50% within visible screen space"). With the window docked at the right edge, a test that forces a wider window must also move it left.

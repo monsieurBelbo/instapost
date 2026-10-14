@@ -1,31 +1,33 @@
 /** @jsxImportSource react */
 /**
- * The msite story composer (strategy §6.1, §7.6), mountable on its own (B6).
+ * The msite story composer (strategy §6.1, §7.6; ux.md IF4–IF6), mountable on its own (B6).
  *
- * - In the msite shell (AM35), the story session starts in the shell's header: a file picked (or
- *   inserted) in its hidden story input passes the checks below there and arrives as `sessionFile`,
- *   after the shell's SPA navigation to /create/story/. Standalone (B6), the composer renders its own
- *   hidden story input (`accept` per knob) when `inputMounted`.
- * - Files are read from `change` (React onChange; a synthetic `change` fires it, AM3) or, with
- *   `listen=drop`, only from a drop. `trusted=require` ignores events with isTrusted=false. A file
- *   event never checks the orientation (Instagram's onFileChange goes straight to the media).
- * - The landscape gate (AM37, client/orientation.ts): once a photo is in play (the story session's
- *   file, or a file accepted here), the composer page reads its gate at that moment and on every
- *   `resize`: `screen.orientation.type` (knob `landscapeCheck=screen`, production) or the viewport.
- *   Landscape: the rotate snackbar, and no header (Close, Save) and no Share footer; the canvas still
- *   draws. Each verdict is reported to /__fake__/composer-view with whether + → Story started the
- *   story session (`sessionId`), so specs can read what the page showed after the popup closed.
- * - Photo-only toast as research §1 item 2 describes.
- * - Ready (C6) = the canvas is mounted and drawn, `slowMs` after the file was accepted. The
- *   source is cover-cropped to the canvas aspect and drawn centred; the geometry ground truth
- *   goes in `document.documentElement.dataset.fakeGeometry`.
- * - Share POSTs the canvas JPEG (q0.92) to /__fake__/stories with x-fake-meta, including the
- *   click's isTrusted; `share=real-paths` then also fires no-cors subresource POSTs to
- *   real-shaped write paths (AM6). `share=background` goes home first and uploads 4.5 s later
- *   (AM19): the story is recorded only if the window is still open by then.
- * - Once ready: `offhost=afterReady` leaves Instagram, `challenge=afterReady…` goes to /challenge/
- *   (full navigation or pushState), `reload=afterReady` reloads the document (AM2).
- * - Close and Save report their click's isTrusted (FID-2).
+ * - **DOM** (PolarisStoryImageCreationContainer, C12): `canvas._aa3c` (0×0 until the photo is drawn), the
+ *   header `header._aa3d` (Close `._aa3e`; `._aa3f` with Save `._aa3g`, text `._aa3i`, draw `._aa3j` and the AI
+ *   label), the landscape snackbar `._aa3b` instead of header and footer, and the Share footer: ShareFooter
+ *   (`footer` → one `button`) or ShareFooterV2 (`footer` → one `[role=button]` with the avatar and, for
+ *   automatic Facebook crossposting, a badge svg). Knobs: `shareControl` (v1, v2, missing, two) and `fb`
+ *   (none; linked or auto switch v1 → v2 after `fbDelayMs`, as Instagram does after a GraphQL answer).
+ *   Instagram renders its trash footer (`footer._aa3k`) only while a sticker moves, so the fake never does.
+ * - **Files.** In the msite shell the story session starts in the shell's header (+ → Story, the story
+ *   input) and the file arrives here as `sessionFile` after the shell's SPA navigation to /create/story/.
+ *   Standalone (B6) the composer renders its own hidden story input when `inputMounted`, reading `change`
+ *   (or, with `listen=drop`, only a drop); `trusted=require` ignores untrusted events.
+ * - **The landscape gate** (AM37, client/orientation.ts): read once a photo is in play and on every
+ *   `resize`; landscape hides the header and the Share footer and shows the snackbar. Each verdict goes to
+ *   /__fake__/composer-view.
+ * - **Ready** = the canvas is drawn, `slowMs` after the file was accepted; the geometry ground truth goes
+ *   in `document.documentElement.dataset.fakeGeometry`. Then `offhost=afterReady`, `challenge=afterReady…`,
+ *   `reload=afterReady` and `sw=claimLate` act.
+ * - **Share** (IF5, client/upload.ts): no in-flight guard, as on Instagram: every click uploads again, and
+ *   a second click in one session is reported as DOUBLE_SHARE. The JPEG → the progress modal
+ *   (`[role=dialog] [role=progressbar]`) → the upload → the publish request. Success: the toast ("…added to
+ *   your story", or "…and Facebook"), the tray refresh, home (`tray=throw`: no navigation, the modal
+ *   stays). Failure: the modal goes and the "Upload failed." toast offers Retry (a new upload). A
+ *   `checkpoint_url` navigates to it, `require_login` to the login page, `feedback_required` shows a dialog
+ *   that never settles. The telemetry (`compose_stage_attempt`, `compose_finalize_attempt`, `compose`,
+ *   `compose_failure`) carries the session's waterfall_id.
+ * - Every control reports its click's isTrusted (IF9).
  */
 import {
   type ChangeEvent,
@@ -40,16 +42,14 @@ import {
 } from 'react';
 import { type Knobs, STORY_ACCEPT_LISTS } from '../knobs.ts';
 import {
-  BACKGROUND_UPLOAD_DELAY_MS,
   CHALLENGE_DELAY_MS,
-  FAKE_META_HEADER,
   FAKE_PATHS,
+  type FakeControl,
   type FakeGeometry,
   type FakeShareMeta,
   OFFHOST_URL,
-  realWriteTargets,
 } from '../protocol.ts';
-import { reportControl } from './control.ts';
+import { logStep, reportControl } from './control.ts';
 import { computeGeometry, coverCrop } from './geometry.ts';
 import type { Strings } from './i18n.ts';
 import {
@@ -59,9 +59,11 @@ import {
   sameGate,
   screenOrientationType,
 } from './orientation.ts';
+import { clearTimings } from './rt-clear.ts';
 import { useCx } from './styles.ts';
 import { CLAIM_LATE_DELAY_MS, registerClaimLate } from './sw.ts';
-import { Snackbar, Toast, useToast } from './ui.tsx';
+import { AVATAR_SRC, GLYPH, Glyph, Snackbar, useToasts } from './ui.tsx';
+import { refreshTray, uploadStory } from './upload.ts';
 
 export interface StoryComposerProps {
   knobs: Knobs;
@@ -71,21 +73,19 @@ export interface StoryComposerProps {
   /** The file that started this story session in the shell's header input (already checked there). */
   sessionFile?: File | null;
   /**
-   * AM37: the story session id + → Story issued before that file was picked; null when the file came
-   * without the tap (H1's insert), as Instagram's sessionId then stays null.
+   * AM37: the story session id + → Story issued before that file was picked (also the telemetry's
+   * waterfall_id); null when the file came without the tap, as Instagram's sessionId then stays null.
    */
   sessionId?: string | null;
-  /** After a recorded Share, or on Close. The msite shell SPA-navigates to `/`. */
+  /** Date.now() at the session start (the telemetry's waterfall_duration); null without a session. */
+  sessionStart?: number | null;
+  /** After a published story (home), or on Close. The msite shell SPA-navigates to `/`. */
   onExit?: (reason: 'shared' | 'closed') => void;
-  /** Where Share posts (default /__fake__/stories). */
-  shareUrl?: string;
+  /** The Share flow settled: published (before going home) or failed (the toast is up). */
+  onShareSettled?: (kind: 'published' | 'failed') => void;
 }
 
-type Phase =
-  | { kind: 'idle' }
-  | { kind: 'loading' }
-  | { kind: 'ready'; bitmap: ImageBitmap }
-  | { kind: 'sharing'; bitmap: ImageBitmap };
+type Phase = { kind: 'idle' } | { kind: 'loading' } | { kind: 'ready'; bitmap: ImageBitmap };
 
 /** Last input outcome, for debugging only (`data-fake-input` on <html>). */
 type InputOutcome = 'accepted' | 'ignored-listen' | 'ignored-untrusted' | 'rejected-type';
@@ -157,33 +157,51 @@ function useLandscapeGate(active: boolean, check: Knobs['landscapeCheck']): Land
   return gate;
 }
 
-/** Instagram's finalize step would follow the upload; both are subresource POSTs, never navigations. */
-async function fireRealPaths(jpeg: Blob): Promise<void> {
-  const uploadId = String(Date.now());
-  const target = realWriteTargets(uploadId);
-  const attempt = (url: string, body: BodyInit) =>
-    fetch(url, { method: 'POST', mode: 'no-cors', credentials: 'include', body }).catch(() => undefined);
-  await attempt(target.rupload, await jpeg.arrayBuffer());
-  await attempt(target.configure, new URLSearchParams({ upload_id: uploadId, configure_mode: '1', caption: '' }));
+/** C12: the Share control Instagram renders now (v1 until the Facebook config arrives, then v2). */
+function useShareVariant(active: boolean, knobs: Knobs): 'v1' | 'v2' {
+  const start = knobs.shareControl === 'v2' ? 'v2' : 'v1';
+  const [variant, setVariant] = useState<'v1' | 'v2'>(start);
+  useEffect(() => {
+    setVariant(start);
+    if (!active || start === 'v2' || knobs.fb === 'none') return;
+    const id = window.setTimeout(() => setVariant('v2'), knobs.fbDelayMs);
+    return () => window.clearTimeout(id);
+  }, [active, start, knobs.fb, knobs.fbDelayMs]);
+  return variant;
 }
 
 export function StoryComposer(props: StoryComposerProps) {
-  const { knobs, t, inputMounted, sessionFile, onExit } = props;
+  const { knobs, t, inputMounted, sessionFile, onExit, onShareSettled } = props;
   const sessionId = props.sessionId ?? null;
-  const shareUrl = props.shareUrl ?? FAKE_PATHS.stories;
+  const sessionStart = props.sessionStart ?? null;
   const c = useCx();
+  const toasts = useToasts();
   const vp = useViewport();
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
-  const [toast, showToast] = useToast();
+  const [uploading, setUploading] = useState(false);
+  const [feedback, setFeedback] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const truthRef = useRef<FakeGeometry | null>(null);
   const mounted = useRef(true);
+  const shares = useRef(0);
 
-  const bitmap = phase.kind === 'ready' || phase.kind === 'sharing' ? phase.bitmap : null;
+  const bitmap = phase.kind === 'ready' ? phase.bitmap : null;
   // AM37: the gate applies once a photo is in play (the session's file, or one accepted here).
-  const gate = useLandscapeGate(Boolean(sessionFile) || phase.kind !== 'idle', knobs.landscapeCheck);
+  const inPlay = Boolean(sessionFile) || phase.kind !== 'idle';
+  const gate = useLandscapeGate(inPlay, knobs.landscapeCheck);
   const landscape = gate?.landscape === true;
+  const variant = useShareVariant(bitmap !== null, knobs);
+  const fbBadge = variant === 'v2' && knobs.fb === 'auto';
+
+  const telemetry = useCallback(
+    (step: string) =>
+      logStep(step, {
+        waterfall_id: sessionId ?? '',
+        waterfall_duration: (Date.now() - (sessionStart ?? 0)) / 1000,
+      }),
+    [sessionId, sessionStart],
+  );
 
   // Every verdict (on mount with the photo, then on each flip) is recorded, before the page can go away.
   useLayoutEffect(() => {
@@ -218,15 +236,16 @@ export function StoryComposer(props: StoryComposerProps) {
       try {
         decoded = await createImageBitmap(file, { imageOrientation: 'from-image' });
       } catch {
-        showToast(t.toastDecodeFailed);
+        toasts.show({ text: t.toastDecodeFailed });
         setPhase({ kind: 'idle' });
         return;
       }
+      if (knobs.rtClear === 'on') clearTimings();
       if (knobs.slowMs > 0) await delay(knobs.slowMs);
       if (!mounted.current) return decoded.close();
       setPhase({ kind: 'ready', bitmap: decoded });
     },
-    [knobs.slowMs, showToast, t],
+    [knobs.slowMs, knobs.rtClear, toasts, t],
   );
 
   // The shell's header input started the story session with this file (AM35).
@@ -241,13 +260,13 @@ export function StoryComposer(props: StoryComposerProps) {
       const file = files?.[0];
       if (!file) return;
       if (!file.type.startsWith('image/')) {
-        showToast(t.toastPhotoOnly);
+        toasts.show({ text: t.toastPhotoOnly, persist: true });
         return markInput('rejected-type');
       }
       markInput('accepted');
       await load(file);
     },
-    [knobs.listen, knobs.trusted, load, showToast, t],
+    [knobs.listen, knobs.trusted, load, toasts, t],
   );
 
   const onChange = (e: ChangeEvent<HTMLInputElement>) =>
@@ -297,7 +316,7 @@ export function StoryComposer(props: StoryComposerProps) {
     html().fakeReady = '1';
   }, [bitmap, geometry, vp, knobs.geometry, knobs.insets]);
 
-  // Side effects of readiness: off-host redirect and the late service-worker claim.
+  // Side effects of readiness: off-host redirect, a challenge, a reload, and the late service-worker claim.
   useEffect(() => {
     if (!bitmap) return;
     const timers: number[] = [];
@@ -323,13 +342,13 @@ export function StoryComposer(props: StoryComposerProps) {
     };
   }, [bitmap, knobs.offhost, knobs.sw, knobs.challenge, knobs.reload]);
 
-  const share = async (e: MouseEvent<HTMLButtonElement>) => {
-    const isTrusted = e.nativeEvent.isTrusted;
+  /** One Share (or Retry): the whole of Instagram's uploadStory, once. */
+  const upload = async (isTrusted: boolean) => {
     const canvas = canvasRef.current;
     const truth = truthRef.current;
-    if (phase.kind !== 'ready' || !canvas || !truth) return;
-    const ready = phase;
-    setPhase({ kind: 'sharing', bitmap: ready.bitmap });
+    if (!canvas || !truth) return;
+    setUploading(true);
+    telemetry('compose_stage_attempt');
     const jpeg = await toJpeg(canvas);
     const meta: FakeShareMeta = {
       isTrusted,
@@ -346,31 +365,70 @@ export function StoryComposer(props: StoryComposerProps) {
       sessionStarted: sessionId !== null,
       sessionId,
       screenOrientation: screenOrientationType(),
+      variant,
+      fbAuto: fbBadge,
     };
-    const upload = () =>
-      fetch(shareUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'image/jpeg', [FAKE_META_HEADER]: JSON.stringify(meta) },
-        body: jpeg,
-      });
-    if (knobs.share === 'background') {
-      // Home first; the upload keeps running behind the feed, as long as the document lives.
-      onExit?.('shared');
-      await delay(BACKGROUND_UPLOAD_DELAY_MS);
-      await upload().catch(() => undefined);
-      return;
+    const outcome = await uploadStory({
+      jpeg,
+      uploadId: String(Date.now()),
+      size: truth.canvas,
+      meta,
+      shareToFacebook: knobs.fb === 'auto',
+      onStaged: () => telemetry('compose_finalize_attempt'),
+    });
+    switch (outcome.kind) {
+      case 'published': {
+        telemetry('compose');
+        toasts.show({ text: knobs.fb === 'auto' ? t.toastAddedFacebook : t.toastAdded, persist: true });
+        onShareSettled?.('published');
+        await refreshTray();
+        logStep('tray_refresh', { tray: knobs.tray });
+        // `tray=throw`: Instagram's refreshStoryReels rejected; no navigation, the modal stays.
+        if (knobs.tray === 'throw') return;
+        if (mounted.current) setUploading(false);
+        onExit?.('shared');
+        return;
+      }
+      case 'checkpoint':
+        window.location.assign(outcome.url);
+        return;
+      case 'login':
+        window.location.assign(`${FAKE_PATHS.login}?next=${encodeURIComponent(window.location.pathname)}`);
+        return;
+      case 'feedback':
+        telemetry('compose_failure');
+        if (mounted.current) {
+          setUploading(false);
+          setFeedback(true);
+        }
+        return;
+      case 'failed':
+        telemetry('compose_failure');
+        if (!mounted.current) return;
+        setUploading(false);
+        toasts.show({
+          text: t.toastUploadFailed,
+          persist: true,
+          action: {
+            label: t.retry,
+            onAction: (e) => {
+              reportControl('retry', e.nativeEvent.isTrusted);
+              void upload(e.nativeEvent.isTrusted);
+            },
+          },
+        });
+        onShareSettled?.('failed');
+        return;
     }
-    try {
-      const res = await upload();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch {
-      if (!mounted.current) return;
-      showToast(t.toastShareFailed);
-      setPhase(ready);
-      return;
-    }
-    if (knobs.share === 'real-paths') await fireRealPaths(jpeg);
-    onExit?.('shared');
+  };
+
+  const share = (e: MouseEvent<HTMLElement>) => {
+    const isTrusted = e.nativeEvent.isTrusted;
+    if (phase.kind !== 'ready') return;
+    // No in-flight guard, as on Instagram: a second click is a second upload (DOUBLE_SHARE).
+    reportControl('share', isTrusted, shares.current > 0);
+    shares.current += 1;
+    void upload(isTrusted);
   };
 
   const save = async () => {
@@ -383,6 +441,54 @@ export function StoryComposer(props: StoryComposerProps) {
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   };
+
+  const tap = (control: FakeControl, then?: () => void) => (e: MouseEvent) => {
+    reportControl(control, e.nativeEvent.isTrusted);
+    then?.();
+  };
+
+  const shareFooter = (key: string) => (
+    <footer key={key} className={c('footer')} data-testid="fake-share-footer" data-variant={variant}>
+      <div>
+        <div>
+          {variant === 'v1' ? (
+            <button type="button" data-testid="fake-share" className={c('_aswp')} onClick={share}>
+              <Glyph d={GLYPH.newStory} />
+              <span>{t.share}</span>
+            </button>
+          ) : (
+            <div>
+              {/* biome-ignore lint/a11y/useSemanticElements: ShareFooterV2 is a role=button div on Instagram (C12) */}
+              <div
+                role="button"
+                tabIndex={0}
+                data-testid="fake-share"
+                className={c('_aswp')}
+                onClick={share}
+                onKeyDown={() => undefined}
+              >
+                <span className={c('avatar')}>
+                  <img src={AVATAR_SRC} alt="" width={24} height={24} />
+                  {fbBadge ? (
+                    <span className={c('badge')} data-testid="fake-fb-badge">
+                      <Glyph d={GLYPH.facebook} label={t.fbBadge} />
+                    </span>
+                  ) : null}
+                </span>
+                <span style={{ marginLeft: 8 }}>{t.shareStory}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </footer>
+  );
+
+  const drawn = bitmap !== null && geometry !== null;
+  const showCanvas = Boolean(sessionFile) || drawn;
+  // Instagram renders the Share footer only once the photo is in (and never in landscape).
+  const footers =
+    !drawn || landscape || knobs.shareControl === 'missing' ? [] : knobs.shareControl === 'two' ? ['a', 'b'] : ['a'];
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: drop target for listen=drop; the file input is the accessible path
@@ -397,70 +503,67 @@ export function StoryComposer(props: StoryComposerProps) {
           onChange={onChange}
         />
       ) : null}
-      {bitmap && geometry ? (
-        <>
-          <div className={c('backdrop')} />
-          <canvas
-            ref={canvasRef}
-            data-testid="fake-composer-canvas"
-            width={geometry.canvas.w}
-            height={geometry.canvas.h}
-            style={{
-              position: 'fixed',
-              left: geometry.css.x,
-              top: geometry.css.y,
-              width: geometry.css.w,
-              height: geometry.css.h,
-              display: 'block',
-              zIndex: 11,
-            }}
-          />
-          {/* AM37: in landscape the composer renders no header and no Share footer, only the snackbar. */}
-          {landscape ? null : (
-            <div className={c('bar')} style={{ top: 0 }}>
+      {drawn ? <div className={c('backdrop')} /> : null}
+      {showCanvas ? (
+        <canvas
+          ref={canvasRef}
+          data-testid="fake-composer-canvas"
+          className={c('_aa3c')}
+          width={drawn ? geometry.canvas.w : 0}
+          height={drawn ? geometry.canvas.h : 0}
+          style={
+            drawn
+              ? {
+                  position: 'fixed',
+                  left: geometry.css.x,
+                  top: geometry.css.y,
+                  width: geometry.css.w,
+                  height: geometry.css.h,
+                  display: 'block',
+                  zIndex: 11,
+                }
+              : { display: 'block', width: 0, height: 0 }
+          }
+        />
+      ) : null}
+      {/* AM37: in landscape the composer renders no header and no Share footer, only the snackbar. */}
+      {drawn && !landscape ? (
+        <header className={c('_aa3d')}>
+          <button
+            type="button"
+            data-testid="fake-close"
+            className={c('_aa3e')}
+            onClick={tap('close', () => onExit?.('closed'))}
+          >
+            {t.close}
+          </button>
+          <div className={c('_aa3f')}>
+            {knobs.save === 'on' ? (
               <button
                 type="button"
-                data-testid="fake-close"
-                className={c('barBtn')}
-                onClick={(e) => {
-                  reportControl('close', e.nativeEvent.isTrusted);
-                  onExit?.('closed');
-                }}
+                data-testid="fake-save"
+                className={c('_aa3g')}
+                onClick={tap('save', () => void save())}
               >
-                {t.close}
+                {t.save}
               </button>
-              {knobs.save === 'on' ? (
-                <button
-                  type="button"
-                  data-testid="fake-save"
-                  className={c('barBtn')}
-                  onClick={(e) => {
-                    reportControl('save', e.nativeEvent.isTrusted);
-                    void save();
-                  }}
-                >
-                  {t.save}
-                </button>
-              ) : null}
-            </div>
-          )}
-          {landscape ? null : (
-            <div className={c('bar')} style={{ bottom: 0, justifyContent: 'flex-end' }}>
-              <button
-                type="button"
-                data-testid="fake-share"
-                className={c('share')}
-                disabled={phase.kind === 'sharing'}
-                onClick={(e) => void share(e)}
-              >
-                {t.share}
-              </button>
-            </div>
-          )}
-        </>
-      ) : (
+            ) : null}
+            <button type="button" data-testid="fake-text" className={c('_aa3i')} onClick={tap('text')}>
+              {t.text}
+            </button>
+            <button type="button" data-testid="fake-draw" className={c('_aa3j')} onClick={tap('draw')}>
+              {t.draw}
+            </button>
+            <button type="button" data-testid="fake-ai-label" className={c('_aa3j')} onClick={tap('aiLabel')}>
+              {t.aiLabel}
+            </button>
+          </div>
+        </header>
+      ) : null}
+      {footers.map(shareFooter)}
+      {!drawn ? (
         <div className={c('start')}>
-          {phase.kind === 'loading' ? (
+          {phase.kind === 'loading' || sessionFile ? (
             <p>{t.composerLoading}</p>
           ) : (
             <>
@@ -469,11 +572,33 @@ export function StoryComposer(props: StoryComposerProps) {
             </>
           )}
         </div>
-      )}
-      <div className={c('toasts')}>
-        {landscape ? <Snackbar text={t.toastRotate} /> : null}
-        {toast ? <Toast text={toast} /> : null}
-      </div>
+      ) : null}
+      {uploading ? (
+        <div role="dialog" aria-modal="true" className={c('modal')} data-testid="fake-upload-modal">
+          <div className={c('dialogBox')}>
+            <p>{t.uploading}</p>
+            <div role="progressbar" className={c('progress')} />
+          </div>
+        </div>
+      ) : null}
+      {feedback ? (
+        <div role="dialog" aria-modal="true" className={c('modal')} data-testid="fake-feedback">
+          <div className={c('dialogBox')}>
+            <p>
+              <b>{t.feedbackTitle}</b>
+            </p>
+            <p>{t.feedbackBody}</p>
+            <button type="button" className={c('_aswp')} onClick={tap('dialog')}>
+              {t.ok}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {landscape ? (
+        <div className={c('toasts')}>
+          <Snackbar text={t.toastRotate} />
+        </div>
+      ) : null}
     </section>
   );
 }

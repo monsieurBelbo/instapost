@@ -27,12 +27,22 @@ export interface SessionStore {
 /** Every reducer timer: one left out here would be lost with a service-worker restart (AM20's `navigation`). */
 const TIMER_NAMES = [
   'closeDelay',
-  'inactivity',
   'navigation',
   'fitRetry',
   'resizeDeadline',
   'resizePoll',
   'inputWait',
+  'stepDeadline',
+  'preShareCap',
+  'queue',
+  'dwell',
+  'accountPrompt',
+  'hiddenWait',
+  'shareAck',
+  'confirmTick',
+  'uploadHold',
+  'offerManual',
+  'manualDeadline',
 ] as const satisfies readonly HandoffTimer[];
 const _timersComplete: [Exclude<HandoffTimer, (typeof TIMER_NAMES)[number]>] extends [never] ? true : never = true;
 void _timersComplete;
@@ -40,15 +50,24 @@ void _timersComplete;
 type Obj = Record<string, unknown>;
 const isObj = (x: unknown): x is Obj => typeof x === 'object' && x !== null && !Array.isArray(x);
 
-/** Enough of a HandoffState to resume: a known phase, and the session ids once active. */
+/**
+ * Enough of a HandoffState to resume: a known phase, and the session ids once active. v7 (ux.md IR1): a
+ * session stored by an earlier build in a phase that no longer exists (`injecting`, `awaitingPick`,
+ * `awaitingShare`), or without the v7 fields, does not parse: it loads as IDLE, so the startup cleanup
+ * removes rules 1001–1019 and AM22 closes the popup storage.local still remembers.
+ */
 export function isStoredState(x: unknown): x is HandoffState {
   if (!isObj(x) || !HANDOFF_PHASES.includes(x.phase as never)) return false;
   if (x.phase === 'idle') return x.last === null || isObj(x.last);
+  if (x.phase === 'queued') return typeof x.handoffId === 'string' && isObj(x.request) && typeof x.startAt === 'number';
+  const windowed = x.phase !== 'opening' && x.phase !== 'closing';
   return (
     typeof x.handoffId === 'string' &&
     typeof x.nonce === 'string' &&
     Array.isArray(x.phaseLog) &&
-    typeof x.lastEventAt === 'number'
+    typeof x.lastEventAt === 'number' &&
+    typeof x.writeBlocked === 'boolean' &&
+    (!windowed || (isObj(x.account) && isObj(x.steps) && typeof x.shareSent === 'boolean' && Array.isArray(x.net)))
   );
 }
 

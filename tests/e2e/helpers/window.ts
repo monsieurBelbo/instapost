@@ -69,10 +69,14 @@ export async function windowNow(
 
 /**
  * Forces the composer window to `box` (outer) on the first `loading` of a www document in it, i.e.
- * after the product fitted it and started the navigation (E13, E25): from the service worker, so
- * the guarded shim never sees it.
+ * after the product fitted it and started the navigation (E13, E24): from the service worker, so
+ * the guarded shim never sees it. Since the popup is docked at the screen's right edge (ux.md §4.6), give
+ * `left`/`top` for a box wider than the dock: Chromium refuses bounds less than half on screen.
  */
-export async function forceBoundsOnFirstLoad(sw: Worker, box: { width: number; height: number }): Promise<void> {
+export async function forceBoundsOnFirstLoad(
+  sw: Worker,
+  box: { left?: number; top?: number; width: number; height: number },
+): Promise<void> {
   await sw.evaluate((b) => {
     const g = globalThis as ExtGlobal & { __e2eForced?: number | null };
     g.__e2eForced = null;

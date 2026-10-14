@@ -7,9 +7,26 @@
  * boot JSON for its own client. Neutral markup: nothing is copied from Instagram.
  */
 import { strings } from './client/i18n.ts';
-import { KNOB_CHOICES, KNOB_NAMES, type KnobName, type Knobs } from './knobs.ts';
+import {
+  CONFIGURE_CHOICES,
+  KNOB_CHOICES,
+  KNOB_NAMES,
+  type KnobName,
+  type Knobs,
+  MS_KNOBS,
+  RUPLOAD_CHOICES,
+  STRING_KNOBS,
+} from './knobs.ts';
 import { FAKE_PATHS, type FakeBoot } from './protocol.ts';
-import type { ComposerViewRecord, RequestRecord, StoryRecord, ViolationRecord, WriteRecord } from './store.ts';
+import type {
+  ComposerViewRecord,
+  LogRecord,
+  RequestRecord,
+  StoryRecord,
+  UploadRecord,
+  ViolationRecord,
+  WriteRecord,
+} from './store.ts';
 import type { UaClassification } from './ua.ts';
 
 export const MARKER_META = '<meta name="instapost-fake-instagram" content="1">';
@@ -103,8 +120,15 @@ export interface DashboardState {
   requests: RequestRecord[];
   /** AM37: what the composer page showed (landscape gate), oldest first. */
   composerViews: ComposerViewRecord[];
+  /** IF5: the photo uploads the server received, oldest first. */
+  uploads: UploadRecord[];
+  /** IF8: the page's story-creation telemetry and the control taps, oldest first. */
+  log: LogRecord[];
   certValidTo: string | null;
 }
+
+/** IF8: log steps the dashboard shows, newest first. */
+export const DASHBOARD_LOG = 80;
 
 /** AM37: composer views the dashboard shows, newest first. */
 export const DASHBOARD_COMPOSER_VIEWS = 20;
@@ -133,18 +157,23 @@ function uaLabel(ua: string | null): string {
 
 function storyCard(s: StoryRecord): string {
   const dims = s.size ? `${s.size.w}×${s.size.h}` : 'not a JPEG';
+  // ux.md P2: the autopilot's Share is an untrusted click by design; the owner's (Finish by hand) is trusted.
   const trust =
     s.isTrusted === true
-      ? '<span class="ok">isTrusted</span>'
-      : `<span class="bad">${s.isTrusted === false ? 'UNTRUSTED' : 'no meta'}</span>`;
+      ? '<span class="ok">Share by hand</span>'
+      : s.isTrusted === false
+        ? '<span class="ok">Share by instapost</span>'
+        : '<span class="bad">no meta</span>';
+  const fb = s.shareToFacebook ? ' · <b>also to Facebook</b>' : '';
+  const variant = s.meta?.variant ? ` · footer ${esc(s.meta.variant)}${s.meta.fbAuto ? ' (Facebook badge)' : ''}` : '';
   const g = s.meta?.geometry;
   return `<figure class="story">
 <a class="phone" href="${FAKE_PATHS.stories}/${esc(s.id)}.jpg" target="_blank"><img src="${FAKE_PATHS.stories}/${esc(s.id)}.jpg" alt="story ${esc(s.id)}" loading="lazy"></a>
-<figcaption><b>${esc(dims)}</b> · ${esc(kb(s.bytes))} · ${trust}<br>
+<figcaption><b>${esc(dims)}</b> · ${esc(kb(s.bytes))} · ${trust}${fb}${variant}<br>
 ${esc(time(s.t))} · ${esc(uaLabel(s.ua))}<br>
 <span class="mono">mobile ${esc(s.ch['sec-ch-ua-mobile'] ?? '—')} · platform ${esc(s.ch['sec-ch-ua-platform'] ?? '—')}</span><br>
 ${g ? `<span class="mono">${esc(g.model)} · css ${g.css.w}×${g.css.h} @${g.dpr} · src ${g.source.w}×${g.source.h}</span><br>` : ''}
-${s.meta ? `<span class="mono">${s.meta.sessionStarted ? 'story session started by + → Story' : 'no story session (inserted file)'} · screen ${esc(s.meta.screenOrientation ?? '—')}</span><br>` : ''}
+${s.meta ? `<span class="mono">${s.meta.sessionStarted ? `story session ${esc(s.meta.sessionId ?? '')}` : 'no story session'} · screen ${esc(s.meta.screenOrientation ?? '—')}</span><br>` : ''}
 <span class="ua" title="${esc(s.ua ?? '')}">${esc(s.ua ?? '')}</span></figcaption></figure>`;
 }
 
@@ -161,13 +190,13 @@ const td = (v: unknown, cls = '') => `<td${cls ? ` class="${cls}"` : ''}>${esc(v
 export function dashboardLiveHtml(s: DashboardState): string {
   const changed = KNOB_NAMES.filter((k) => knobText(s.knobs[k]) !== knobText(s.defaults[k]));
   const reqs = s.requests.slice(-DASHBOARD_REQUESTS).reverse();
-  return `<p class="summary">${s.stories.length} stories · <span class="${s.writes.length ? 'bad' : ''}">${s.writes.length} writes</span> · <span class="${s.violations.length ? 'bad' : ''}">${s.violations.length} violations</span> · ${s.requests.length} requests logged · knobs: ${
+  return `<p class="summary">${s.stories.length} stories · ${s.uploads.length} uploads · ${s.writes.length} writes · <span class="${s.violations.length ? 'bad' : ''}">${s.violations.length} violations</span> · ${s.requests.length} requests logged · knobs: ${
     changed.length
       ? changed.map((k) => `<b>${esc(k)}=${esc(knobText(s.knobs[k]))}</b>`).join(', ')
       : 'baseline defaults'
   }</p>
 <h2>Stories</h2>
-${s.stories.length ? `<div class="stories">${[...s.stories].reverse().map(storyCard).join('')}</div>` : '<p class="muted">No story shared yet.</p>'}
+${s.stories.length ? `<div class="stories">${[...s.stories].reverse().map(storyCard).join('')}</div>` : '<p class="muted">No story published yet.</p>'}
 <h2>Composer views (landscape gate)</h2>
 ${table(
   ['time', 'shown', 'via', 'screen', 'viewport', 'session', 'path'],
@@ -184,6 +213,35 @@ ${table(
       td(v.path, 'mono'),
     ]),
   'The composer has not shown a photo yet.',
+)}
+<h2>Autopilot evidence: uploads and telemetry</h2>
+${table(
+  ['time', 'upload id', 'bytes', 'answered', 'share click', 'session'],
+  s.uploads
+    .slice(-20)
+    .reverse()
+    .map((u) => [
+      td(time(u.t)),
+      td(u.uploadId, 'mono'),
+      td(kb(u.bytes)),
+      td(u.answer, u.answer === 'ok' ? 'ok' : 'bad'),
+      td(u.meta ? (u.meta.isTrusted ? 'by hand (trusted)' : 'by instapost (untrusted)') : 'no meta'),
+      td(u.meta?.sessionId ?? '—', 'mono'),
+    ]),
+  'No upload yet.',
+)}
+${table(
+  ['time', 'step', 'doc', 'fields'],
+  s.log
+    .slice(-DASHBOARD_LOG)
+    .reverse()
+    .map((l) => [
+      td(time(l.t)),
+      td(l.step, l.step.startsWith('tap:') && l.fields.isTrusted === false ? 'mono' : ''),
+      td(l.doc, 'mono'),
+      td(JSON.stringify(l.fields), 'mono'),
+    ]),
+  'Nothing logged yet.',
 )}
 <h2>Violations</h2>
 ${table(
@@ -249,19 +307,34 @@ function knobField(name: KnobName, knobs: Knobs, defaults: Readonly<Knobs>): str
   const value = knobText(knobs[name]);
   const cls = value !== knobText(defaults[name]) ? ' class="changed"' : '';
   const hint = `default ${knobText(defaults[name])}`;
-  if (name === 'geometry' || name === 'insets' || name === 'slowMs' || name === 'hydrateMs') {
+  const free =
+    name === 'geometry' ||
+    name === 'insets' ||
+    (MS_KNOBS as readonly string[]).includes(name) ||
+    (STRING_KNOBS as readonly string[]).includes(name);
+  if (free) {
     const ph =
-      name === 'geometry' ? 'viewportDpr | source | fixed:WxH | cssFixed:WxH' : name === 'insets' ? 'top,bottom' : 'ms';
+      name === 'geometry'
+        ? 'viewportDpr | source | fixed:WxH | cssFixed:WxH'
+        : name === 'insets'
+          ? 'top,bottom'
+          : name === 'account'
+            ? '<handle> | none | ambiguous'
+            : name === 'rupload'
+              ? `${RUPLOAD_CHOICES.join(' | ')} | slow:<ms>`
+              : name === 'configure'
+                ? `${CONFIGURE_CHOICES.join(' | ')} | slow:<ms>`
+                : 'ms';
     return `<label${cls}><span>${name}</span><input name="${name}" value="${esc(value)}" placeholder="${esc(ph)}" title="${esc(hint)}"></label>`;
   }
-  const options = (KNOB_CHOICES[name] as readonly string[])
+  const options = (KNOB_CHOICES[name as keyof typeof KNOB_CHOICES] as readonly string[])
     .map((o) => `<option${o === value ? ' selected' : ''}>${esc(o)}</option>`)
     .join('');
   return `<label${cls}><span>${name}</span><select name="${name}" title="${esc(hint)}">${options}</select></label>`;
 }
 
 export function dashboardHtml(s: DashboardState): string {
-  const api = ['stories', 'requests', 'writes', 'violations', 'knobs']
+  const api = ['stories', 'uploads', 'log', 'requests', 'writes', 'violations', 'composer-views', 'knobs']
     .map((n) => `<a href="${FAKE_PATHS.api}${n}">${n}</a>`)
     .join(' · ');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">

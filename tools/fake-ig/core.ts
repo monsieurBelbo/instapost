@@ -7,6 +7,13 @@
  * Every request outside /__fake__/ is logged with its UA, client hints, sec-fetch-* and origin
  * headers and the classification. Write paths are matched with the same WRITE_URL_FILTERS the
  * extension's block rules use, so the fake and the rules cannot drift apart.
+ *
+ * The write paths behave as Instagram's do (ux.md §6.1, C13, IF5): the photo upload on i.instagram.com
+ * (`/rupload_igphoto/fb_uploader_<id>`, CORS for www with credentials, the preflight echoing the requested
+ * headers) and the publish request on www (`/api/v1/media/configure_to_story/`), each answering as its
+ * knob (`rupload`, `configure`) says. A story is stored only when the publish request succeeded for an
+ * upload id that has an upload. `slow`, `hang` and `reset` are transport behaviours the server adapter
+ * applies (FakeResponse.wire).
  */
 import { randomBytes } from 'node:crypto';
 import { CH_REMOVE } from '../../src/core/ig-contract/device-profile.ts';
@@ -19,19 +26,34 @@ import {
   shellHtml,
   siteResetHtml,
 } from './html.ts';
-import { DEFAULT_KNOBS, parseKnobPatch } from './knobs.ts';
+import { DEFAULT_KNOBS, type Knobs, parseKnobPatch, slowMs } from './knobs.ts';
 import {
+  FAKE_CONTROLS,
   FAKE_META_HEADER,
   FAKE_PATHS,
   FAKE_VIA_SW_HEADER,
   type FakeComposerView,
+  type FakeControl,
+  type FakeLogInput,
   type FakeShareMeta,
   I_HOST,
   IG_HOSTS,
   OFFHOST_URL,
+  RUPLOAD_PATH_RE,
+  UNTRUSTED_ALLOWED,
   WWW_HOST,
+  WWW_ORIGIN,
 } from './protocol.ts';
-import type { ComposerViewRecord, SeenHeaders, Store, StoryRecord, ViolationRecord, WriteRecord } from './store.ts';
+import type {
+  ComposerViewRecord,
+  LogRecord,
+  SeenHeaders,
+  Store,
+  StoryRecord,
+  UploadRecord,
+  ViolationRecord,
+  WriteRecord,
+} from './store.ts';
 import { classify, type HeaderBag } from './ua.ts';
 
 export interface FakeRequest {
@@ -49,6 +71,11 @@ export interface FakeResponse {
   status: number;
   headers: Record<string, string>;
   body: string | Uint8Array;
+  /**
+   * Transport behaviour the server adapter applies (knobs `rupload`, `configure`): answer after `delayMs`,
+   * or `drop` the connection: `reset` destroys the socket (the page sees status 0), `hang` never answers.
+   */
+  wire?: { delayMs?: number; drop?: 'reset' | 'hang' };
 }
 
 export interface CoreAssets {
@@ -59,9 +86,12 @@ export interface CoreAssets {
 
 export type CoreEvent =
   | { kind: 'write'; write: WriteRecord }
+  | { kind: 'upload'; upload: UploadRecord }
   | { kind: 'story'; story: StoryRecord }
+  | { kind: 'publish'; status: number; answer: string; uploadId: string | null }
   | { kind: 'violation'; violation: ViolationRecord }
-  | { kind: 'composerView'; view: ComposerViewRecord };
+  | { kind: 'composerView'; view: ComposerViewRecord }
+  | { kind: 'log'; log: LogRecord };
 
 export interface CoreOptions {
   store: Store;
@@ -191,6 +221,43 @@ export function parseComposerView(v: unknown): FakeComposerView | null {
   };
 }
 
+const isControl = (x: unknown): x is FakeControl => (FAKE_CONTROLS as readonly unknown[]).includes(x);
+const DOC_RE = /^[0-9a-z]{1,32}$/;
+
+/** IF9: a control report from the fake's page; null unless well formed. A missing isTrusted counts as untrusted. */
+export function parseControlReport(
+  v: unknown,
+): { control: FakeControl; isTrusted: boolean; repeat: boolean; doc: string } | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const o = v as Record<string, unknown>;
+  if (!isControl(o.control)) return null;
+  const doc = typeof o.doc === 'string' && DOC_RE.test(o.doc) ? o.doc : '-';
+  return { control: o.control, isTrusted: o.isTrusted === true, repeat: o.repeat === true, doc };
+}
+
+const STEP_RE = /^[a-z][a-z0-9_:]{0,63}$/;
+const FIELD_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
+
+/** IF8: a telemetry step from the fake's page: a step name, a doc id and at most 20 primitive fields. */
+export function parseLogInput(v: unknown): FakeLogInput | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.step !== 'string' || !STEP_RE.test(o.step)) return null;
+  if (typeof o.doc !== 'string' || !DOC_RE.test(o.doc)) return null;
+  const raw = o.fields ?? {};
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > 20) return null;
+  const fields: FakeLogInput['fields'] = {};
+  for (const [k, val] of entries) {
+    if (!FIELD_RE.test(k)) return null;
+    if (val === null || typeof val === 'boolean' || (typeof val === 'number' && Number.isFinite(val))) fields[k] = val;
+    else if (typeof val === 'string' && val.length <= 200) fields[k] = val;
+    else return null;
+  }
+  return { step: o.step, doc: o.doc, fields };
+}
+
 function bodyObject(req: FakeRequest): unknown {
   const raw = new TextDecoder().decode(req.body ?? new Uint8Array());
   if (raw.trim() === '') return {};
@@ -216,6 +283,8 @@ export function createCore(opts: CoreOptions): FakeCore {
       violations: store.violations(),
       requests: store.requests(),
       composerViews: store.composerViews(),
+      uploads: store.uploads(),
+      log: store.log(),
       certValidTo: opts.certValidTo,
     };
   }
@@ -244,7 +313,47 @@ export function createCore(opts: CoreOptions): FakeCore {
     });
   }
 
-  function writeRoute(req: FakeRequest, host: string, url: URL, filter: string): FakeResponse {
+  /**
+   * IF5: CORS for the upload host, as Instagram's i.instagram.com answers www: the page's origin with
+   * credentials, and the preflight echoing exactly the headers it asks for (`*` does not cover a
+   * credentialed request). Only for www.
+   */
+  function corsFor(req: FakeRequest): Record<string, string> {
+    const origin = req.headers.origin;
+    if (origin !== WWW_ORIGIN) return {};
+    return {
+      'access-control-allow-origin': origin,
+      'access-control-allow-credentials': 'true',
+      vary: 'Origin',
+    };
+  }
+
+  function preflight(req: FakeRequest, cors: Record<string, string>): FakeResponse {
+    const asked = req.headers['access-control-request-headers'];
+    return {
+      status: 204,
+      headers: {
+        ...NO_STORE,
+        ...cors,
+        ...(Object.keys(cors).length > 0
+          ? {
+              'access-control-allow-methods': 'POST, GET, OPTIONS',
+              ...(asked ? { 'access-control-allow-headers': asked } : {}),
+              'access-control-max-age': '0',
+            }
+          : {}),
+      },
+      body: '',
+    };
+  }
+
+  const wireOf = (knob: string): FakeResponse['wire'] | undefined => {
+    if (knob === 'reset' || knob === 'hang') return { drop: knob };
+    const ms = slowMs(knob);
+    return ms !== null ? { delayMs: ms } : undefined;
+  };
+
+  function recordWrite(req: FakeRequest, host: string, url: URL, filter: string): void {
     const write = store.addWrite({
       ...seenHeaders(req.headers),
       host,
@@ -255,17 +364,148 @@ export function createCore(opts: CoreOptions): FakeCore {
       contentType: req.headers['content-type'] ?? null,
     });
     emit({ kind: 'write', write });
-    const origin = req.headers.origin;
-    const cors: Record<string, string> = origin
-      ? {
-          'access-control-allow-origin': origin,
-          'access-control-allow-credentials': 'true',
-          'access-control-allow-headers': '*',
-          'access-control-allow-methods': 'GET, POST, OPTIONS',
+  }
+
+  /** C13: the photo upload, `POST i.instagram.com/rupload_igphoto/fb_uploader_<id>`. */
+  function ruploadRoute(req: FakeRequest, uploadId: string, knobs: Knobs): FakeResponse {
+    const cors = knobs.rupload === 'cors' ? {} : corsFor(req);
+    const method = req.method.toUpperCase();
+    if (method === 'OPTIONS') return preflight(req, corsFor(req));
+    if (method !== 'POST') return text(405, 'method not allowed', { allow: 'POST, OPTIONS', ...cors });
+    const { meta, error } = parseMeta(req.headers[FAKE_META_HEADER]);
+    const upload = store.addUpload({
+      ...seenHeaders(req.headers),
+      uploadId,
+      body: req.body ?? new Uint8Array(),
+      contentType: req.headers['x-entity-type'] ?? req.headers['content-type'] ?? null,
+      meta,
+      metaError: error,
+      answer: knobs.rupload,
+    });
+    emit({ kind: 'upload', upload });
+    if (!meta) {
+      const violation = store.addViolation({
+        kind: 'SHARE_META_INVALID',
+        storyId: uploadId,
+        detail: error ?? 'no meta',
+      });
+      emit({ kind: 'violation', violation });
+    }
+    if (knobs.rupload === '500') return json(500, { message: 'upload failed', status: 'fail' }, cors);
+    const ok = json(200, { upload_id: uploadId, xsharing_nonces: {}, status: 'ok' }, cors);
+    const wire = wireOf(knobs.rupload);
+    return wire ? { ...ok, wire } : ok;
+  }
+
+  /** C13: the publish request, `POST www.instagram.com/api/v1/media/configure_to_story/` (same origin). */
+  function configureRoute(req: FakeRequest, knobs: Knobs): FakeResponse {
+    const method = req.method.toUpperCase();
+    if (method === 'OPTIONS') return preflight(req, corsFor(req));
+    if (method !== 'POST') return text(405, 'method not allowed', { allow: 'POST' });
+    let form: Record<string, string> = {};
+    try {
+      form = Object.fromEntries(new URLSearchParams(new TextDecoder().decode(req.body ?? new Uint8Array())));
+    } catch {
+      form = {};
+    }
+    const uploadId = /^\d{1,20}$/.test(form.upload_id ?? '') ? (form.upload_id as string) : null;
+    const answer = knobs.configure;
+    // Server truth: the story exists when the server accepted the request for a known upload, whether or
+    // not the page then reads the answer (slow, hang and reset lose only the answer). One story per upload
+    // id: a repeated publish of the same upload answers with the same media (idempotent, as Instagram is
+    // assumed to be). Chrome itself resends a POST whose reused connection was reset before any answer
+    // byte (`configure=reset`, observed 2026-10-13: up to 4 sends of one XHR, which the page and its
+    // resource timing see once), so a non-idempotent fake would show stories the page never asked for.
+    const accepted = answer === 'ok' || answer === 'reset' || answer === 'hang' || slowMs(answer) !== null;
+    let mediaId: string | null = null;
+    const published = uploadId !== null ? store.stories().find((s) => s.uploadId === uploadId) : undefined;
+    if (accepted && published) mediaId = published.id;
+    else if (accepted && uploadId !== null) {
+      const up = store.upload(uploadId);
+      if (up) {
+        const story = store.addStory({
+          upload: up.record,
+          body: up.body,
+          shareToFacebook: form.share_to_facebook === 'true',
+          configure: seenHeaders(req.headers),
+        });
+        mediaId = story.id;
+        emit({ kind: 'story', story });
+      }
+    }
+    const status = (r: FakeResponse) => {
+      emit({ kind: 'publish', status: r.wire?.drop ? 0 : r.status, answer, uploadId });
+      return r;
+    };
+    const next = encodeURIComponent('/');
+    switch (answer) {
+      case '400':
+        return status(json(400, { message: 'Media not found or unavailable', status: 'fail' }));
+      case 'feedback':
+        return status(
+          json(400, {
+            message: 'feedback_required',
+            spam: true,
+            feedback_title: 'Try again later',
+            feedback_message: 'We restrict certain activity to protect our community.',
+            status: 'fail',
+          }),
+        );
+      case 'login401':
+        return status(
+          json(401, {
+            message: 'Please wait a few minutes before you try again.',
+            require_login: true,
+            status: 'fail',
+          }),
+        );
+      case 'checkpoint':
+        return status(
+          json(400, {
+            message: 'checkpoint_required',
+            checkpoint_url: `${FAKE_PATHS.challenge}?next=${next}`,
+            lock: true,
+            status: 'fail',
+          }),
+        );
+      case '500':
+        return status(json(500, { message: 'Something went wrong', status: 'fail' }));
+      case 'redirectLogin':
+        return status(redirect(`${FAKE_PATHS.login}?next=${next}`));
+      case 'html200':
+        return status(html(200, placeholderHtml('login', knobs)));
+      default: {
+        if (uploadId === null || mediaId === null) {
+          return status(json(400, { message: 'Uploaded image is invalid', status: 'fail' }));
         }
-      : {};
-    if (req.method.toUpperCase() === 'OPTIONS') return { status: 204, headers: { ...NO_STORE, ...cors }, body: '' };
+        const ok = json(200, { media: { pk: mediaId, id: `${mediaId}_fake`, code: mediaId }, status: 'ok' });
+        const wire = wireOf(answer);
+        return status(wire ? { ...ok, wire } : ok);
+      }
+    }
+  }
+
+  /** Every other write-path request (never sent by the fake's own client): recorded, answered 200. */
+  function otherWrite(req: FakeRequest): FakeResponse {
+    const cors = corsFor(req);
+    if (req.method.toUpperCase() === 'OPTIONS') return preflight(req, cors);
     return json(200, { status: 'fake-ok' }, cors);
+  }
+
+  function writeRoute(req: FakeRequest, host: string, url: URL, filter: string): FakeResponse {
+    recordWrite(req, host, url, filter);
+    const knobs = store.knobs();
+    const rupload = host === I_HOST ? RUPLOAD_PATH_RE.exec(url.pathname) : null;
+    if (rupload) return ruploadRoute(req, rupload[1] as string, knobs);
+    if (host === WWW_HOST && url.pathname === FAKE_PATHS.configure) return configureRoute(req, knobs);
+    return otherWrite(req);
+  }
+
+  /** IF6: Instagram's tray refresh after a published story (`tray=fail` answers 500). */
+  function graphqlRoute(req: FakeRequest): FakeResponse {
+    if (req.method.toUpperCase() !== 'POST') return text(405, 'method not allowed', { allow: 'POST' });
+    if (store.knobs().tray === 'fail') return json(500, { message: 'execution error', status: 'fail' });
+    return json(200, { data: { xdt_api__v1__feed__reels_tray: { tray: [] } }, status: 'ok' });
   }
 
   /** Everything outside /__fake__/ on the Instagram hosts. Logged by the caller. */
@@ -276,6 +516,7 @@ export function createCore(opts: CoreOptions): FakeCore {
     if (host === I_HOST) return site(text(404, 'not found'));
     const method = req.method.toUpperCase();
     const p = url.pathname;
+    if (p === FAKE_PATHS.graphql) return site(graphqlRoute(req));
     const read = method === 'GET' || method === 'HEAD';
     const known =
       p === FAKE_PATHS.home ||
@@ -322,29 +563,6 @@ export function createCore(opts: CoreOptions): FakeCore {
         ? html(200, dashboardLiveHtml(state))
         : html(200, dashboardHtml(state));
     }
-    if (p === FAKE_PATHS.stories) {
-      if (method !== 'POST') return text(405, 'method not allowed', { allow: 'POST' });
-      const body = req.body ?? new Uint8Array();
-      if (body.length === 0) return json(400, { error: 'empty body' });
-      const { meta, error } = parseMeta(req.headers[FAKE_META_HEADER]);
-      const story = store.addStory({
-        ...seenHeaders(req.headers),
-        body,
-        contentType: req.headers['content-type'] ?? null,
-        meta,
-        metaError: error,
-      });
-      emit({ kind: 'story', story });
-      if (story.isTrusted !== true) {
-        const violation = store.addViolation({
-          kind: meta ? 'UNTRUSTED_SHARE' : 'SHARE_META_INVALID',
-          storyId: story.id,
-          detail: meta ? 'Share click had isTrusted=false (SG6)' : (error ?? 'invalid meta'),
-        });
-        emit({ kind: 'violation', violation });
-      }
-      return json(200, { id: story.id });
-    }
     if (p === FAKE_PATHS.control) {
       if (method !== 'POST') return text(405, 'method not allowed', { allow: 'POST' });
       let body: unknown;
@@ -353,17 +571,37 @@ export function createCore(opts: CoreOptions): FakeCore {
       } catch {
         body = null;
       }
-      const control = (body as { control?: unknown } | null)?.control;
-      const isTrusted = (body as { isTrusted?: unknown } | null)?.isTrusted;
-      if (typeof control !== 'string' || control.length > 32) return json(400, { error: 'invalid control report' });
-      if (isTrusted !== true) {
-        const violation = store.addViolation({
-          kind: 'UNTRUSTED_CONTROL',
-          storyId: null,
-          detail: `${control} click had isTrusted=${String(isTrusted)} (§1: nothing clicks in Instagram's page)`,
-        });
+      const report = parseControlReport(body);
+      if (!report) return json(400, { error: 'invalid control report' });
+      const { control, isTrusted, repeat } = report;
+      store.addLog({ step: `tap:${control}`, doc: report.doc, fields: { isTrusted, repeat: repeat === true } });
+      const violate = (kind: ViolationRecord['kind'], detail: string) => {
+        const violation = store.addViolation({ kind, storyId: null, detail });
         emit({ kind: 'violation', violation });
+      };
+      if (control === 'share' && repeat) {
+        violate(
+          'DOUBLE_SHARE',
+          `a second Share in one composer session (isTrusted=${isTrusted}): Instagram would post twice`,
+        );
+      } else if (control === 'retry' && !isTrusted) {
+        violate('RETRY_CLICKED', 'the "Upload failed." Retry was clicked from script: instapost never retries');
+      } else if (!isTrusted && !UNTRUSTED_ALLOWED.includes(control)) {
+        violate('TAP_OUTSIDE_ALLOWLIST', `${control} clicked with isTrusted=false (ux.md P2: only +, Story and Share)`);
       }
+      return json(200, { ok: true });
+    }
+    if (p === FAKE_PATHS.log) {
+      if (method !== 'POST') return text(405, 'method not allowed', { allow: 'POST' });
+      let body: unknown;
+      try {
+        body = bodyObject(req);
+      } catch {
+        body = null;
+      }
+      const input = parseLogInput(body);
+      if (!input) return json(400, { error: 'invalid log step' });
+      emit({ kind: 'log', log: store.addLog(input) });
       return json(200, { ok: true });
     }
     if (p === FAKE_PATHS.composerView) {
@@ -391,6 +629,10 @@ export function createCore(opts: CoreOptions): FakeCore {
     if (p === `${FAKE_PATHS.api}writes` && read) return json(200, store.writes());
     if (p === `${FAKE_PATHS.api}violations` && read) return json(200, store.violations());
     if (p === `${FAKE_PATHS.api}composer-views` && read) return json(200, store.composerViews());
+    if (p === `${FAKE_PATHS.api}uploads` && read) return json(200, store.uploads());
+    if (p === `${FAKE_PATHS.api}log` && read) {
+      return json(200, store.log(Number(url.searchParams.get('since') ?? 0) || 0));
+    }
     if (p === `${FAKE_PATHS.api}knobs`) {
       if (read) return json(200, store.knobs());
       if (method !== 'POST') return text(405, 'method not allowed', { allow: 'GET, POST' });

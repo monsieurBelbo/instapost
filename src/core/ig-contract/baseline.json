@@ -15,7 +15,15 @@
   "swFetchHandler": false,
   "msiteMaxCssWidth": 767,
   "composerLandscapeCheck": "screen",
-  "geometry": { "model": "viewportDpr", "insets": [0, 0], "saveExposed": "unknown" },
+  "geometry": {
+    "model": "viewportDpr",
+    "insets": [0, 0],
+    "saveExposed": "unknown"
+  },
+  "menuOrder": "unknown",
+  "menuItemCount": "unknown",
+  "shareFooter": "unknown",
+  "configureContentType": "unknown",
   "provenance": {
     "isMobileKeyFound": "live run 2026-10-12 (Arc 155, secondary account, live build): C1 pass, is_mobile true in the InstagramUserAgent JSON",
     "route": "live run 2026-10-12: the composer landed on / after the hard reload (route homeOnly); logged-out code reading 2026-10-12 (F3): /create/story/ without media lands on /, which is the normal outcome, not drift",
@@ -26,6 +34,10 @@
     "swClaimsOnLoad": "logged-out code reading 2026-10-12 (F2): every logged-in load registers /www-service-worker.js?s=push&__d=www&enableAddToHomeScreen=<is_mobile>&zenon_device_id=<id>; a new URL installs a worker that calls skipWaiting() and clients.claim(); live run 2026-10-12: swControlled true",
     "swFetchHandler": "logged-out code reading 2026-10-12 (F2, 2024 copy of the worker; the 2026 one is behind login): no fetch handler; the P3 tripwire (SW_INTERCEPTS) watches for the day it gets one",
     "msiteMaxCssWidth": "logged-out code reading 2026-10-12 (F3): IGDS nav-bottom-screen-max, the mobile header with + → Story only at <= 767 CSS px; live run 2026-10-12 at 1512 CSS px: no story input (C4 fail)",
-    "composerLandscapeCheck": "live 2026-10-12 (Arc, owner, test account; window fitted 503x894 @2x, portrait, on a landscape screen: screen.orientation.type landscape-primary, matchMedia (orientation: landscape) false): with a photo picked, /create/story/ showed the snackbar 'Rotate your device to add to your story.' instead of the Share footer, after the H1 insert and after + → Story → pick by hand (H0); public bundles read 2026-10-12: PolarisStoryCreationPage isLandscape = screen.orientation.type (usePolarisDisplayProperties; else window.orientation, else viewport width > height), read at mount and on resize; the + → Story session start (startStoryCreationSession) checks innerHeight < innerWidth instead (C3a), and the H1 insert bypasses it (sessionId stays null)"
+    "composerLandscapeCheck": "live 2026-10-12 (Arc, owner, test account; window fitted 503x894 @2x, portrait, on a landscape screen: screen.orientation.type landscape-primary, matchMedia (orientation: landscape) false): with a photo picked, /create/story/ showed the snackbar 'Rotate your device to add to your story.' instead of the Share footer, after the H1 insert and after + → Story → pick by hand (H0); public bundles read 2026-10-12: PolarisStoryCreationPage isLandscape = screen.orientation.type (usePolarisDisplayProperties; else window.orientation, else viewport width > height), read at mount and on resize; the + → Story session start (startStoryCreationSession) checks innerHeight < innerWidth instead (C3a), and the H1 insert bypasses it (sessionId stays null)",
+    "menuOrder": "unknown until L18: the + menu module (PolarisMobileCreationMenuPopover) is not readable logged out; the fake models both orders (menuOrder knob) and defaults to Post first",
+    "menuItemCount": "logged-out code reading 2026-10-13 (autopilot spike): PolarisMobileCreationNavItem passes the popover exactly two actions (handleCameraIconClick = Story, handlePostIconClick = Post); the rendered count is unverified until L18",
+    "shareFooter": "logged-out code reading 2026-10-13: the composer renders ShareFooter (a button) when facebookDestinationId is null, else ShareFooterV2 (a role=button with the avatar, plus a Facebook badge when automatic crossposting is on); which one this account gets is L18",
+    "configureContentType": "autopilot spike 2026-10-13 (sealed CfT 155 and Chromium 156, a local server): resource timing exposes contentType application/json for a JSON answer; Instagram's own answer is L20"
   }
 }

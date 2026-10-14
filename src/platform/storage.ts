@@ -3,11 +3,20 @@
  * - session: the active hand-off state, its timer deadlines and the editor tab id (survives
  *   service-worker restarts, cleared with the browser session; the default access level keeps
  *   it away from the agent).
- * - local: settings, the rate-guard open log, the kill-switch lock (background-only, AM25) and
- *   the open composer popup (AM22).
+ * - local: settings (editor-owned), the rate-guard open log, the kill-switch lock (background-only, AM25),
+ *   the open composer popup (AM22), and the autopilot's background-owned keys (ux.md IR14): the detected
+ *   account, the last test pass, the + menu fingerprint and the last result.
  */
 import { browser } from 'wxt/browser';
-import type { HandoffState, HandoffTimer, Settings } from '../core/handoff/state.ts';
+import type {
+  ExpectedAccount,
+  HandoffState,
+  HandoffTimer,
+  LastResult,
+  MenuFingerprint,
+  MsiteLockReason,
+  Settings,
+} from '../core/handoff/state.ts';
 
 export interface SessionSchema {
   handoff: HandoffState;
@@ -25,8 +34,20 @@ export interface LocalSchema {
    * editor settings write can race it away; settings() merges it into Settings.msiteLockedUntil.
    */
   msiteLock: number | null;
+  /** AP-12: why `msiteLock` was set (background-only; cleared with the lock on Resume). */
+  msiteLockReasons: MsiteLockReason[];
   /** AM22: the open composer popup, so a reloaded extension can close it (storage.session is gone then). */
   composerWindow: ComposerWindowRecord | null;
+  /** ux.md §4.12: the account instapost detected (background-owned; the editor asks to forget it). */
+  expectedAccount: ExpectedAccount | null;
+  /** OD10: when the setup test (a Test run) last passed (background-owned). */
+  lastTestPassAt: number | null;
+  /** ux.md C10: the + menu's fingerprint (background-owned). */
+  menuFingerprint: MenuFingerprint | null;
+  /** The last run's result, for an editor opened later (background-owned). */
+  lastResult: LastResult | null;
+  /** ux.md §4.3: the autosaved draft (editor-owned). */
+  lastDocId: string | null;
 }
 
 export interface ComposerWindowRecord {

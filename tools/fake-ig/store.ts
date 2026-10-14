@@ -1,7 +1,9 @@
 /**
- * The fake's recordings (strategy §6.2): stories, requests, writes to real-shaped paths,
- * violations, what the composer page showed (AM37: its landscape gate), and the server-global
- * knobs. In memory; stories are also written to
+ * The fake's recordings (strategy §6.2, ux.md IF5–IF9): stories, uploads, requests, writes to the
+ * real-shaped paths, violations, what the composer page showed (AM37: its landscape gate), the page's
+ * story-creation telemetry (the log), and the server-global knobs. A story exists only once the publish
+ * request (configure) succeeded for an upload id that has an upload: server truth, whatever the page
+ * then shows. In memory; stories are also written to
  * `.fake-ig/stories/` (`<id>.jpg` + `<id>.json`) when a directory is given, and reloaded from
  * there on start, so the dashboard survives a server restart. reset() clears all of it,
  * the files included, and puts the knobs back to DEFAULT_KNOBS.
@@ -57,17 +59,65 @@ export interface StoryRecord extends SeenHeaders {
   contentType: string | null;
   /** Dimensions read from the JPEG itself (SOF marker); null if the body is not a JPEG. */
   size: Size | null;
-  /** From x-fake-meta; null when the header was missing or invalid. */
+  /** From the upload's x-fake-meta: the Share click's isTrusted; null when the header was missing or invalid. */
   isTrusted: boolean | null;
   meta: FakeShareMeta | null;
   metaError: string | null;
+  /** The upload id the publish request named (C13). */
+  uploadId: string;
+  /** The publish request's `share_to_facebook` was "true" (automatic crossposting, OD12). */
+  shareToFacebook: boolean;
+  /** Headers of the publish request (the story's own headers above are the upload's). */
+  configure: SeenHeaders;
 }
+
+/** A photo upload the server received (i.instagram.com/rupload_igphoto/fb_uploader_<id>), answered or not. */
+export interface UploadRecord extends SeenHeaders {
+  uploadId: string;
+  t: number;
+  bytes: number;
+  contentType: string | null;
+  meta: FakeShareMeta | null;
+  metaError: string | null;
+  /** What the server answered (knob `rupload` at the time). */
+  answer: string;
+}
+
+export interface UploadInput extends SeenHeaders {
+  uploadId: string;
+  body: Uint8Array;
+  contentType: string | null;
+  meta: FakeShareMeta | null;
+  metaError: string | null;
+  answer: string;
+}
+
+/** IF8: one step of the page's telemetry, with the server's time and order. */
+export interface LogRecord {
+  seq: number;
+  t: number;
+  step: string;
+  /** Per-document id the page chose (count steps per page load). */
+  doc: string;
+  fields: Record<string, string | number | boolean | null>;
+}
+
+export const VIOLATION_KINDS = [
+  /** A second Share in one composer session (Instagram's uploadStory has no in-flight guard: a second story). */
+  'DOUBLE_SHARE',
+  /** An untrusted click on the "Upload failed." toast's Retry: instapost never retries. */
+  'RETRY_CLICKED',
+  /** An untrusted click on a control outside the autopilot's allow-list (+, Story, Share; Post once by trial). */
+  'TAP_OUTSIDE_ALLOWLIST',
+  /** The upload carried no (or an invalid) x-fake-meta: the fake's own client is broken. */
+  'SHARE_META_INVALID',
+] as const;
+export type ViolationKind = (typeof VIOLATION_KINDS)[number];
 
 export interface ViolationRecord {
   t: number;
-  /** UNTRUSTED_CONTROL (FID-2): a click on any other fake control had isTrusted=false. */
-  kind: 'UNTRUSTED_SHARE' | 'SHARE_META_INVALID' | 'UNTRUSTED_CONTROL';
-  /** The story a Share violation belongs to; null for a control. */
+  kind: ViolationKind;
+  /** The story or upload a violation belongs to, when one; null for a control. */
   storyId: string | null;
   detail: string;
 }
@@ -78,11 +128,11 @@ export interface ComposerViewRecord extends FakeComposerView {
   t: number;
 }
 
-export interface StoryInput extends SeenHeaders {
+export interface StoryInput {
+  upload: UploadRecord;
   body: Uint8Array;
-  contentType: string | null;
-  meta: FakeShareMeta | null;
-  metaError: string | null;
+  shareToFacebook: boolean;
+  configure: SeenHeaders;
 }
 
 export interface Store {
@@ -97,6 +147,14 @@ export interface Store {
   /** Oldest first. */
   stories(): StoryRecord[];
   storyBytes(id: string): Uint8Array | null;
+  addUpload(input: UploadInput): UploadRecord;
+  /** The upload with this id and its bytes, or null. */
+  upload(uploadId: string): { record: UploadRecord; body: Uint8Array } | null;
+  /** Oldest first. */
+  uploads(): UploadRecord[];
+  addLog(rec: Omit<LogRecord, 'seq' | 't'>): LogRecord;
+  /** Oldest first; only records with seq > sinceSeq. */
+  log(sinceSeq?: number): LogRecord[];
   addViolation(rec: Omit<ViolationRecord, 't'>): ViolationRecord;
   violations(): ViolationRecord[];
   /** AM37: what the composer page showed (landscape gate), oldest first. */
@@ -116,6 +174,10 @@ export interface StoreOptions {
 const ID_RE = /^s[0-9a-z]+-[0-9a-f]{6}$/;
 /** Composer views kept in memory (a test produces a handful). */
 const MAX_COMPOSER_VIEWS = 200;
+/** Uploads kept in memory (their bytes too; a test makes a few). */
+const MAX_UPLOADS = 50;
+/** Log steps kept in memory. */
+const MAX_LOG = 2000;
 
 /** Width and height from a baseline or progressive JPEG's SOFn segment; null if not a JPEG. */
 export function jpegSize(b: Uint8Array): Size | null {
@@ -152,7 +214,10 @@ export function createStore(opts: StoreOptions = {}): Store {
   let stories: StoryRecord[] = [];
   let violations: ViolationRecord[] = [];
   let composerViews: ComposerViewRecord[] = [];
+  let uploads: UploadRecord[] = [];
+  let logs: LogRecord[] = [];
   const bytes = new Map<string, Uint8Array>();
+  const uploadBytes = new Map<string, Uint8Array>();
 
   const fileOf = (id: string, ext: 'jpg' | 'json') => resolve(dir ?? '.', `${id}.${ext}`);
 
@@ -188,16 +253,26 @@ export function createStore(opts: StoreOptions = {}): Store {
       return full;
     },
     writes: () => [...writes],
-    addStory({ body, ...rest }) {
+    addStory({ upload, body, shareToFacebook, configure }) {
       const t = now();
       const id = `s${t.toString(36)}-${randomBytes(3).toString('hex')}`;
       const rec: StoryRecord = {
-        ...rest,
+        ua: upload.ua,
+        ch: upload.ch,
+        fetch: upload.fetch,
+        origin: upload.origin,
+        viaSw: upload.viaSw,
         id,
         t,
         bytes: body.length,
+        contentType: upload.contentType,
         size: jpegSize(body),
-        isTrusted: rest.meta ? rest.meta.isTrusted : null,
+        isTrusted: upload.meta ? upload.meta.isTrusted : null,
+        meta: upload.meta,
+        metaError: upload.metaError,
+        uploadId: upload.uploadId,
+        shareToFacebook,
+        configure,
       };
       stories.push(rec);
       bytes.set(id, body);
@@ -216,6 +291,29 @@ export function createStore(opts: StoreOptions = {}): Store {
       if (!dir || !existsSync(fileOf(id, 'jpg'))) return null;
       return readFileSync(fileOf(id, 'jpg'));
     },
+    addUpload({ body, ...rest }) {
+      const rec: UploadRecord = { ...rest, t: now(), bytes: body.length };
+      uploads.push(rec);
+      uploadBytes.set(rec.uploadId, body);
+      if (uploads.length > MAX_UPLOADS) {
+        const old = uploads.shift();
+        if (old && !uploads.some((u) => u.uploadId === old.uploadId)) uploadBytes.delete(old.uploadId);
+      }
+      return rec;
+    },
+    upload(uploadId) {
+      const record = [...uploads].reverse().find((u) => u.uploadId === uploadId);
+      const body = uploadBytes.get(uploadId);
+      return record && body ? { record, body } : null;
+    },
+    uploads: () => [...uploads],
+    addLog(rec) {
+      const full: LogRecord = { ...rec, seq: ++seq, t: now() };
+      logs.push(full);
+      if (logs.length > MAX_LOG) logs = logs.slice(-MAX_LOG);
+      return full;
+    },
+    log: (sinceSeq = 0) => logs.filter((l) => l.seq > sinceSeq),
     addViolation(rec) {
       const full: ViolationRecord = { ...rec, t: now() };
       violations.push(full);
@@ -242,7 +340,10 @@ export function createStore(opts: StoreOptions = {}): Store {
       stories = [];
       violations = [];
       composerViews = [];
+      uploads = [];
+      logs = [];
       bytes.clear();
+      uploadBytes.clear();
     },
   };
 }

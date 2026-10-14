@@ -95,3 +95,17 @@ export function pruneOpens(opens: readonly number[], now: number, day: LocalDay)
   const today = day.startOf(now);
   return opens.filter((t) => t === latest || t > now - HOUR_MS || t >= today).sort((a, b) => a - b);
 }
+
+/** UX §4.10/§4.11: opens counted against the caps at `now` (the rolling hour and the local day). */
+export interface RateCounts {
+  hour: number;
+  today: number;
+}
+
+export function rateCounts(opens: readonly number[], now: number, day: LocalDay): RateCounts {
+  const today = day.startOf(now);
+  return {
+    hour: opens.filter((t) => t > now - HOUR_MS).length,
+    today: opens.filter((t) => t >= today).length,
+  };
+}

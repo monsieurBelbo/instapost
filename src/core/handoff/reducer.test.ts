@@ -1,14 +1,19 @@
 /**
- * U9 (strategy §7.11): the full transition table, table-driven: guard fail; DESKTOP_SHELL;
- * NOT_LOGGED_IN (no lock); landscape refits once; input missing → H0; inject → ready;
- * inject → ignored → H0 with no second Inject; challenge → kill and lock; off-host or undefined
- * URL after arming → kill; window closed → cleanup; composer left → finished; probe mode. Plus AM2
- * re-probes, the start guards, timers and failed effects, and the 2026-10-12 changes: the verified
- * fit with its one retry and the guided resize (W2/W3), the service worker as diagnostics with an
- * interception tripwire (P1–P3), the msite width row (P4), the wait for a late story input (P5) and
- * the browser flavour (P6).
- * "No transition ever emits a retry" is asserted for every row and, generically, over
- * thousands of seeded random event sequences.
+ * U9 + U19 (strategy §7.11, docs/ux.md): the hand-off reducer, table-driven.
+ *
+ * - The autopilot chain: probe → account → openingEntry → inserting → composeReady → sharing →
+ *   confirmingUpload → finished, effect by effect, with its record, badge and last result.
+ * - Share once, across a re-injection (same document), a new document and a simulated worker restart;
+ *   no Share in a test run; no Share in a Share test before its write-block rules are verified.
+ * - The account prompt and its timeout; the queue (K10/K11); Stop only before Share; a window closed after
+ *   Share is Couldn't confirm; the hold and a late upgrade (§6.4); Finish by hand; the offer-manual, hold and
+ *   kill effects; a kill after Posted keeps Posted and locks (IR12).
+ * - Kept from the hand-off era: the verified fit, its retry and the guided resize (W2/W3), the first
+ *   navigation (AM20), the kill switch (AM17), the service-worker tripwire (P1–P3), the width rule (P4),
+ *   the late input (P5), the browser flavour (P6) and the portrait shim's reading (AM37, SH-1, SH-2).
+ *
+ * "No transition ever emits a retry" and Share once are asserted for every row and, generically, over
+ * seeded random event sequences.
  */
 import { describe, expect, it } from 'vitest';
 import type { Size } from '../geometry/fit.ts';
@@ -17,12 +22,19 @@ import type { PageOrientation, ProbeReport } from '../ig-contract/contract.ts';
 import { uaRule } from '../ig-contract/device-profile.ts';
 import { rehearsalRules, SESSION_RULE_IDS } from '../ig-contract/rules.ts';
 import { COMPOSER_URL, classifyComposerUrl } from '../ig-contract/urls.ts';
+import { classifyEntry, isOk } from './outcome.ts';
 import type { RateDecision } from './rate-guard.ts';
-import { handoffReducer } from './reducer.ts';
+import { handoffReducer, statusOf } from './reducer.ts';
 import {
+  ACCOUNT_PROMPT_MS,
   type AgentEventName,
+  type AgentFact,
   CLOSE_DELAY_MS,
+  CLOSING_BACKSTOP_MS,
+  CONFIRM_TICK_MS,
   defaultSettings,
+  ENTRY_BUDGET_MS,
+  type EntryFact,
   ERROR_EFFECT,
   type ErrorCode,
   FIT_RETRY_DELAY_MS,
@@ -30,26 +42,42 @@ import {
   type HandoffCtx,
   type HandoffEffect,
   type HandoffEvent,
-  type HandoffPhase,
+  type HandoffMode,
   type HandoffRecord,
   type HandoffState,
   type HandoffStatus,
+  HIDDEN_WAIT_MS,
+  HOME_CLOSE_MS,
+  HOME_READY_MS,
   IDLE,
-  INACTIVITY_TIMEOUT_MS,
-  INJECT_READY_TIMEOUT_MS,
   INPUT_WAIT_MS,
+  INSERT_BUDGET_MS,
   isArmed,
+  MANUAL_DEADLINE_MS,
+  MAX_NET_ENTRIES,
+  MAX_OTHER_NET_ENTRIES,
+  MAX_WRITE_NET_ENTRIES,
+  type MenuFingerprint,
   MSITE_LOCK_MS,
   NAVIGATION_TIMEOUT_MS,
+  type NetEntry,
+  OFFER_MANUAL_MS,
+  POSTED_CLOSE_MS,
+  PRE_SHARE_CAP_MS,
   RESIZE_POLL_MS,
   RESIZE_TIMEOUT_MS,
+  type SessionPhase,
   type Settings,
+  SHARE_ACK_MS,
+  SHARE_ACTIVATION_WAIT_MS,
+  UPLOAD_HOLD_MS,
+  type WindowedSession,
 } from './state.ts';
 
 // ---------------------------------------------------------------------------------------
 // Fixtures
 
-const T0 = Date.UTC(2026, 9, 11, 12);
+const T0 = Date.UTC(2026, 9, 13, 12);
 /** The owner's MacBook (S8): avail 1512x949 at top 33; the popup frame is 0x32. */
 const SCREEN = { availLeft: 0, availTop: 33, availWidth: 1512, availHeight: 949 };
 const WIN = 7;
@@ -59,8 +87,14 @@ const LOGIN = 'https://www.instagram.com/accounts/login/?next=%2Fcreate%2Fstory%
 const CHALLENGE = 'https://www.instagram.com/challenge/action/x/';
 const CHECKPOINT = 'https://www.instagram.com/checkpoint/1/';
 const ACCOUNTS_CENTER = 'https://accountscenter.instagram.com/';
+const SUSPENDED = 'https://www.instagram.com/accounts/suspended/?next=%2Fcreate%2Fstory%2F';
+const CODE_ENTRY = 'https://www.instagram.com/auth_platform/codeentry/?apc=x';
+const CONSENT = 'https://www.instagram.com/consent/?flow=x';
 const SESSION_IDS = [...SESSION_RULE_IDS];
+const SHA = 'a'.repeat(64);
+const HANDLE = 'testuser';
 
+/** A probe of msite's home page after hydration (the usual landing, F3): the story input and the account. */
 const goodProbe = (over: Partial<ProbeReport> = {}): ProbeReport => ({
   marker: true,
   isMobile: true,
@@ -72,19 +106,25 @@ const goodProbe = (over: Partial<ProbeReport> = {}): ProbeReport => ({
   navType: 'reload',
   storyInput: 'present',
   acceptOk: true,
-  canvas: { w: 1022, h: 1818, css: { x: 0, y: 0, w: 511, h: 909 } },
   lang: 'en',
+  account: { handle: HANDLE, candidates: 1 },
+  entryFound: true,
+  activation: { isActive: false, hasBeenActive: false },
+  visibility: 'visible',
   ...over,
 });
 
-const startEv = (mode: 'post' | 'probe' = 'post', screen = SCREEN, rehearsal = true): HandoffEvent => ({
-  type: 'start',
-  exportId: mode === 'post' ? 'exp_1' : null,
-  mode,
-  rehearsal,
-  screen,
-  browser: 'chromium',
-});
+const startEv = (mode: HandoffMode = 'post', screen = SCREEN, over: Partial<HandoffEvent> = {}): HandoffEvent =>
+  ({
+    type: 'start',
+    exportId: mode === 'check' ? null : 'exp_1',
+    mode,
+    screen,
+    browser: 'chromium',
+    queue: false,
+    exportSha256: SHA,
+    ...over,
+  }) as HandoffEvent;
 const tab = (status: 'loading' | 'complete' | undefined, url: string | undefined, tabId = TAB): HandoffEvent => ({
   type: 'tabUpdated',
   tabId,
@@ -92,22 +132,70 @@ const tab = (status: 'loading' | 'complete' | undefined, url: string | undefined
   url,
 });
 const report = (over: Partial<ProbeReport> = {}): HandoffEvent => ({ type: 'agentReport', probe: goodProbe(over) });
-/** agentInjected; `fresh: false` = the agent was already in that document (AM16). */
-const injected = (fresh: boolean): HandoffEvent => ({ type: 'agentInjected', fresh });
-/** AM37: the portrait shim's readings: installed on a landscape screen, or switched off (E2E flag). */
 const SHIM_INSTALLED: PageOrientation = { type: 'portrait-primary', shim: 'installed' };
 const SHIM_PRESENT: PageOrientation = { type: 'portrait-primary', shim: 'present' };
 const SHIM_OFF: PageOrientation = { type: 'landscape-primary', shim: 'off' };
-/** agentInjected with the shim's reading for that document (AM37). */
-const injectedWith = (fresh: boolean, orientation: PageOrientation): HandoffEvent => ({
+const injectedWith = (fresh: boolean, orientation?: PageOrientation): HandoffEvent => ({
   type: 'agentInjected',
   fresh,
-  orientation,
+  ...(orientation ? { orientation } : {}),
 });
-const SUSPENDED = 'https://www.instagram.com/accounts/suspended/?next=%2Fcreate%2Fstory%2F';
-const CODE_ENTRY = 'https://www.instagram.com/auth_platform/codeentry/?apc=x';
-const CONSENT = 'https://www.instagram.com/consent/?flow=x';
 const agent = (event: AgentEventName): HandoffEvent => ({ type: 'agentEvent', event });
+const fact = (f: AgentFact): HandoffEvent => ({ type: 'agentFact', fact: f });
+const timer = (name: (typeof HANDOFF_TIMERS)[number]): HandoffEvent => ({ type: 'timer', timer: name });
+
+const entryFact = (over: Partial<EntryFact> = {}): HandoffEvent =>
+  fact({
+    kind: 'entry',
+    result: 'armed',
+    fpUsed: false,
+    storyIndex: 1,
+    glyph: '0a1b2c3d',
+    menuCount: 2,
+    trials: 1,
+    plusTaps: 2,
+    armedMs: 310,
+    ...over,
+  });
+const composeFact = (over: Partial<Extract<AgentFact, { kind: 'compose' }>> = {}): HandoffEvent =>
+  fact({
+    kind: 'compose',
+    onComposer: true,
+    drawn: true,
+    landscape: false,
+    controls: 1,
+    variant: 'v1',
+    fbAuto: false,
+    settled: true,
+    settleMs: 1600,
+    canvas: { w: 1022, h: 1818 },
+    imageScore: null,
+    ...over,
+  });
+const SHARE_DONE = fact({ kind: 'share-done', t0Wall: T0 });
+const net = (entries: NetEntry[], elapsedMs: number): HandoffEvent => fact({ kind: 'net', entries, elapsedMs });
+const UPLOAD = '/rupload_igphoto/fb_uploader_1760356800000';
+const PUBLISH = '/api/v1/media/configure_to_story/';
+const upload = (status: number, end = 1500): NetEntry => ({
+  host: 'i',
+  path: UPLOAD,
+  status,
+  type: status ? 'application/json' : '',
+  redirected: false,
+  start: 100,
+  end,
+});
+const publish = (status: number, end = 2500, over: Partial<NetEntry> = {}): NetEntry => ({
+  host: 'www',
+  path: PUBLISH,
+  status,
+  type: status ? 'application/json' : '',
+  redirected: false,
+  start: 1600,
+  end,
+  ...over,
+});
+
 /** tabs.get inner 500x900 inside a 500x(900 + frameH) window: the S8 frame is 0x32. */
 const measured = (frameH = 32): HandoffEvent => ({
   type: 'tabMeasured',
@@ -115,13 +203,11 @@ const measured = (frameH = 32): HandoffEvent => ({
   outer: { left: 500, top: 33, width: 500, height: 900 + frameH },
 });
 const MEASURED = measured();
-/** windowFit for MEASURED's 0x32 frame: inner 511x909 (S8). */
 const FIT = (() => {
   const f = windowFit(SCREEN, { w: 0, h: 32 });
   if (!f.ok) throw new Error('fixture screen must fit');
   return f;
 })();
-/** updateWindow's verification: the tab reached `inner` (fitted) or stayed at `inner` (not). */
 const fittedEv = (fitted: boolean, inner: Size = FIT.inner, outer?: WindowBox): HandoffEvent => ({
   type: 'windowFitted',
   box: FIT.outer,
@@ -131,22 +217,17 @@ const fittedEv = (fitted: boolean, inner: Size = FIT.inner, outer?: WindowBox): 
   outer: outer ?? { ...FIT.outer, width: inner.w, height: inner.h + 32 },
 });
 const FITTED = fittedEv(true);
-/** Arc ignoring the bounds (F1): the tab stays at 1512x902 in a 1512x949 window. */
 const ARC_TAB = { w: 1512, h: 902 };
 const ARC_WINDOW = { left: 1831, top: 13, width: 1512, height: 949 };
 const NOT_FITTED = fittedEv(false, ARC_TAB, ARC_WINDOW);
-/** The settled Arc popup, as measureTab reads it (frame 0x47). */
 const ARC_MEASURED: HandoffEvent = { type: 'tabMeasured', inner: ARC_TAB, outer: ARC_WINDOW, zoom: 1 };
 const sized = (w: number, h: number): HandoffEvent => ({
   type: 'windowSized',
   inner: { w, h },
   outer: { left: 0, top: 0, width: w, height: h + 47 },
 });
-/** P5: the input wait runs out (the probe's INPUT_MISSING stands). */
-const INPUT_WAITED: HandoffEvent = { type: 'timer', timer: 'inputWait' };
+const INPUT_WAITED = timer('inputWait');
 const HOUR = 3_600_000;
-/** The session switches every active status carries (AM21): the defaults of a guarded post. */
-const SWITCHES = { rehearsal: true, assistedInsert: true } as const;
 
 interface Step {
   prev: HandoffState;
@@ -163,7 +244,12 @@ interface Opts {
   chromeMajor?: number;
   brandedBrowser?: boolean;
   resizeTimeoutMs?: number;
+  fingerprint?: MenuFingerprint | null;
+  dwellScale?: number;
+  budgetScale?: number;
 }
+
+const EXPECTED = { handle: HANDLE, detectedAt: T0 - 86_400_000 };
 
 /** Drives the reducer like the runner would, recording every transition. */
 class Run {
@@ -178,16 +264,26 @@ class Run {
   }
 
   ctx(): HandoffCtx {
-    const guarded = this.opts.guarded ?? true;
+    // The live build by default: a guarded build's static ruleset blocks every post's writes.
+    const guarded = this.opts.guarded ?? false;
     return {
       now: this.now,
       guarded,
       chromeMajor: this.opts.chromeMajor ?? 155,
-      settings: { ...defaultSettings(guarded), ...this.opts.settings },
+      settings: {
+        ...defaultSettings(guarded),
+        expectedAccount: EXPECTED,
+        lastTestPassAt: T0 - 1,
+        ...this.opts.settings,
+      },
       rate: this.opts.rate ?? { ok: true },
       uuid: () => `u${++this.n}`,
+      random: () => 0.5,
+      fingerprint: this.opts.fingerprint ?? null,
       brandedBrowser: this.opts.brandedBrowser ?? false,
       ...(this.opts.resizeTimeoutMs !== undefined ? { resizeTimeoutMs: this.opts.resizeTimeoutMs } : {}),
+      ...(this.opts.dwellScale !== undefined ? { dwellScale: this.opts.dwellScale } : {}),
+      ...(this.opts.budgetScale !== undefined ? { budgetScale: this.opts.budgetScale } : {}),
     };
   }
 
@@ -208,7 +304,7 @@ class Run {
     return this;
   }
 
-  get phase(): HandoffPhase {
+  get phase(): SessionPhase {
     return this.state.phase;
   }
   get effects(): HandoffEffect[] {
@@ -223,67 +319,99 @@ class Run {
   count(pred: (e: HandoffEffect) => boolean): number {
     return this.effects.filter(pred).length;
   }
-  get injects(): number {
-    return this.count(isInject);
+  get shares(): number {
+    return this.count(isShare);
+  }
+  /** The session as a windowed state (tests only). */
+  get w(): WindowedSession {
+    const s = this.state;
+    if (s.phase === 'idle' || s.phase === 'queued' || s.phase === 'opening' || s.phase === 'closing') {
+      throw new Error(`not windowed: ${s.phase}`);
+    }
+    return s;
   }
 }
 
-const isInject = (e: HandoffEffect): boolean => e.type === 'sendAgent' && e.command.type === 'agent/inject';
-const isProbeCmd = (e: HandoffEffect): boolean => e.type === 'sendAgent' && e.command.type === 'agent/probe';
-const watchMs = (e: HandoffEffect): number | null =>
-  e.type === 'sendAgent' && e.command.type === 'agent/watch' ? e.command.readyTimeoutMs : null;
+const isDrive =
+  (step: string) =>
+  (e: HandoffEffect): boolean =>
+    e.type === 'sendAgent' && e.command.type === 'agent/drive' && e.command.step === step;
+const isShare = isDrive('share');
+const isEntry = isDrive('open-entry');
+const isInsert = isDrive('insert');
 const types = (effects: HandoffEffect[]) => effects.map((e) => e.type);
+const lastRecord = (r: Run): HandoffRecord | undefined =>
+  r.effects.flatMap((e) => (e.type === 'writeRecord' ? [e.record] : [])).at(-1);
+const lastOutcome = (r: Run) => lastRecord(r)?.outcome;
+const lastResult = (r: Run) => r.statuses.flatMap((s) => (s.result ? [s.result] : [])).at(-1);
 
-/** start → windowCreated → rules → fit → navigate. Stops in `navigating` (kill switch not armed). */
-function DRIVE_NAVIGATING(r: Run): Run {
-  r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
+// ---- drivers ----------------------------------------------------------------------------
+
+/** start → popup → rules → fit → navigate. Stops in `navigating`. */
+function toNavigating(r: Run, mode: HandoffMode = 'post'): Run {
+  r.send(startEv(mode), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
   r.send(MEASURED, FITTED);
   return r;
 }
-/** start → windowCreated → rules → fit → navigate → hard reload → reload committed. Stops in `reloading`. */
-function toReloading(r: Run, mode: 'post' | 'probe' = 'post'): Run {
-  r.send(startEv(mode), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-  r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
+/** …→ the first www commit → hard reload → its own commit. Stops in `reloading`. */
+function toReloading(r: Run, mode: HandoffMode = 'post'): Run {
+  toNavigating(r, mode).send(tab('loading', COMPOSER_URL), tab('loading', HOME));
   return r;
 }
-/** …then the reload's complete and agentInjected: the agent/probe is out. */
-function toReport(r: Run, mode: 'post' | 'probe' = 'post'): Run {
-  toReloading(r, mode).send(tab('complete', COMPOSER_URL), { type: 'agentInjected' });
+/** …→ the reload lands on home, shim installed, agent in: the probe is out. */
+function toReport(r: Run, mode: HandoffMode = 'post', o: PageOrientation = SHIM_INSTALLED): Run {
+  toReloading(r, mode).send(tab('complete', HOME), injectedWith(true, o));
   return r;
 }
-function toInjecting(r: Run): Run {
-  toReport(r).send(report());
+/** …→ the probe passes, the account is ok: + → Story waits for its dwell. */
+function toEntry(r: Run, mode: HandoffMode = 'post'): Run {
+  toReport(r, mode).send(report());
   return r;
 }
-function toShare(r: Run): Run {
-  toInjecting(r).send({ type: 'agentGetFile' }, agent('composer-ready'));
+/** …→ the dwell ran: agent/drive open-entry is out. */
+function toEntrySent(r: Run, mode: HandoffMode = 'post'): Run {
+  toEntry(r, mode).send(timer('dwell'));
   return r;
 }
-function toPick(r: Run, over: Partial<ProbeReport> = { storyInput: 'absent' }): Run {
-  // P5: a missing input is waited for once; the wait runs out (a no-op when nothing waits).
-  toReport(r).send(report(over), INPUT_WAITED);
+/** …→ Story armed the story input: the insert waits for its dwell. */
+function toInserting(r: Run, mode: HandoffMode = 'post'): Run {
+  toEntrySent(r, mode).send(entryFact());
   return r;
 }
-/** As toShare, in a post with rehearsal off (AM19 holds the popup open after Share). */
-function toShareRehearsalOff(r: Run): Run {
-  r.send(startEv('post', SCREEN, false));
-  r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-  r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
-  r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report(), { type: 'agentGetFile' });
-  r.send(agent('composer-ready'));
+/** …→ the insert command, the file served, the photo set: the compose watch is out. */
+function toAwaitComposer(r: Run, mode: HandoffMode = 'post'): Run {
+  toInserting(r, mode).send(timer('dwell'), { type: 'agentGetFile' }, fact({ kind: 'inserted' }));
   return r;
 }
-/** A later full-document load of the composer whose fresh agent shows a new document (AM16). */
-const NEW_DOCUMENT: HandoffEvent[] = [tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injected(true)];
-/** A later same-document load (pushState, replaceState): the agent was already there. */
-const SAME_DOCUMENT: HandoffEvent[] = [
-  tab('loading', `${COMPOSER_URL}?x`),
-  tab('complete', `${COMPOSER_URL}?x`),
-  injected(false),
+/** Instagram's SPA navigation to /create/story/ after the photo was processed (a same-document load). */
+const TO_COMPOSER: HandoffEvent[] = [
+  tab('loading', COMPOSER_URL),
+  tab('complete', COMPOSER_URL),
+  injectedWith(false, SHIM_PRESENT),
 ];
+/** …→ the composer drew the photo with one Share control. */
+function toComposeReady(r: Run, mode: HandoffMode = 'post'): Run {
+  toAwaitComposer(r, mode).send(...TO_COMPOSER, composeFact());
+  return r;
+}
+/** …→ the share dwell ran: the Share command is out (once). */
+function toSharing(r: Run): Run {
+  toComposeReady(r).send(timer('dwell'));
+  return r;
+}
+/** …→ the agent tapped Share: the outcome rules run. */
+function toConfirming(r: Run): Run {
+  toSharing(r).send(SHARE_DONE);
+  return r;
+}
+/** …→ Instagram's upload and publish answered 200 JSON: Posted. */
+function toPosted(r: Run): Run {
+  toConfirming(r).send(net([upload(200), publish(200)], 2600));
+  return r;
+}
 
 // ---------------------------------------------------------------------------------------
-// Per-run invariants ("no retry"), checked after every table row and every random run.
+// Per-run invariants, checked after every table row and every random run.
 
 const FLOW = new Set<HandoffEffect['type']>([
   'openWindow',
@@ -295,388 +423,369 @@ const FLOW = new Set<HandoffEffect['type']>([
   'injectAgent',
   'sendAgent',
   'serveFile',
+  'raiseWindow',
 ]);
 
 const activeId = (s: HandoffState): string | null => (s.phase === 'idle' ? null : s.handoffId);
-
-interface Tally {
-  [handoffId: string]: Partial<Record<string, number>>;
-}
+const windowed = (s: HandoffState): WindowedSession | null =>
+  s.phase === 'idle' || s.phase === 'queued' || s.phase === 'opening' || s.phase === 'closing' ? null : s;
+const afterShare = (s: WindowedSession | null): boolean =>
+  s !== null && ((s.shareSent && s.shareRefused === null) || s.sharedBy !== null);
 
 const LIMITS: Record<string, number> = {
   openWindow: 1,
   installRules: 1,
   navigate: 1,
   hardReload: 1,
-  inject: 1,
   serveFile: 1,
-  // W2: the fit and the single refit measure; the fit, its one retry and the single refit update.
+  'drive:open-entry': 1,
+  'drive:insert': 1,
+  'drive:share': 1,
   measureTab: 2,
   updateWindow: 3,
   writeRecord: 1,
   lockMsite: 1,
   noteOpen: 1,
+  verifyTestRules: 1,
 };
 
-function checkStep(step: Step, ctx: Pick<HandoffCtx, 'guarded' | 'settings'>, tally: Tally): void {
+type Tally = Record<string, Record<string, number>>;
+
+function key(e: HandoffEffect): string {
+  return e.type === 'sendAgent' && e.command.type === 'agent/drive' ? `drive:${e.command.step}` : e.type;
+}
+
+function checkStep(step: Step, tally: Tally): void {
   const { prev, event, effects, state, now } = step;
   const id = activeId(state) ?? activeId(prev);
   const ts = types(effects);
+  const pw = windowed(prev);
+  const sw = windowed(state);
 
-  // Counters per hand-off: never a second open, rules, navigation, reload, inject, file, record, lock.
+  // Never a second open, rules, navigation, reload, file, entry, insert, Share, record or lock.
   if (id !== null) {
-    const t = tally[id] ?? {};
-    tally[id] = t;
+    tally[id] ??= {};
+    const t = tally[id];
     for (const e of effects) {
-      const key = isInject(e) ? 'inject' : e.type;
-      t[key] = (t[key] ?? 0) + 1;
-      const limit = LIMITS[key];
-      if (limit !== undefined) expect(t[key], `${key} for ${id}`).toBeLessThanOrEqual(limit);
+      const k = key(e);
+      t[k] = (t[k] ?? 0) + 1;
+      const limit = LIMITS[k];
+      if (limit !== undefined) expect(t[k], `${k} for ${id}`).toBeLessThanOrEqual(limit);
     }
   }
 
-  // From idle, the only flow effect is the start's openWindow (closeWindow: an orphan popup).
-  if (prev.phase === 'idle') {
-    for (const e of effects) if (FLOW.has(e.type)) expect(e.type === 'openWindow' && event.type === 'start').toBe(true);
+  // From idle (or the queue), the only flow effect is the start's openWindow (closeWindow: an orphan popup).
+  if (prev.phase === 'idle' || prev.phase === 'queued') {
+    for (const e of effects) if (FLOW.has(e.type)) expect(e.type).toBe('openWindow');
   }
   // A closing session emits nothing that moves the flow forward again.
   if (prev.phase === 'closing') {
-    for (const e of effects) {
-      expect(FLOW.has(e.type) || ['lockMsite', 'writeRecord', 'armTimer', 'noteOpen'].includes(e.type)).toBe(false);
-    }
+    for (const e of effects)
+      expect(FLOW.has(e.type) || ['lockMsite', 'writeRecord', 'noteOpen'].includes(e.type)).toBe(false);
   }
-  // Rules are removed only when the session is over, and after closeWindow when both appear.
+  // Rules are removed only when the session is over, after closeWindow when both appear.
   if (ts.includes('removeRules')) {
     expect(state.phase).toBe('idle');
     if (ts.includes('closeWindow')) expect(ts.indexOf('closeWindow')).toBeLessThan(ts.indexOf('removeRules'));
   }
   for (const e of effects) if (e.type === 'removeRules') expect(e.ruleIds).toEqual(SESSION_IDS);
-  // Closing a window always comes first in its transition.
-  if (state.phase === 'closing' && prev.phase !== 'closing' && prev.phase !== 'opening')
-    expect(ts[0]).toBe('closeWindow');
-  // The hard reload comes only from `navigating`.
+  // Closing comes first (after the editor refocus, never before a kill's close).
+  if (state.phase === 'closing' && prev.phase !== 'closing' && prev.phase !== 'opening') {
+    const kill = ts.includes('lockMsite');
+    expect(kill ? ts[0] : ts[0] === 'focusEditor' ? ts[1] : ts[0]).toBe('closeWindow');
+  }
+  // The hard reload comes only from `navigating`; the navigation only from a verified or usable fit.
   if (ts.includes('hardReload')) expect(prev.phase).toBe('navigating');
-  // W2/W3: the navigation starts only from a verified fit, a usable tab after the retry, or a
-  // usable size read while resizing; never from a window still at Arc's 1512x949.
   if (ts.includes('navigate')) {
     expect(['fitting', 'resizing']).toContain(prev.phase);
-    const win = state.phase !== 'idle' ? state.win : null;
+    const win = sw?.win ?? null;
     const last = win?.updates.at(-1);
     const usable = win?.finalTab ? isUsableInner(win.finalTab, win.zoom) : false;
     expect(usable || (prev.phase === 'fitting' && last?.fitted === true)).toBe(true);
-    if (prev.phase === 'resizing') expect(win?.manualResize).toBe(true);
   }
-  // W3: the tab size is read on demand only while the owner resizes.
   if (ts.includes('readSize')) expect(prev.phase).toBe('resizing');
-  // AL-3: only the new popup (fitting) settles before it is measured; the refit reads it once.
   for (const e of effects) if (e.type === 'measureTab') expect(e.settle).toBe(state.phase === 'fitting');
-  // P5 (AL-1/AF-1): a decision that read C4 from a report without a story input waited for it first.
-  for (const e of effects) {
-    if (e.type !== 'notifyEditor' || e.status.c4 === undefined || e.status.c4 === 'unknown') continue;
-    // Re-probes of a later document (a level already decided) never wait (one wait per hand-off).
-    if (e.status.probe?.storyInput !== 'absent' || prev.phase !== 'probing' || prev.level !== null) continue;
-    expect(prev.inputWaitUsed, 'C4 read from an input-less report without the input wait').toBe(true);
-  }
-  // W2 hardening: the runner's re-applies (and the hold) only while the tab is still about:blank,
-  // i.e. for the fit and its retry in `fitting`; the refit after the navigation is one windows.update.
   for (const e of effects) {
     if (e.type !== 'updateWindow') continue;
     expect(e.reapply).toBe(state.phase === 'fitting');
-    if (state.phase === 'probing') expect(state.step).toBe('refitUpdate');
   }
-  // P1: being controlled by a worker never fails a session; DESKTOP_SHELL means is_mobile was not true.
-  for (const e of effects) {
-    if (e.type !== 'notifyEditor' || e.status.error !== 'DESKTOP_SHELL') continue;
-    expect(e.status.probe?.isMobile).not.toBe(true);
-  }
-  // P2: SW_TOOK_CONTROL is never emitted any more.
-  for (const e of effects) if (e.type === 'notifyEditor') expect(e.status.error).not.toBe('SW_TOOK_CONTROL');
-  // Locks only with a kill.
+  // Locks only with a kill (the kill switch or TEST_LEAK).
   for (const e of effects) {
     if (e.type !== 'lockMsite') continue;
     expect(e.until).toBe(now + MSITE_LOCK_MS);
     const err = effects.flatMap((x) => (x.type === 'notifyEditor' ? [x.status.error] : []));
-    expect(err.some((c) => c === 'KILLED_CHALLENGE' || c === 'KILLED_OFFHOST')).toBe(true);
+    expect(err.some((c) => c === 'KILLED_CHALLENGE' || c === 'KILLED_OFFHOST' || c === 'TEST_LEAK')).toBe(true);
   }
   // Statuses describe the session at hand (or a refused start).
   for (const e of effects) {
     if (e.type !== 'notifyEditor') continue;
     expect([null, activeId(prev), activeId(state)]).toContain(e.status.handoffId);
   }
-  // The single inject: post mode, a file, H1 enabled, after a probe that passed every row.
-  if (effects.some(isInject)) {
-    expect(prev.phase).toBe('probing');
-    expect(state).toMatchObject({ phase: 'injecting', mode: 'post', exportId: expect.any(String) });
-    expect(ctx.settings.assistedInsert).toBe(true);
-    const p = state.phase === 'injecting' ? state.probe : null;
-    expect(p).toMatchObject({ portrait: true, storyInput: 'present', acceptOk: true });
-    expect(p?.isMobile).not.toBe(false);
-    // P1/P3: control is diagnostics; a worker that intercepted requests never sees an insert.
-    expect(p?.swIntercepted).not.toBe(true);
-    expect(p?.inner.w).toBeLessThanOrEqual(767);
-    if (ctx.guarded) expect(p?.marker).toBe(true);
-    if (prev.phase === 'probing' && prev.strict) expect(p?.isMobile).toBe(true);
-    // Never an upgrade: once a level was decided (H0, or H1 already used), no inject follows.
-    if (prev.phase === 'probing') expect(prev.level).toBeNull();
+  // Taps: open-entry only from the entry dwell, after the account decision; the insert only after an armed
+  // entry; Share once (IR11), only from composeReady in a post or a verified Share test.
+  if (effects.some(isEntry)) {
+    expect(prev).toMatchObject({ phase: 'openingEntry', sub: 'dwell', entrySent: false });
+    expect(pw?.account.confirmedBy).not.toBeNull();
   }
-  // Probe mode never injects and never serves a file.
-  const mode = state.phase !== 'idle' ? state.mode : prev.phase !== 'idle' ? prev.mode : null;
-  if (mode === 'probe') expect(ts.includes('serveFile') || effects.some(isInject)).toBe(false);
-  // The kill switch, once armed, acts on every update of the composer tab.
+  if (effects.some(isInsert)) {
+    expect(prev).toMatchObject({ phase: 'inserting', sub: 'dwell', insertSent: false });
+    expect(pw?.entry?.result).toBe('armed');
+  }
+  if (effects.some(isShare)) {
+    // From the share dwell, or (AP-5) when a page hidden at the dwell shows again.
+    expect(prev).toMatchObject({ phase: 'composeReady', shareSent: false });
+    expect(['dwell', 'awaitVisible']).toContain((prev as { sub?: string }).sub);
+    // AP-5: never sent to a page known to be hidden.
+    expect(sw?.hidden).toBe(false);
+    expect(state).toMatchObject({ phase: 'sharing', shareSent: true });
+    expect(['post', 'shareTest']).toContain(pw?.mode);
+    if (pw?.mode === 'shareTest') expect(pw.testRulesVerified).toBe(true);
+    expect(pw?.account.confirmedBy).not.toBeNull();
+    expect(pw?.compose).toMatchObject({ onComposer: true, drawn: true, landscape: false, controls: 1 });
+  }
+  if (ts.includes('serveFile')) expect(prev).toMatchObject({ phase: 'inserting', sub: 'sent' });
+  // A test never presses Share; a check never taps at all.
+  const mode = sw?.mode ?? pw?.mode ?? null;
+  if (mode === 'test') expect(effects.some(isShare)).toBe(false);
+  if (mode === 'check')
+    expect(effects.some((e) => isEntry(e) || isInsert(e) || isShare(e) || e.type === 'serveFile')).toBe(false);
+  // AP-2: a run whose writes are blocked (a Share test, a guarded post) is never Posted or Not posted
+  // after Share: its writes were meant to be blocked, so only O9, O10 or Couldn't confirm can decide it.
+  const session = sw ?? pw;
+  if (session?.writeBlocked) {
+    for (const e of effects) {
+      if (e.type !== 'notifyEditor' || !e.status.result) continue;
+      expect(e.status.result.kind).not.toBe('posted');
+      if (e.status.result.kind === 'notPosted') expect(e.status.result.code).not.toBe('UPLOAD_FAILED');
+    }
+  }
+  // Posted only from Instagram's publish answer (2xx JSON, not redirected), when it is first decided.
+  for (const e of effects) {
+    if (e.type !== 'notifyEditor' || e.status.result?.kind !== 'posted' || state.phase !== 'finished') continue;
+    if (prev.phase === 'finished' && prev.result.kind === 'posted') continue;
+    const evidence = state.net;
+    const pub = evidence.filter((x) => classifyEntry(x) === 'publish')[0];
+    expect(pub, 'posted without a publish request').toBeDefined();
+    expect(pub && isOk(pub.status) && !pub.redirected && /json/.test(pub.type)).toBe(true);
+  }
+  // After Share: never "Stopped", never a before-Share failure (Couldn't confirm unless the rules decided).
+  if (afterShare(sw) && state.phase === 'finished' && prev.phase !== 'finished') {
+    expect(['posted', 'notPosted', 'unknown', 'shareTested']).toContain(state.result.kind);
+    if (state.result.kind === 'notPosted') expect(state.result.code).toBe('UPLOAD_FAILED');
+  }
+  // Stop after the Share command does nothing (until the result is known).
+  if (event.type === 'cancel' && afterShare(pw) && prev.phase !== 'finished') expect(effects).toEqual([]);
+  // The kill switch acts on every armed update of the composer tab.
   if (event.type === 'tabUpdated' && event.tabId === TAB && isArmed(prev)) {
     const v = classifyComposerUrl(event.url);
     if (v.kind === 'kill') expect(ts).toEqual(expect.arrayContaining(['closeWindow', 'lockMsite']));
-    if (v.kind === 'stop') {
-      expect(ts).toContain('closeWindow');
-      expect(ts).not.toContain('lockMsite');
-    }
-    // AM17: an unknown www page never locks, never injects and is never pre-answered "posted".
-    if (v.kind === 'unknown-left' && prev.phase !== 'finished') {
-      expect(ts).not.toContain('lockMsite');
-      expect(ts).not.toContain('injectAgent');
-      expect(state.phase === 'closing' || state.phase === 'finished').toBe(true);
-      if (state.phase === 'finished') expect(state.detectedPosted).toBe(false);
-    }
-  }
-  // AM20: before arming, a hidden URL change (no status) in `navigating` is off-host: kill.
-  if (event.type === 'tabUpdated' && prev.phase === 'navigating' && event.tabId === prev.tabId) {
-    if (event.url === undefined && event.status === undefined) {
-      expect(ts).toEqual(expect.arrayContaining(['closeWindow', 'lockMsite']));
-    }
-    if (ts.includes('hardReload')) expect(classifyComposerUrl(event.url).kind).toMatch(/^(ok|composer-left)$/);
-  }
-  // AM21: every status of an active session carries that session's own switches.
-  const session = state.phase !== 'idle' ? state : prev.phase !== 'idle' ? prev : null;
-  for (const e of effects) {
-    if (e.type !== 'notifyEditor' || !session || e.status.handoffId !== session.handoffId) continue;
-    if (e.status.phase === 'idle') continue;
-    expect(e.status.rehearsal).toBe(session.rehearsal);
-    expect(e.status.assistedInsert).toBe(session.assistedInsert);
   }
   // AM22: a session that opened a popup remembers it, and every end of a session forgets it.
   if (prev.phase === 'opening' && state.phase === 'scoping') expect(ts).toContain('rememberWindow');
-  if (prev.phase !== 'idle' && state.phase === 'idle') expect(ts).toContain('forgetWindow');
-  // AM24: H1 reaches awaitingShare only after the file was served.
-  if (prev.phase === 'injecting' && state.phase === 'awaitingShare') expect(prev.fileServed).toBe(true);
-  // AM19: a held-open popup arms no close delay; only an engaged-after-Share post with rehearsal off holds.
-  if (state.phase === 'finished' && prev.phase !== 'finished') {
-    const armsClose = effects.some((e) => e.type === 'armTimer' && e.timer === 'closeDelay');
-    expect(armsClose).toBe(!state.holdOpen);
-    if (state.holdOpen) expect(state.mode).toBe('post');
-    // AM28: with rehearsal on, only an unconfirmed insert (no pre-answer) holds the popup open.
-    if (state.holdOpen && state.rehearsal) expect(state).toMatchObject({ insertDispatched: true, postedUnknown: true });
-    if (state.detectedPosted) expect(['awaitingShare', 'probing']).toContain(prev.phase);
-    expect(state.detectedPosted && state.postedUnknown).toBe(false);
-  }
-}
-
-/** What happened in the current composer document of the current hand-off (AM16, AM28). */
-interface DocFacts {
-  watched: boolean;
-  shareable: boolean;
-}
-
-/**
- * Per-document invariants (AM28). A new document is the reload's first probe or a fresh agent after a
- * later load: the agent and its watch of the old one are gone, and so is any Share made there.
- * - Every watching phase (injecting, awaitingPick, awaitingShare) has an agent/watch in this document,
- *   so it can still end by an agent event, not only by a cancel or the 15 min timeout.
- * - "Posted" is pre-answered only if the composer was ready (awaitingShare) in this document.
- */
-function checkDocument(step: Step, doc: DocFacts): void {
-  const { prev, event, effects, state } = step;
-  const started = prev.phase === 'idle' && state.phase !== 'idle';
-  const fresh =
-    event.type === 'agentInjected' && event.fresh !== false && prev.phase === 'probing' && prev.step === 'injectAgent';
-  if (started || fresh || (prev.phase === 'reloading' && state.phase === 'probing')) {
-    doc.watched = false;
-    doc.shareable = false;
-  }
-  if (effects.some((e) => watchMs(e) !== null)) doc.watched = true;
-  const readyNow = (st: HandoffStatus) => st.phase === 'awaitingShare';
-  if (state.phase === 'awaitingShare' || effects.some((e) => e.type === 'notifyEditor' && readyNow(e.status))) {
-    doc.shareable = true;
-  }
-  if (state.phase === 'injecting' || state.phase === 'awaitingPick' || state.phase === 'awaitingShare') {
-    expect(doc.watched, `${state.phase} without a watch in this document`).toBe(true);
-  }
-  if (state.phase === 'finished' && prev.phase !== 'finished' && state.detectedPosted) {
-    expect(doc.shareable, 'posted pre-answered without a ready composer in this document').toBe(true);
-  }
+  if (prev.phase !== 'idle' && prev.phase !== 'queued' && state.phase === 'idle') expect(ts).toContain('forgetWindow');
 }
 
 function checkRun(r: Run): void {
   const tally: Tally = {};
-  const ctx = r.ctx();
-  const doc: DocFacts = { watched: false, shareable: false };
-  for (const step of r.steps) {
-    checkStep(step, ctx, tally);
-    checkDocument(step, doc);
-  }
+  for (const step of r.steps) checkStep(step, tally);
 }
 
 // ---------------------------------------------------------------------------------------
-// The happy path, effect by effect
+// The autopilot, effect by effect
 
-describe('U9 hand-off reducer: happy path (H1)', () => {
-  it('emits the §3.6 sequence in order', () => {
+describe('U19 the autopilot: Post story to Posted with no input', () => {
+  it('emits the sequence in order, and only Instagram’s publish answer says Posted', () => {
     const r = new Run();
     const guess = firstGuess(SCREEN);
-    const fit = windowFit(SCREEN, { w: 0, h: 32 });
-    if (!guess.ok || !fit.ok) throw new Error('fixture screen must fit');
+    if (!guess.ok) throw new Error('fixture screen must fit');
 
     expect(r.send(startEv())).toEqual([
       { type: 'noteOpen', t: T0 },
       { type: 'openWindow', box: guess.outer },
-      { type: 'armTimer', timer: 'inactivity', ms: INACTIVITY_TIMEOUT_MS },
-      {
+      { type: 'armTimer', timer: 'preShareCap', ms: PRE_SHARE_CAP_MS },
+      { type: 'setBadge', text: '…', color: '#4a6fd1' },
+      expect.objectContaining({
         type: 'notifyEditor',
-        status: { handoffId: 'hof_u1', phase: 'opening', level: null, rehearsal: true, assistedInsert: true },
-      },
+        status: expect.objectContaining({ phase: 'opening', mode: 'post', step: 'instagram', canStop: true }),
+      }),
     ]);
-    expect(r.state).toMatchObject({ phase: 'opening', handoffId: 'hof_u1', nonce: 'u2', exportId: 'exp_1' });
+    // ux.md §4.6: docked at the right edge of the editor's screen, at its top.
+    expect(guess.outer.left + guess.outer.width).toBe(SCREEN.availLeft + SCREEN.availWidth);
+    expect(guess.outer.top).toBe(SCREEN.availTop);
 
+    // A post installs only rule 1001: no write blocking (that is every test's).
     const scoped = r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB });
     expect(scoped[0]).toEqual({
       type: 'installRules',
       removeRuleIds: SESSION_IDS,
-      addRules: [uaRule(TAB, 155, 'full'), ...rehearsalRules(TAB)],
+      addRules: [uaRule(TAB, 155, 'full')],
     });
-    // AM22: the popup is remembered in storage.local, so a reloaded extension can still close it.
     expect(scoped[1]).toEqual({ type: 'rememberWindow', windowId: WIN, tabId: TAB, handoffId: 'hof_u1' });
-    expect(types(r.send({ type: 'rulesInstalled' }))).toEqual(['measureTab', 'notifyEditor']);
-    expect(r.state).toMatchObject({ phase: 'fitting', fitStep: 'measure' });
-    // W2: the settled window measured; one update to windowFit (with the target inner size to verify).
-    expect(r.send(MEASURED)).toEqual([
-      { type: 'updateWindow', windowId: WIN, tabId: TAB, box: fit.outer, inner: fit.inner, reapply: true },
-    ]);
+    r.send({ type: 'rulesInstalled' }, MEASURED);
     const nav = r.send(FITTED);
     expect(nav.slice(0, 2)).toEqual([
       { type: 'navigate', tabId: TAB, url: COMPOSER_URL },
       { type: 'armTimer', timer: 'navigation', ms: NAVIGATION_TIMEOUT_MS },
     ]);
-    // W5: the status that starts the navigation carries the window's sizing.
-    expect(nav[2]).toMatchObject({
-      type: 'notifyEditor',
-      status: { phase: 'navigating', window: { attempts: 1, manualResize: false, finalTab: fit.inner } },
-    });
-    // Before navigating, tab updates (about:blank, url hidden) are ignored.
-    expect(r.send(tab('complete', undefined))).toEqual([]);
-    expect(r.send(tab('loading', COMPOSER_URL)).slice(0, 2)).toEqual([
+    expect(r.send(tab('loading', COMPOSER_URL)).slice(0, 3)).toEqual([
       { type: 'hardReload', tabId: TAB },
       { type: 'clearTimer', timer: 'navigation' },
+      { type: 'armTimer', timer: 'stepDeadline', ms: 30_000 },
     ]);
-    expect(r.phase).toBe('reloading');
-    expect(r.send(tab('loading', COMPOSER_URL))).toEqual([]);
-    expect(r.send(tab('complete', COMPOSER_URL))[0]).toEqual({ type: 'injectAgent', tabId: TAB });
-    expect(r.send({ type: 'agentInjected' })).toEqual([
+    r.send(tab('loading', HOME));
+    expect(r.send(tab('complete', HOME)).slice(0, 2)).toEqual([
+      { type: 'injectAgent', tabId: TAB },
+      { type: 'armTimer', timer: 'stepDeadline', ms: HOME_READY_MS },
+    ]);
+    expect(r.send(injectedWith(true, SHIM_INSTALLED))).toEqual([
       { type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } },
     ]);
-    const h1 = r.send(report());
-    expect(types(h1)).toEqual(['sendAgent', 'sendAgent', 'notifyEditor']);
-    expect(watchMs(h1[0] as HandoffEffect)).toBe(INJECT_READY_TIMEOUT_MS);
-    expect(isInject(h1[1] as HandoffEffect)).toBe(true);
-    expect(r.state).toMatchObject({ phase: 'injecting', level: 'H1', route: 'direct' });
+
+    // The probe passes on home; the account is the expected one: + → Story after a human dwell.
+    const decided = r.send(report());
+    expect(types(decided)).toEqual(['clearTimer', 'armTimer', 'notifyEditor']);
+    expect(decided[1]).toEqual({ type: 'armTimer', timer: 'dwell', ms: 1100 });
+    expect(r.state).toMatchObject({
+      phase: 'openingEntry',
+      sub: 'dwell',
+      route: 'homeOnly',
+      account: { detected: HANDLE, expected: HANDLE, decision: 'ok', confirmedBy: 'match' },
+    });
+    expect(r.lastStatus).toMatchObject({ phase: 'openingEntry', step: 'story', c4: 'pass', path: '/' });
+
+    expect(r.send(timer('dwell'))).toEqual([
+      { type: 'sendAgent', tabId: TAB, command: { type: 'agent/drive', step: 'open-entry', fingerprint: null } },
+      { type: 'armTimer', timer: 'stepDeadline', ms: ENTRY_BUDGET_MS },
+    ]);
+    // Story armed the input; the menu's fingerprint is learned.
+    const armed = r.send(entryFact());
+    expect(types(armed)).toEqual(['clearTimer', 'storeFingerprint', 'armTimer', 'notifyEditor']);
+    expect(armed[1]).toEqual({
+      type: 'storeFingerprint',
+      fingerprint: { count: 2, storyIndex: 1, glyph: '0a1b2c3d', savedAt: T0 },
+    });
+    expect(armed[2]).toEqual({ type: 'armTimer', timer: 'dwell', ms: 2250 });
+    expect(r.state).toMatchObject({ phase: 'inserting', sub: 'dwell' });
+
+    expect(r.send(timer('dwell'))).toEqual([
+      { type: 'sendAgent', tabId: TAB, command: { type: 'agent/drive', step: 'insert' } },
+      { type: 'armTimer', timer: 'stepDeadline', ms: INSERT_BUDGET_MS },
+    ]);
     expect(r.send({ type: 'agentGetFile' })).toEqual([{ type: 'serveFile', exportId: 'exp_1' }]);
-    expect(r.send(agent('composer-ready'))).toEqual([
-      {
-        type: 'notifyEditor',
-        status: { handoffId: 'hof_u1', phase: 'awaitingShare', level: 'H1', route: 'direct', ...SWITCHES },
-      },
-      // AM13: one more probe of the ready composer, for C8.
-      { type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } },
+    expect(r.send({ type: 'agentGetFile' })).toEqual([]);
+    expect(types(r.send(fact({ kind: 'inserted' })))).toEqual(['sendAgent', 'armTimer', 'notifyEditor']);
+    expect(r.state).toMatchObject({ phase: 'inserting', sub: 'awaitComposer' });
+
+    // Instagram processes the photo and pushState's /create/story/: a same-document load (AM16).
+    r.send(tab('loading', COMPOSER_URL));
+    expect(r.state).toMatchObject({ phase: 'inserting', docCheck: 'awaitComplete', composerEntered: true });
+    expect(r.send(tab('complete', COMPOSER_URL))).toEqual([{ type: 'injectAgent', tabId: TAB }]);
+    expect(r.send(injectedWith(false, SHIM_PRESENT))).toEqual([]);
+    expect(r.state).toMatchObject({ docCheck: null, pageOrientation: SHIM_PRESENT });
+
+    // The composer drew the photo, its Share footer settled: a dwell of at least 2 s, then Share once.
+    const ready = r.send(composeFact());
+    expect(types(ready)).toEqual(['clearTimer', 'sendAgent', 'armTimer', 'notifyEditor']);
+    expect(ready[2]).toEqual({ type: 'armTimer', timer: 'dwell', ms: 2500 });
+    const share = r.send(timer('dwell'));
+    expect(share).toEqual([
+      { type: 'clearTimer', timer: 'preShareCap' },
+      { type: 'clearTimer', timer: 'hiddenWait' },
+      { type: 'sendAgent', tabId: TAB, command: { type: 'agent/drive', step: 'share' } },
+      { type: 'armTimer', timer: 'shareAck', ms: SHARE_ACK_MS },
+      expect.objectContaining({ type: 'notifyEditor' }),
     ]);
-    const ready = goodProbe({ canvas: { w: 1080, h: 1920, css: { x: 0, y: 0, w: 511, h: 908 } } });
-    expect(r.send({ type: 'agentReport', probe: ready })).toEqual([
-      {
-        type: 'notifyEditor',
-        status: {
-          handoffId: 'hof_u1',
-          phase: 'awaitingShare',
-          level: 'H1',
-          route: 'direct',
-          probe: ready,
-          ...SWITCHES,
-        },
-      },
-    ]);
-    // The owner clicks Share; the composer SPA-navigates home (C9). Rehearsal on: closes in 3 s.
-    const fin = r.send(tab(undefined, HOME));
-    expect(types(fin)).toEqual(['notifyEditor', 'writeRecord', 'armTimer']);
-    expect(fin[0]).toMatchObject({ status: { phase: 'finished', detectedPosted: true } });
-    expect(fin[2]).toEqual({ type: 'armTimer', timer: 'closeDelay', ms: CLOSE_DELAY_MS });
-    const rec = fin[1];
-    if (rec?.type !== 'writeRecord') throw new Error('expected a record');
-    expect(rec.record).toMatchObject({
+    expect(r.state).toMatchObject({ phase: 'sharing', shareSent: true, shareSentAt: T0 });
+    expect(r.lastStatus).toMatchObject({ phase: 'sharing', step: 'share', canStop: false, shareSent: true });
+
+    r.tick(800);
+    const done = r.send(SHARE_DONE);
+    expect(types(done)).toEqual(['clearTimer', 'armTimer', 'notifyEditor']);
+    expect(done[1]).toEqual({ type: 'armTimer', timer: 'confirmTick', ms: CONFIRM_TICK_MS });
+    expect(r.state).toMatchObject({ phase: 'confirmingUpload', sharedBy: 'autopilot', sharedAt: T0 + 800 });
+    // The upload alone decides nothing; going home alone decides nothing.
+    expect(r.send(net([upload(200)], 1600))).toEqual([]);
+    r.send(tab('loading', HOME));
+    expect(r.phase).toBe('confirmingUpload');
+
+    r.tick(1200);
+    const posted = r.send(net([publish(200)], 2900));
+    expect(r.state).toMatchObject({ phase: 'finished', hold: 'none', result: { kind: 'posted', account: HANDLE } });
+    // Instagram went home before the answer: the window closes 2 s later.
+    expect(posted).toContainEqual({ type: 'armTimer', timer: 'closeDelay', ms: HOME_CLOSE_MS });
+    expect(posted).toContainEqual({ type: 'setBadge', text: '✓', color: '#1f8f4e' });
+    expect(posted).toContainEqual(
+      expect.objectContaining({
+        type: 'writeLastResult',
+        last: expect.objectContaining({ handoffId: 'hof_u1', mode: 'post' }),
+      }),
+    );
+    const rec = lastRecord(r);
+    expect(rec).toMatchObject({
       id: 'hof_u1',
       mode: 'post',
-      level: 'H1',
-      rehearsal: true,
-      chMode: 'full',
-      outcome: 'posted-confirmed',
-      route: 'direct',
-      preflight: { C1: 'pass', C2: 'pass', C3: 'pass', C4: 'pass', C5: 'pass', swIntercepted: false },
-      readyProbe: ready,
-      browser: 'chromium',
-      // W5: requested (first guess), created (the settled window), frame delta, the verified update.
-      window: {
-        screen: SCREEN,
-        requested: guess.outer,
-        created: MEASURED.type === 'tabMeasured' ? MEASURED.outer : null,
-        createdTab: { w: 500, h: 900 },
-        frameDelta: { w: 0, h: 32 },
-        updates: [{ step: 'fit', box: fit.outer, target: fit.inner, fitted: true, tab: fit.inner }],
-        attempts: 1,
-        manualResize: false,
-        finalTab: fit.inner,
-        zoom: null,
-      },
+      outcome: 'posted',
+      result: { kind: 'posted', detail: 'publish 200 application/json' },
+      route: 'homeOnly',
+      account: { detected: HANDLE, confirmedBy: 'match' },
+      entry: { result: 'armed', storyIndex: 1, trials: 1 },
+      compose: { variant: 'v1', controls: 1 },
+      evidence: { sharedBy: 'autopilot', sharedAt: T0 + 800, alarms: [] },
+      exportSha256: SHA,
+      preflight: { C1: 'pass', C3: 'pass', C3b: 'pass', C4: 'pass', C5: 'fail' },
     });
-    expect(rec.record.swControllerChanges).toBeUndefined();
-    // C8 comes from the ready composer; the deciding probe is kept as it was.
-    expect(rec.record.preflight?.C8).toEqual({ inner: ready.inner, dpr: ready.dpr, canvas: ready.canvas });
-    expect(rec.record.probe).toEqual(goodProbe());
-    expect(rec.record.phaseLog.map((p) => p.phase)).toEqual([
+    // Paths on the record have their digits normalised.
+    expect(rec?.evidence?.net.map((e) => e.path)).toEqual([
+      '/rupload_igphoto/fb_uploader_<n>',
+      '/api/v<n>/media/configure_to_story/',
+    ]);
+    expect(rec?.phaseLog.map((p) => p.phase)).toEqual([
       'opening',
       'scoping',
       'fitting',
       'navigating',
       'reloading',
       'probing',
-      'injecting',
-      'awaitingShare',
+      'openingEntry',
+      'inserting',
+      'composeReady',
+      'sharing',
+      'confirmingUpload',
       'finished',
     ]);
-    expect(types(r.tick(CLOSE_DELAY_MS).send({ type: 'timer', timer: 'closeDelay' }))).toEqual([
-      'closeWindow',
-      'notifyEditor',
-    ]);
-    expect(types(r.send({ type: 'windowRemoved', windowId: WIN }))).toEqual([
-      'removeRules',
-      ...HANDOFF_TIMERS.map(() => 'clearTimer'),
-      'forgetWindow',
-      'notifyEditor',
-    ]);
-    expect(r.state).toEqual({
-      phase: 'idle',
-      last: { handoffId: 'hof_u1', outcome: 'posted-confirmed', endedAt: T0 + CLOSE_DELAY_MS },
-    });
-    // The owner says "not posted" after all.
-    expect(r.send({ type: 'outcome', handoffId: 'hof_u1', posted: false })).toEqual([
-      { type: 'patchRecordOutcome', handoffId: 'hof_u1', outcome: 'not-posted' },
-    ]);
+    expect(rec?.steps).toMatchObject({ opened: T0, share: T0 + 800, confirmed: T0 + 2000 });
+
+    const closing = r.tick(HOME_CLOSE_MS).send(timer('closeDelay'));
+    expect(types(closing).slice(0, 2)).toEqual(['focusEditor', 'closeWindow']);
+    expect(closing).not.toContainEqual(expect.objectContaining({ type: 'writeRecord' }));
+    r.send({ type: 'windowRemoved', windowId: WIN });
+    expect(r.state).toMatchObject({ phase: 'idle', last: { handoffId: 'hof_u1', outcome: 'posted' } });
+    expect(r.shares).toBe(1);
     checkRun(r);
   });
 
-  it('uaOnly and rehearsal OFF change only the installed rules', () => {
-    const r = new Run({ settings: { chMode: 'uaOnly' } });
-    r.send(startEv('post', SCREEN, false));
-    const [install] = r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB });
-    expect(install).toEqual({
-      type: 'installRules',
-      removeRuleIds: SESSION_IDS,
-      addRules: [uaRule(TAB, 155, 'uaOnly')],
+  it('Posted before Instagram went home closes 8 s after the confirmation, or 2 s after home', () => {
+    const r = toPosted(new Run());
+    expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'closeDelay', ms: POSTED_CLOSE_MS });
+    expect(r.state).toMatchObject({ phase: 'finished', homeClose: false });
+    r.tick(1000).send(tab(undefined, HOME));
+    expect(r.steps.at(-1)?.effects).toEqual([{ type: 'armTimer', timer: 'closeDelay', ms: HOME_CLOSE_MS }]);
+    expect(r.state).toMatchObject({ homeClose: true });
+    checkRun(r);
+  });
+
+  it('statusOf: a reconnected editor sees the run as it is, then the last result', () => {
+    const r = toComposeReady(new Run());
+    expect(statusOf(r.state)).toMatchObject({
+      phase: 'composeReady',
+      step: 'story',
+      canStop: true,
+      compose: { variant: 'v1' },
     });
+    r.send(timer('dwell'), SHARE_DONE, net([upload(200), publish(200)], 2600), timer('closeDelay'));
+    r.send({ type: 'windowRemoved', windowId: WIN });
+    expect(statusOf(r.state)).toMatchObject({ handoffId: 'hof_u1', phase: 'idle', result: { kind: 'posted' } });
+    expect(statusOf(IDLE)).toEqual({ handoffId: null, phase: 'idle' });
   });
 });
 
@@ -687,22 +796,15 @@ interface Row {
   name: string;
   opts?: Opts;
   script: (r: Run) => void;
-  phase: HandoffPhase;
+  phase: SessionPhase;
   /** The last status's error (null: none). */
   error?: ErrorCode | null;
   has?: HandoffEffect['type'][];
   lacks?: HandoffEffect['type'][];
-  injects?: number;
+  shares?: number;
   check?: (r: Run) => void;
 }
 
-const lastOutcome = (r: Run) => {
-  const recs = r.effects.flatMap((e) => (e.type === 'writeRecord' ? [e.record.outcome] : []));
-  return recs.at(-1);
-};
-const lastRecord = (r: Run) => r.effects.flatMap((e) => (e.type === 'writeRecord' ? [e.record] : [])).at(-1);
-
-// W2/W3 fixtures: the owner's ultrawide (editor screen of the 2026-10-12 run) and Arc's 0x47 frame.
 const OWNER_UW = { availLeft: 1512, availTop: -428, availWidth: 3440, availHeight: 1410 };
 const ARC_DELTA = { w: 0, h: 47 };
 function fitFor(screen = OWNER_UW, delta = ARC_DELTA) {
@@ -710,47 +812,31 @@ function fitFor(screen = OWNER_UW, delta = ARC_DELTA) {
   if (!f.ok) throw new Error('fixture screen must fit');
   return f;
 }
-/** updateWindow's verification for `f`: fitted at its target, or the tab still at `tab`. */
-const verify = (
-  f: ReturnType<typeof fitFor>,
-  fitted: boolean,
-  tab: Size = ARC_TAB,
-  applied?: number,
-): HandoffEvent => ({
+const verify = (f: ReturnType<typeof fitFor>, fitted: boolean, t: Size = ARC_TAB, applied?: number): HandoffEvent => ({
   type: 'windowFitted',
   box: f.outer,
   target: f.inner,
   fitted,
-  inner: fitted ? f.inner : tab,
-  outer: fitted ? f.outer : { ...ARC_WINDOW, width: tab.w, height: tab.h + 47 },
+  inner: fitted ? f.inner : t,
+  outer: fitted ? f.outer : { ...ARC_WINDOW, width: t.w, height: t.h + 47 },
   ...(applied === undefined ? {} : { applied }),
 });
-const RETRY: HandoffEvent = { type: 'timer', timer: 'fitRetry' };
-/** start on the ultrawide → popup → rules → the settled Arc popup measured. Stops in fitting/update. */
-function toArcFit(r: Run, rehearsal = true): Run {
-  r.send(startEv('post', OWNER_UW, rehearsal), { type: 'windowCreated', windowId: WIN, tabId: TAB });
+const RETRY = timer('fitRetry');
+function toArcFit(r: Run): Run {
+  r.send(startEv('post', OWNER_UW), { type: 'windowCreated', windowId: WIN, tabId: TAB });
   r.send({ type: 'rulesInstalled' }, ARC_MEASURED);
   return r;
 }
-/** …both updates ignored (still 1512x902): the guided resize. */
 function toResizing(r: Run): Run {
   const f = fitFor();
   toArcFit(r).send(verify(f, false), RETRY, verify(f, false));
   return r;
 }
-/** A probe of msite's home page, where the composer lands without media (F3). */
-const homeProbe = (over: Partial<ProbeReport> = {}): HandoffEvent =>
-  report({ inner: { w: 524, h: 932 }, canvas: undefined, ...over });
-/** navigating → hard reload → the reload lands on `/` (homeOnly) → agent injected: the probe is out. */
-function toHomeReport(r: Run): Run {
-  r.send(tab('loading', COMPOSER_URL), tab('loading', HOME), tab('complete', HOME), { type: 'agentInjected' });
-  return r;
-}
 
 const ROWS: Row[] = [
-  // Start guards: no window opens.
+  // ---- the start and its guards ------------------------------------------------------------
   {
-    name: 'start: MSITE_LOCKED until the lock expires',
+    name: 'start: MSITE_LOCKED until the lock expires, no window',
     opts: { settings: { msiteLockedUntil: T0 + 1000 } },
     script: (r) => r.send(startEv()),
     phase: 'idle',
@@ -759,20 +845,67 @@ const ROWS: Row[] = [
     check: (r) => expect(r.lastStatus).toMatchObject({ handoffId: null, freeAt: T0 + 1000 }),
   },
   {
-    name: 'start: an expired lock no longer refuses',
-    opts: { settings: { msiteLockedUntil: T0 } },
-    script: (r) => r.send(startEv()),
-    phase: 'opening',
-    has: ['openWindow'],
+    name: 'start: RATE_LIMITED by the hour cap, even when it may queue; the refusal names the rule',
+    opts: { rate: { ok: false, code: 'RATE_LIMITED', rule: 'hour', freeAt: T0 + HOUR } },
+    script: (r) => r.send(startEv('post', SCREEN, { queue: true } as Partial<HandoffEvent>)),
+    phase: 'idle',
+    error: 'RATE_LIMITED',
+    lacks: ['openWindow', 'noteOpen', 'armTimer'],
+    check: (r) => expect(r.lastStatus).toMatchObject({ handoffId: null, freeAt: T0 + HOUR, detail: 'hour' }),
   },
   {
-    name: 'start: RATE_LIMITED',
-    opts: { rate: { ok: false, code: 'RATE_LIMITED', rule: 'spacing', freeAt: T0 + 5000 } },
-    script: (r) => r.send(startEv()),
+    name: 'start: a test within the 60 s spacing is refused (no queue), naming the spacing',
+    opts: { rate: { ok: false, code: 'RATE_LIMITED', rule: 'spacing', freeAt: T0 + 42_000 } },
+    script: (r) => r.send(startEv('test')),
     phase: 'idle',
     error: 'RATE_LIMITED',
     lacks: ['openWindow', 'noteOpen'],
-    check: (r) => expect(r.lastStatus?.freeAt).toBe(T0 + 5000),
+    check: (r) => expect(r.lastStatus).toMatchObject({ handoffId: null, freeAt: T0 + 42_000, detail: 'spacing' }),
+  },
+  {
+    name: 'K10/K11: blocked only by the 60 s spacing, a queued post waits and starts by itself',
+    opts: { rate: { ok: false, code: 'RATE_LIMITED', rule: 'spacing', freeAt: T0 + 42_000 } },
+    script: (r) => {
+      r.send(startEv('post', SCREEN, { queue: true } as Partial<HandoffEvent>));
+      expect(r.state).toMatchObject({ phase: 'queued', startAt: T0 + 42_000 });
+      expect(r.steps.at(-1)?.effects).toContainEqual({ type: 'armTimer', timer: 'queue', ms: 42_000 });
+      expect(r.lastStatus).toMatchObject({ phase: 'queued', queuedUntil: T0 + 42_000, canStop: true });
+      // A second click while queued is HANDOFF_BUSY; the queue stays.
+      r.send(startEv());
+      expect(r.lastStatus).toMatchObject({ handoffId: null, error: 'HANDOFF_BUSY' });
+      r.opts.rate = { ok: true };
+      r.tick(42_000).send(timer('queue'));
+    },
+    phase: 'opening',
+    has: ['openWindow', 'noteOpen'],
+    check: (r) => {
+      // The queued id is the run's id (the editor follows it).
+      expect(r.state).toMatchObject({ handoffId: 'hof_u1' });
+      expect(r.count((e) => e.type === 'noteOpen')).toBe(1);
+    },
+  },
+  {
+    name: 'K11: Cancel while queued goes idle with Stopped; no window, no open noted, no record',
+    opts: { rate: { ok: false, code: 'RATE_LIMITED', rule: 'spacing', freeAt: T0 + 42_000 } },
+    script: (r) => r.send(startEv('post', SCREEN, { queue: true } as Partial<HandoffEvent>), { type: 'cancel' }),
+    phase: 'idle',
+    lacks: ['openWindow', 'noteOpen', 'writeRecord'],
+    check: (r) => {
+      expect(r.lastStatus).toMatchObject({ handoffId: 'hof_u1', phase: 'idle', result: { kind: 'stopped' } });
+      expect(r.steps.at(-1)?.effects).toContainEqual({ type: 'clearTimer', timer: 'queue' });
+    },
+  },
+  {
+    name: 'K11: when the queue fires a cap applies after all → RATE_LIMITED, idle',
+    opts: { rate: { ok: false, code: 'RATE_LIMITED', rule: 'spacing', freeAt: T0 + 42_000 } },
+    script: (r) => {
+      r.send(startEv('post', SCREEN, { queue: true } as Partial<HandoffEvent>));
+      r.opts.rate = { ok: false, code: 'RATE_LIMITED', rule: 'hour', freeAt: T0 + HOUR };
+      r.tick(42_000).send(timer('queue'));
+    },
+    phase: 'idle',
+    error: 'RATE_LIMITED',
+    lacks: ['openWindow'],
   },
   {
     name: 'start: HANDOFF_BUSY leaves the active session alone',
@@ -781,7 +914,6 @@ const ROWS: Row[] = [
     error: 'HANDOFF_BUSY',
     check: (r) => {
       expect(r.count((e) => e.type === 'openWindow')).toBe(1);
-      expect(r.lastStatus?.handoffId).toBeNull();
       expect(r.steps.at(-1)?.state).toBe(r.steps.at(-2)?.state);
     },
   },
@@ -793,1113 +925,66 @@ const ROWS: Row[] = [
     lacks: ['openWindow'],
   },
   {
-    name: 'fit: SCREEN_TOO_SMALL once the real frame is measured',
-    script: (r) => {
-      r.send(startEv('post', { ...SCREEN, availHeight: 700 }), { type: 'windowCreated', windowId: WIN, tabId: TAB });
-      r.send({ type: 'rulesInstalled' }, measured(100));
-    },
-    phase: 'closing',
-    error: 'SCREEN_TOO_SMALL',
-    has: ['closeWindow'],
-    lacks: ['navigate'],
+    name: 'start: a post or a test without an export is refused (only the check has no file)',
+    script: (r) => r.send(startEv('test', SCREEN, { exportId: null } as Partial<HandoffEvent>)),
+    phase: 'idle',
+    error: 'AGENT_UNREACHABLE',
+    lacks: ['openWindow'],
   },
   {
-    name: 'start: an implausible Chrome major refuses (no garbage UA)',
+    name: 'start: an implausible Chrome major refuses',
     opts: { chromeMajor: Number.NaN },
     script: (r) => r.send(startEv()),
     phase: 'idle',
     error: 'AGENT_UNREACHABLE',
     lacks: ['openWindow'],
   },
-
-  // §3.6 step 7, row by row.
   {
-    name: 'guard fail: guarded build without the marker → GUARD_NOT_FAKE, nothing injected',
-    script: (r) => toReport(r).send(report({ marker: false })),
-    phase: 'closing',
-    error: 'GUARD_NOT_FAKE',
-    has: ['closeWindow', 'writeRecord'],
-    lacks: ['lockMsite', 'serveFile'],
-    injects: 0,
-    check: (r) => expect(lastOutcome(r)).toBe('failed:GUARD_NOT_FAKE'),
-  },
-  {
-    name: 'live build + marker → FAKE INSTAGRAM banner, and it carries on',
-    opts: { guarded: false, settings: { assistedInsert: true } },
-    script: (r) => toShare(r),
-    phase: 'awaitingShare',
-    error: null,
-    injects: 1,
-    check: (r) => {
-      expect(r.lastStatus?.banner).toBe('FAKE_INSTAGRAM');
-      expect(r.statuses.filter((s) => s.phase === 'awaitingShare')[0]?.banner).toBe('FAKE_INSTAGRAM');
-    },
-  },
-  {
-    name: 'live build without the marker: no banner',
-    opts: { guarded: false, settings: { assistedInsert: true } },
-    script: (r) => toReport(r).send(report({ marker: false })),
-    phase: 'injecting',
-    injects: 1,
-    check: (r) => expect(r.statuses.some((s) => s.banner !== undefined)).toBe(false),
-  },
-  {
-    name: 'DESKTOP_SHELL: is_mobile false',
-    script: (r) => toReport(r).send(report({ isMobile: false })),
-    phase: 'closing',
-    error: 'DESKTOP_SHELL',
-    injects: 0,
-  },
-  {
-    name: 'P1: SW-controlled after the hard reload is diagnostics only: no DESKTOP_SHELL, recorded',
-    script: (r) => toReport(r).send(report({ swControlled: true }), { type: 'agentGetFile' }, agent('composer-ready')),
-    phase: 'awaitingShare',
-    error: null,
-    injects: 1,
-    check: (r) => {
-      r.send(tab(undefined, HOME));
-      expect(lastRecord(r)?.preflight).toMatchObject({ swControlled: true, swIntercepted: false, C1: 'pass' });
-    },
-  },
-  {
-    name: 'P3: the probe shows a worker intercepted requests → SW_INTERCEPTS: close, no lock, nothing inserted',
-    script: (r) => toReport(r).send(report({ swIntercepted: true })),
-    phase: 'closing',
-    error: 'SW_INTERCEPTS',
-    injects: 0,
-    lacks: ['lockMsite', 'serveFile'],
-    check: (r) => {
-      expect(lastOutcome(r)).toBe('failed:SW_INTERCEPTS');
-      // It stopped before the story input: C4 is not judged (U1).
-      expect(lastRecord(r)?.preflight?.C4).toBe('unknown');
-      expect(r.lastStatus).toMatchObject({ c4: 'unknown', path: '/create/story/' });
-    },
-  },
-  {
-    name: 'U1: a decision that ends the session on home still tells the panel the route (the 2026-10-12 live run)',
-    script: (r) => {
-      toReloading(r, 'probe').send(tab('loading', HOME), tab('complete', HOME), { type: 'agentInjected' });
-      r.send(report({ isMobile: false, inner: { w: 1512, h: 902 }, portrait: false, storyInput: 'absent' }));
-    },
-    phase: 'closing',
-    error: 'DESKTOP_SHELL',
-    check: (r) => {
-      // Sent from `closing`, which has no route of its own: the decision carries it (Page row "/ (home…)").
-      expect(r.lastStatus).toMatchObject({ route: 'homeOnly', path: '/', c4: 'unknown' });
-      expect(lastRecord(r)?.route).toBe('homeOnly');
-    },
-  },
-  {
-    name: 'P3: swIntercepted unknown (no timeline) never fails',
-    script: (r) => toReport(r).send(report({ swIntercepted: 'unknown' })),
-    phase: 'injecting',
-    injects: 1,
-  },
-  {
-    name: 'first probe: is_mobile unknown does not fail (C1 missing)',
-    script: (r) => toReport(r).send(report({ isMobile: 'unknown' })),
-    phase: 'injecting',
-    injects: 1,
-  },
-  {
-    name: 'NOT_LOGGED_IN on the first load: closes at once, no reload, no lock',
-    script: (r) => {
-      r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', LOGIN));
-    },
-    phase: 'closing',
-    error: 'NOT_LOGGED_IN',
-    has: ['closeWindow'],
-    lacks: ['hardReload', 'lockMsite', 'injectAgent'],
-    check: (r) => expect(r.steps.at(-1)?.effects[0]?.type).toBe('closeWindow'),
-  },
-  {
-    name: 'NOT_LOGGED_IN after the reload (redirected): no lock',
-    script: (r) => toReloading(r).send(tab('complete', LOGIN)),
-    phase: 'closing',
-    error: 'NOT_LOGGED_IN',
-    lacks: ['lockMsite', 'injectAgent'],
-  },
-  {
-    name: 'landscape: refits once (measure, one update), re-probes, then H1',
-    script: (r) => {
-      toReport(r).send(report({ portrait: false }));
-      // AL-3: the refit reads the window once (it is not new; the kill switch is armed).
-      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'measureTab', tabId: TAB, windowId: WIN, settle: false }]);
-      r.send(MEASURED);
-      expect(types(r.steps.at(-1)?.effects ?? [])).toEqual(['updateWindow']);
-      r.send(FITTED);
-      expect(r.steps.at(-1)?.effects.some(isProbeCmd)).toBe(true);
-      r.send(report());
-    },
-    phase: 'injecting',
-    injects: 1,
-    check: (r) => {
-      expect(r.count((e) => e.type === 'updateWindow')).toBe(2);
-      expect(r.count((e) => e.type === 'injectAgent')).toBe(1);
-    },
-  },
-  {
-    name: 'landscape twice → LANDSCAPE, no second refit',
-    script: (r) => {
-      toReport(r).send(report({ portrait: false }), MEASURED, FITTED, report({ portrait: false }));
-    },
-    phase: 'closing',
-    error: 'LANDSCAPE',
-    injects: 0,
-    check: (r) => expect(r.count((e) => e.type === 'updateWindow')).toBe(2),
-  },
-  {
-    name: 'input missing → H0 in the same window, watch without deadline',
-    script: (r) => toPick(r, { storyInput: 'absent', acceptOk: false }),
-    phase: 'awaitingPick',
-    error: 'INPUT_MISSING',
-    injects: 0,
-    check: (r) => {
-      // P5: the one input wait started the watch (no deadline); H0 keeps it running.
-      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0]);
-      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS });
-      expect(lastRecord(r)).toBeUndefined();
-      expect(r.lastStatus).toMatchObject({ c4: 'fail' });
-    },
-  },
-  {
-    name: 'accept drift → H0',
-    script: (r) => toPick(r, { acceptOk: false }),
-    phase: 'awaitingPick',
-    error: 'ACCEPT_DRIFT',
-    injects: 0,
-  },
-  {
-    name: 'H1 disabled in settings → H0 with no error',
-    opts: { settings: { assistedInsert: false } },
-    script: (r) => toPick(r, {}),
-    phase: 'awaitingPick',
-    error: null,
-    injects: 0,
-  },
-  {
-    name: 'H0 pick → composer ready → awaitingShare (H0)',
-    script: (r) => toPick(r).send(agent('input-appeared'), agent('composer-ready')),
-    phase: 'awaitingShare',
-    injects: 0,
-    check: (r) => expect(r.state).toMatchObject({ level: 'H0' }),
-  },
-  {
-    name: 'inject → ready: one inject, one file served, awaitingShare',
-    script: (r) => toShare(r).send({ type: 'agentGetFile' }),
-    phase: 'awaitingShare',
-    injects: 1,
-    check: (r) => expect(r.count((e) => e.type === 'serveFile')).toBe(1),
-  },
-  {
-    name: 'inject → ignored → H0 with no second Inject, then picked by hand',
-    script: (r) => {
-      toInjecting(r).send({ type: 'agentGetFile' }, agent('inject-ignored'));
-      expect(r.state).toMatchObject({ phase: 'awaitingPick', degradedFrom: 'INJECTION_IGNORED' });
-      expect(r.steps.at(-1)?.effects.map(watchMs)).toContain(0);
-      // A later document load re-probes; the passing re-probe stays H0 and never re-injects.
-      r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report());
-      expect(r.state).toMatchObject({ phase: 'awaitingPick', degradedFrom: 'INJECTION_IGNORED' });
-      r.send(agent('inject-ignored'), { type: 'agentGetFile' }, agent('composer-ready'));
-    },
-    phase: 'awaitingShare',
-    injects: 1,
-    check: (r) => {
-      expect(r.state).toMatchObject({ level: 'H0' });
-      expect(r.count((e) => e.type === 'serveFile')).toBe(1);
-    },
-  },
-  {
-    name: 'serving the file fails → H0, no second inject',
-    script: (r) =>
-      toInjecting(r).send({ type: 'agentGetFile' }, { type: 'effectFailed', effect: 'serveFile', message: 'gone' }),
-    phase: 'awaitingPick',
-    error: 'INJECTION_IGNORED',
-    injects: 1,
-  },
-
-  // The kill switch.
-  {
-    name: 'challenge → kill: close first, lock 7 days',
-    script: (r) => toShare(r).send(tab('loading', CHALLENGE)),
-    phase: 'closing',
-    error: 'KILLED_CHALLENGE',
-    has: ['closeWindow', 'lockMsite'],
-    check: (r) => {
-      expect(r.steps.at(-1)?.effects[0]?.type).toBe('closeWindow');
-      expect(r.effects).toContainEqual({ type: 'lockMsite', until: T0 + MSITE_LOCK_MS });
-      expect(lastOutcome(r)).toBe('killed:KILLED_CHALLENGE');
-    },
-  },
-  {
-    name: 'checkpoint during the reload → kill and lock',
-    script: (r) => toReloading(r).send(tab('loading', CHECKPOINT)),
-    phase: 'closing',
-    error: 'KILLED_CHALLENGE',
-    has: ['lockMsite'],
-    lacks: ['injectAgent'],
-  },
-  {
-    name: 'challenge on the very first load → kill, no reload',
-    script: (r) => {
-      r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', CHALLENGE));
-    },
-    phase: 'closing',
-    error: 'KILLED_CHALLENGE',
-    lacks: ['hardReload'],
-  },
-  {
-    name: 'off-host after arming (accountscenter) → kill',
-    script: (r) => toShare(r).send(tab('loading', ACCOUNTS_CENTER)),
-    phase: 'closing',
-    error: 'KILLED_OFFHOST',
-    has: ['lockMsite'],
-  },
-  {
-    name: 'undefined URL after arming (no host permission) → kill',
-    script: (r) => toReport(r).send(tab(undefined, undefined)),
-    phase: 'closing',
-    error: 'KILLED_OFFHOST',
-    has: ['lockMsite'],
-  },
-  {
-    name: 'off-host after finished still kills, and patches the written record',
-    script: (r) => toShare(r).send(tab('complete', HOME), tab('loading', ACCOUNTS_CENTER)),
-    phase: 'closing',
-    error: 'KILLED_OFFHOST',
-    has: ['lockMsite', 'patchRecordOutcome'],
-    check: (r) => {
-      expect(r.count((e) => e.type === 'writeRecord')).toBe(1);
-      expect(r.effects).toContainEqual({
-        type: 'patchRecordOutcome',
-        handoffId: 'hof_u1',
-        outcome: 'killed:KILLED_OFFHOST',
-      });
-    },
-  },
-  {
-    name: 'updates of other tabs never trip the kill switch',
-    script: (r) => toShare(r).send(tab('loading', CHALLENGE, 99), tab(undefined, undefined, 99)),
-    phase: 'awaitingShare',
-    lacks: ['lockMsite', 'closeWindow'],
-  },
-  {
-    name: 'P2: a service worker taking control mid-session is counted on the record, never fatal',
-    script: (r) => toShare(r).send(agent('sw-controller-change'), agent('sw-controller-change')),
-    phase: 'awaitingShare',
-    error: null,
-    lacks: ['closeWindow', 'lockMsite'],
-    check: (r) => {
-      expect(r.state).toMatchObject({ swControllerChanges: 2 });
-      r.send(tab(undefined, HOME));
-      expect(lastRecord(r)).toMatchObject({ outcome: 'posted-confirmed', swControllerChanges: 2 });
-    },
-  },
-  {
-    name: 'P3: the watch reports an intercepted request mid-session → SW_INTERCEPTS, close, no lock',
-    script: (r) => toShare(r).send(agent('sw-intercepted')),
-    phase: 'closing',
-    error: 'SW_INTERCEPTS',
-    has: ['closeWindow'],
-    lacks: ['lockMsite'],
-    check: (r) => expect(r.steps.at(-1)?.effects[0]?.type).toBe('closeWindow'),
-  },
-  {
-    name: 'AF-2: an interception the watch saw after the probe is on the status’s probe and the record (preflight)',
-    opts: { settings: { assistedInsert: false } },
-    script: (r) => {
-      // H0 from home: the deciding probe saw no interception; the watch does later.
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe(), agent('sw-intercepted'));
-    },
-    phase: 'closing',
-    error: 'SW_INTERCEPTS',
-    check: (r) => {
-      const closing = r.statuses.find((st) => st.phase === 'closing');
-      expect(closing?.probe).toMatchObject({ swIntercepted: true, storyInput: 'present' });
-      // No `c4` on it: the Story input row keeps the decision it showed.
-      expect(closing?.c4).toBeUndefined();
-      expect(lastRecord(r)).toMatchObject({
-        outcome: 'failed:SW_INTERCEPTS',
-        probe: { swIntercepted: true },
-        preflight: { swIntercepted: true, C4: 'pass' },
-      });
-    },
-  },
-  {
-    name: 'AF-2: after composer-ready the C8 report is the one shown, with the tripwire set; both probes are recorded so',
-    script: (r) =>
-      toShare(r).send(
-        report({ canvas: { w: 1080, h: 1920, css: { x: 0, y: 0, w: 511, h: 909 } } }),
-        agent('sw-intercepted'),
-      ),
-    phase: 'closing',
-    error: 'SW_INTERCEPTS',
-    check: (r) => {
-      const closing = r.statuses.find((st) => st.phase === 'closing');
-      expect(closing?.probe).toMatchObject({ swIntercepted: true, canvas: { w: 1080 } });
-      expect(lastRecord(r)).toMatchObject({
-        probe: { swIntercepted: true },
-        readyProbe: { swIntercepted: true },
-        preflight: { swIntercepted: true },
-      });
-    },
-  },
-  {
-    name: 'P3: an interception reported after the composer was left changes nothing (an upload may run)',
-    script: (r) => toShareRehearsalOff(r).send(tab(undefined, HOME), agent('sw-intercepted')),
-    phase: 'finished',
-    lacks: ['closeWindow'],
-    check: (r) => expect(r.state).toMatchObject({ holdOpen: true }),
-  },
-
-  // AM2: every later document load re-probes.
-  {
-    name: 'AM2: a later full-document load re-probes strictly; is_mobile unknown → DESKTOP_SHELL',
-    script: (r) => {
-      toShare(r).send(tab('loading', COMPOSER_URL));
-      expect(r.state).toMatchObject({
-        phase: 'probing',
-        step: 'awaitComplete',
-        amLoad: true,
-        resumeFrom: 'awaitingShare',
-      });
-      // A fresh agent: a new document (AM16), so the probe is strict.
-      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected', fresh: true });
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitReport', strict: true });
-      r.send(report({ isMobile: 'unknown' }));
-    },
-    phase: 'closing',
-    error: 'DESKTOP_SHELL',
-    injects: 1,
-    check: (r) => {
-      expect(r.count((e) => e.type === 'injectAgent')).toBe(2);
-      expect(r.count((e) => e.type === 'hardReload')).toBe(1);
-    },
-  },
-  {
-    name: 'AM2/P3: a later load whose requests a worker handled → SW_INTERCEPTS',
-    script: (r) => {
-      toPick(r).send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), { type: 'agentInjected' });
-      r.send(report({ swIntercepted: true, navType: 'navigate', storyInput: 'absent' }));
-    },
-    phase: 'closing',
-    error: 'SW_INTERCEPTS',
-  },
-  {
-    name: 'AM2/P1: a later load that is merely SW-controlled (no interception) resumes as H0',
-    script: (r) => {
-      toPick(r).send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), { type: 'agentInjected' });
-      r.send(report({ swControlled: true, navType: 'navigate', storyInput: 'absent' }));
-    },
-    phase: 'awaitingPick',
-    error: 'INPUT_MISSING',
-  },
-  {
-    name: 'AM2: a passing re-probe during injecting resumes as H0 (no re-inject, no upgrade)',
-    script: (r) => {
-      toInjecting(r).send(tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL));
-      r.send({ type: 'agentInjected' }, report());
-    },
-    phase: 'awaitingPick',
-    error: 'INJECTION_IGNORED',
-    injects: 1,
-  },
-  {
-    name: 'AM2: a load before the first report also makes that probe strict',
-    script: (r) => {
-      toReport(r).send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), { type: 'agentInjected' });
-      r.send(report({ isMobile: 'unknown' }));
-    },
-    phase: 'closing',
-    error: 'DESKTOP_SHELL',
-  },
-  {
-    name: 'never a second hard reload, however many loads follow',
-    script: (r) => {
-      toPick(r);
-      for (let i = 0; i < 5; i++) r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL));
-      r.send({ type: 'agentInjected' }, report({ storyInput: 'absent' }));
-    },
-    phase: 'awaitingPick',
-    check: (r) => expect(r.count((e) => e.type === 'hardReload')).toBe(1),
-  },
-  {
-    name: "reload race: the SW-served first load's complete is not probed",
-    script: (r) => {
-      r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL));
-      expect(r.phase).toBe('reloading');
-      r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL));
-    },
-    phase: 'probing',
-    check: (r) => {
-      expect(r.count((e) => e.type === 'injectAgent')).toBe(1);
-      expect(r.state).toMatchObject({ strict: false });
-    },
-  },
-
-  // C5 and C9.
-  {
-    name: 'homeOnly route: H0 "tap + → Story"; / is not "composer left" before the composer',
-    script: (r) => {
-      toReloading(r).send(tab('complete', HOME), { type: 'agentInjected' }, report({ storyInput: 'absent' }));
-      // P5: on home the input may mount after hydration: one wait, then H0.
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput', route: 'homeOnly' });
-      r.send(INPUT_WAITED);
-      expect(r.state).toMatchObject({ phase: 'awaitingPick', route: 'homeOnly', composerReached: false });
-      expect(r.lastStatus).toMatchObject({ route: 'homeOnly', error: 'INPUT_MISSING' });
-      r.send(tab('complete', HOME), agent('composer-left'));
-      expect(r.phase).toBe('awaitingPick');
-      // The owner taps + → Story (SPA), picks the file, shares; the composer goes home.
-      r.send(tab(undefined, COMPOSER_URL), agent('composer-ready'), tab(undefined, HOME));
-    },
-    phase: 'finished',
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ detectedPosted: true, route: 'homeOnly' });
-      const rec = r.effects.find((e) => e.type === 'writeRecord');
-      expect(rec?.type === 'writeRecord' && rec.record.preflight?.C5).toBe('fail');
-    },
-  },
-  {
-    name: 'AM18: leaving the composer from H0 before anything was picked is not C9; it goes homeOnly',
-    script: (r) => {
-      toPick(r).send(agent('composer-left'));
-      expect(r.phase).toBe('awaitingPick');
-      r.send(tab(undefined, HOME));
-      expect(r.state).toMatchObject({ phase: 'awaitingPick', route: 'homeOnly' });
-      expect(r.lastStatus).toMatchObject({ phase: 'awaitingPick', route: 'homeOnly' });
-      // The owner taps + → Story, picks; then Share takes the composer home: now that is C9.
-      r.send(tab(undefined, COMPOSER_URL), agent('composer-ready'), tab(undefined, HOME));
-    },
-    phase: 'finished',
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ detectedPosted: true, route: 'homeOnly' });
-      expect(lastOutcome(r)).toBe('posted-confirmed');
-      const rec = r.effects.find((e) => e.type === 'writeRecord');
-      expect(rec?.type === 'writeRecord' && rec.record.preflight?.C5).toBe('fail');
-    },
-  },
-  {
-    name: 'composer left during an AM2 re-probe from awaitingShare counts as posted',
-    script: (r) => toShare(r).send(tab('loading', COMPOSER_URL), tab('loading', HOME)),
-    phase: 'finished',
-    check: (r) => expect(r.lastStatus?.detectedPosted).toBe(true),
-  },
-
-  // AM21 (SAFE-1): the panel shows the session's switches, not later edits of the settings.
-  {
-    name: 'AM21: statuses carry the session snapshot; settings edited mid-session change neither rules nor statuses',
-    script: (r) => {
-      toPick(r);
-      // The owner switches rehearsal and assisted insert off while the popup is open.
-      r.opts.settings = { rehearsal: false, assistedInsert: false };
-      r.send(agent('composer-ready'), tab(undefined, HOME));
-    },
-    phase: 'finished',
-    check: (r) => {
-      for (const st of r.statuses) expect(st).toMatchObject({ rehearsal: true, assistedInsert: true });
-      expect(r.count((e) => e.type === 'installRules')).toBe(1);
-      // Rehearsal stayed on for this session: the popup closes in 3 s as usual.
-      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'closeDelay', ms: CLOSE_DELAY_MS });
-    },
-  },
-  {
-    name: 'AM21: a probe-mode session reports assisted insert off (it never inserts)',
-    script: (r) => toReport(r, 'probe'),
-    phase: 'probing',
-    check: (r) => expect(r.lastStatus).toMatchObject({ rehearsal: true, assistedInsert: false }),
-  },
-
-  // AM17 (SAFE-2): security paths kill; unknown www pages fail closed.
-  {
-    name: 'AM17: the reload lands on /accounts/suspended → kill and lock, never injected',
-    script: (r) => toReloading(r).send(tab('complete', SUSPENDED)),
-    phase: 'closing',
-    error: 'KILLED_CHALLENGE',
-    has: ['closeWindow', 'lockMsite'],
-    lacks: ['injectAgent'],
-    check: (r) => expect(lastOutcome(r)).toBe('killed:KILLED_CHALLENGE'),
-  },
-  {
-    name: 'AM17: /auth_platform/codeentry after composer-ready → kill and lock, not "posted"',
-    script: (r) => toShare(r).send(tab(undefined, CODE_ENTRY)),
-    phase: 'closing',
-    error: 'KILLED_CHALLENGE',
-    has: ['lockMsite'],
-    check: (r) => {
-      expect(r.statuses.some((st) => st.phase === 'finished')).toBe(false);
-      expect(lastOutcome(r)).toBe('killed:KILLED_CHALLENGE');
-    },
-  },
-  {
-    name: 'AM17: the first load redirected to /accounts/suspended → kill, no reload',
-    script: (r) => {
-      r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', SUSPENDED));
-    },
-    phase: 'closing',
-    error: 'KILLED_CHALLENGE',
-    has: ['lockMsite'],
-    lacks: ['hardReload'],
-  },
-  {
-    name: 'AM17: an unknown www page on the first load → UNEXPECTED_PAGE, no reload, no lock',
-    script: (r) => {
-      r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', CONSENT));
-    },
-    phase: 'closing',
-    error: 'UNEXPECTED_PAGE',
-    lacks: ['hardReload', 'lockMsite', 'injectAgent'],
-    check: (r) => {
-      expect(lastOutcome(r)).toBe('failed:UNEXPECTED_PAGE');
-      // AM28: the page is named (query dropped) on the status and the record: a contract fact for L4.
-      expect(r.lastStatus?.detail).toBe('page /consent/');
-      expect(lastRecord(r)).toMatchObject({ detail: 'page /consent/' });
-    },
-  },
-  {
-    name: 'AM17: the reload lands on an unknown www page → UNEXPECTED_PAGE, never injected, no lock',
-    script: (r) => toReloading(r).send(tab('complete', CONSENT)),
-    phase: 'closing',
-    error: 'UNEXPECTED_PAGE',
-    lacks: ['injectAgent', 'lockMsite'],
-    check: (r) => expect(lastRecord(r)).toMatchObject({ detail: 'page /consent/' }),
-  },
-  {
-    name: 'AM17: an unknown www page while waiting for the pick → UNEXPECTED_PAGE, no "posted"',
-    script: (r) => toPick(r).send(tab('loading', CONSENT)),
-    phase: 'closing',
-    error: 'UNEXPECTED_PAGE',
-    lacks: ['lockMsite'],
-    check: (r) => {
-      expect(r.statuses.some((st) => st.phase === 'finished')).toBe(false);
-      expect(r.lastStatus?.detail).toBe('page /consent/');
-    },
-  },
-  {
-    name: 'AM17: an unknown www page after Share → finished, not pre-answered, the status says why',
-    script: (r) => toShare(r).send(tab(undefined, CONSENT)),
-    phase: 'finished',
-    lacks: ['lockMsite'],
-    check: (r) => {
-      // AM28: no pre-answer at all (postedUnknown), and the page is named.
-      expect(r.lastStatus).toMatchObject({
-        phase: 'finished',
-        detectedPosted: false,
-        postedUnknown: true,
-        error: 'UNEXPECTED_PAGE',
-        detail: 'page /consent/',
-      });
-      expect(r.state).toMatchObject({ postedUnknown: true, unexpectedPage: '/consent/' });
-      expect(lastOutcome(r)).toBe('not-posted');
-      expect(lastRecord(r)).toMatchObject({ detail: 'UNEXPECTED_PAGE /consent/' });
-    },
-  },
-
-  // AM16 (RUN-1): same-document loads (pushState, replaceState) resume; new documents re-probe.
-  {
-    name: 'AM16: a same-document load in awaitingShare (H1) resumes at H1, with no probe and no error',
-    script: (r) => {
-      toShare(r);
-      const commands = r.count((e) => e.type === 'sendAgent');
-      r.send(
-        tab('loading', `${COMPOSER_URL}?step=edit`),
-        tab('complete', `${COMPOSER_URL}?step=edit`),
-        injected(false),
-      );
-      expect(r.count((e) => e.type === 'sendAgent')).toBe(commands);
-    },
-    phase: 'awaitingShare',
-    error: null,
-    injects: 1,
-    check: (r) => {
-      expect(r.state).toMatchObject({ level: 'H1', degradedFrom: null });
-      r.send(tab(undefined, HOME));
-      expect(r.state).toMatchObject({ phase: 'finished', level: 'H1', detectedPosted: true });
-      const rec = r.effects.find((e) => e.type === 'writeRecord');
-      expect(rec?.type === 'writeRecord' && rec.record.level).toBe('H1');
-    },
-  },
-  {
-    name: 'AM16: a same-document load during injecting resumes it; a composer-ready sent meanwhile is replayed',
-    script: (r) => {
-      toInjecting(r).send({ type: 'agentGetFile' }, tab('loading', COMPOSER_URL));
-      // The agent's ready event lands while the background does not yet know which document it is.
-      r.send(agent('composer-ready'), tab('complete', COMPOSER_URL), injected(false));
-    },
-    phase: 'awaitingShare',
-    error: null,
-    injects: 1,
-    check: (r) => {
-      expect(r.state).toMatchObject({ level: 'H1' });
-      // No second watch: a restart would clear the agent's H1 deadline.
-      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([INJECT_READY_TIMEOUT_MS]);
-    },
-  },
-  {
-    name: 'AM16: C1 unknown on the first probe, then a pushState: no strict re-probe, no DESKTOP_SHELL',
-    script: (r) => {
-      toReport(r).send(report({ isMobile: 'unknown' }), { type: 'agentGetFile' }, agent('composer-ready'));
-      r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injected(false));
-    },
-    phase: 'awaitingShare',
-    error: null,
-  },
-  {
-    name: 'AM16: composer-left buffered during a same-document re-injection after Share → posted',
-    script: (r) => {
-      toShare(r).send(tab('loading', COMPOSER_URL), agent('composer-left'));
-      r.send(tab('complete', COMPOSER_URL), injected(false));
-    },
-    phase: 'finished',
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ detectedPosted: true });
-      expect(lastOutcome(r)).toBe('posted-confirmed');
-    },
-  },
-  {
-    name: 'AM16: events buffered across two quick same-document loads are still replayed',
-    script: (r) => {
-      toShare(r).send(tab('loading', COMPOSER_URL), agent('composer-left'), tab('complete', COMPOSER_URL));
-      r.send(tab('loading', `${COMPOSER_URL}?x`), tab('complete', `${COMPOSER_URL}?x`), injected(false));
-    },
-    phase: 'finished',
-    check: (r) => expect(r.lastStatus).toMatchObject({ detectedPosted: true }),
-  },
-  {
-    name: 'AM16: events buffered before a new document are dropped; the new document is probed strictly',
-    script: (r) => {
-      toPick(r).send(tab('loading', COMPOSER_URL), agent('composer-ready'), tab('complete', COMPOSER_URL));
-      r.send(injected(true), report({ storyInput: 'absent' }));
-    },
-    phase: 'awaitingPick',
-    check: (r) => expect(r.statuses.some((st) => st.phase === 'awaitingShare')).toBe(false),
-  },
-  {
-    name: 'AM16: a pushState during the first probe re-probes the same document non-strictly',
-    script: (r) => {
-      toReport(r).send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injected(false));
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitReport', strict: false });
-      r.send(report({ isMobile: 'unknown' }));
-    },
-    phase: 'injecting',
-    injects: 1,
-  },
-
-  // AM19 (RUN-2): never cut off an upload that may still run after Share.
-  {
-    name: 'AM19: rehearsal off, C9 after Share holds the popup open until the owner answers',
-    script: (r) => {
-      r.send(startEv('post', SCREEN, false));
-      r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
-      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report(), { type: 'agentGetFile' });
-      r.send(agent('composer-ready'), tab(undefined, HOME));
-      expect(r.state).toMatchObject({ phase: 'finished', holdOpen: true, detectedPosted: true });
-      expect(r.lastStatus).toMatchObject({ phase: 'finished', holdOpen: true, rehearsal: false });
-      expect(r.effects.some((e) => e.type === 'armTimer' && e.timer === 'closeDelay')).toBe(false);
-      // A stray closeDelay does nothing; the answer (even the pre-answered "yes") closes it.
-      r.tick(CLOSE_DELAY_MS).send({ type: 'timer', timer: 'closeDelay' });
-      r.send({ type: 'outcome', handoffId: 'hof_u1', posted: true });
-    },
-    phase: 'closing',
-    has: ['closeWindow'],
-    lacks: ['patchRecordOutcome'],
-    check: (r) => expect(lastOutcome(r)).toBe('posted-confirmed'),
-  },
-  {
-    name: 'AM19: a held-open popup answered "not posted" closes and patches the record',
-    script: (r) => {
-      r.send(startEv('post', SCREEN, false));
-      r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
-      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report({ storyInput: 'absent' }), INPUT_WAITED);
-      r.send(agent('composer-ready'), agent('composer-left'));
-      r.send({ type: 'outcome', handoffId: 'hof_u1', posted: false });
-    },
-    phase: 'closing',
-    has: ['closeWindow', 'patchRecordOutcome'],
-    check: (r) => {
-      const ts = types(r.steps.at(-1)?.effects ?? []);
-      expect(ts[0]).toBe('closeWindow');
-      expect(r.effects).toContainEqual({ type: 'patchRecordOutcome', handoffId: 'hof_u1', outcome: 'not-posted' });
-    },
-  },
-  {
-    name: 'AM19: a held-open popup still closes after 15 quiet minutes',
-    script: (r) => {
-      r.send(startEv('post', SCREEN, false));
-      r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
-      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report({ storyInput: 'absent' }), INPUT_WAITED);
-      r.send(agent('composer-ready'), tab(undefined, HOME));
-      r.tick(INACTIVITY_TIMEOUT_MS).send({ type: 'timer', timer: 'inactivity' });
-    },
-    phase: 'closing',
-    has: ['closeWindow'],
-    check: (r) => expect(lastOutcome(r)).toBe('posted-confirmed'),
-  },
-  {
-    name: 'AM19: rehearsal off, but home before the composer was ready: closes in 3 s as before',
-    script: (r) => {
-      r.send(startEv('post', SCREEN, false));
-      r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', COMPOSER_URL));
-      r.send(tab('complete', COMPOSER_URL), { type: 'agentInjected' }, report(), { type: 'agentGetFile' });
-      r.send(tab(undefined, HOME));
-    },
-    phase: 'finished',
-    check: (r) => {
-      expect(r.state).toMatchObject({ holdOpen: false, detectedPosted: false });
-      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'closeDelay', ms: CLOSE_DELAY_MS });
-    },
-  },
-
-  // AM24 (RUN-3): composer-ready counts in H1 only after the insert.
-  {
-    name: 'AM24: composer-ready before the file was served is ignored; the insert then decides',
-    script: (r) => {
-      toInjecting(r).send(agent('composer-ready'));
-      expect(r.phase).toBe('injecting');
-      r.send({ type: 'agentGetFile' }, agent('inject-ignored'));
-    },
-    phase: 'awaitingPick',
-    error: 'INJECTION_IGNORED',
-    injects: 1,
-    check: (r) => expect(r.statuses.some((st) => st.phase === 'awaitingShare')).toBe(false),
-  },
-
-  // AM18 (RUN-4): a client-side redirect home before the composer is used is C5, not C9.
-  {
-    name: 'AM18: a client redirect home during the first probe → H0 "tap + → Story", C5 fails, not finished',
-    script: (r) => {
-      toReloading(r).send(tab('complete', COMPOSER_URL), tab(undefined, HOME));
-      expect(r.state).toMatchObject({ phase: 'probing', route: 'homeOnly' });
-      r.send({ type: 'agentInjected' }, report({ storyInput: 'absent' }), INPUT_WAITED);
-    },
-    phase: 'awaitingPick',
-    error: 'INPUT_MISSING',
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ route: 'homeOnly' });
-      r.send(agent('composer-ready'), tab(undefined, HOME));
-      const rec = r.effects.find((e) => e.type === 'writeRecord');
-      expect(rec?.type === 'writeRecord' && rec.record).toMatchObject({
-        route: 'homeOnly',
-        outcome: 'posted-confirmed',
-        preflight: { C5: 'fail' },
-      });
-    },
-  },
-  {
-    name: 'AM18: a pushState home during the first probe (status loading) → re-probed, H0 homeOnly',
-    script: (r) => {
-      toReport(r).send(tab('loading', HOME), tab('complete', HOME), injected(false), report({ storyInput: 'absent' }));
-      r.send(INPUT_WAITED);
-    },
-    phase: 'awaitingPick',
-    check: (r) => expect(r.state).toMatchObject({ route: 'homeOnly', level: 'H0' }),
-  },
-  {
-    name: 'AM18: home while injecting, before the file was served → H0 homeOnly, no second inject',
-    script: (r) => {
-      toInjecting(r).send(tab('loading', HOME), tab('complete', HOME), injected(false));
-      r.send({ type: 'agentGetFile' });
-    },
-    phase: 'awaitingPick',
-    error: 'INJECTION_IGNORED',
-    injects: 1,
-    lacks: ['serveFile'],
-    check: (r) => {
-      expect(r.state).toMatchObject({ route: 'homeOnly', level: 'H0' });
-      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([INJECT_READY_TIMEOUT_MS, 0]);
-    },
-  },
-  {
-    name: 'AM18: home while injecting, URL-only update (no commit) → H0 homeOnly at once',
-    script: (r) => toInjecting(r).send(tab(undefined, HOME)),
-    phase: 'awaitingPick',
-    error: 'INJECTION_IGNORED',
-    check: (r) => expect(r.state).toMatchObject({ route: 'homeOnly' }),
-  },
-  {
-    name: 'AM18: home after the H1 file was served (engaged) counts as C9, not posted',
-    script: (r) => toInjecting(r).send({ type: 'agentGetFile' }, tab(undefined, HOME)),
-    phase: 'finished',
-    check: (r) => expect(r.lastStatus).toMatchObject({ detectedPosted: false }),
-  },
-
-  // AM20 (RUN-5): the first navigation is classified before the kill switch arms.
-  {
-    name: 'AM20: the first load goes off-host (hidden URL change) → kill and lock, no reload',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      r.send(tab('loading', undefined), tab(undefined, undefined));
-    },
-    phase: 'closing',
-    error: 'KILLED_OFFHOST',
-    has: ['closeWindow', 'lockMsite'],
-    lacks: ['hardReload'],
-  },
-  {
-    name: 'AM20: the first load lands on a visible non-www URL → kill',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      r.send(tab('loading', 'https://i.instagram.com/create/story/'));
-    },
-    phase: 'closing',
-    error: 'KILLED_OFFHOST',
-    has: ['lockMsite'],
-  },
-  {
-    name: "AM20: about:blank's own load in navigating is not a kill; the www commit still reloads",
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      r.send(tab('loading', undefined), tab('complete', undefined), tab('loading', COMPOSER_URL));
-    },
-    phase: 'reloading',
-    has: ['hardReload'],
-    lacks: ['lockMsite', 'closeWindow'],
-  },
-  {
-    name: 'AM20/AM28: no commit within the navigation deadline → NAVIGATION_TIMEOUT (not the 15 min TIMEOUT), no lock',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      r.tick(NAVIGATION_TIMEOUT_MS).send({ type: 'timer', timer: 'navigation' });
-    },
-    phase: 'closing',
-    error: 'NAVIGATION_TIMEOUT',
-    lacks: ['lockMsite'],
-    check: (r) => expect(lastOutcome(r)).toBe('failed:NAVIGATION_TIMEOUT'),
-  },
-  {
-    name: 'AM20/AM28: the navigation deadline lost with a worker restart: the 15 min backstop still kills after an off-host load',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      r.send(tab('loading', undefined), tab('complete', undefined));
-      r.tick(INACTIVITY_TIMEOUT_MS).send({ type: 'timer', timer: 'inactivity' });
-    },
-    phase: 'closing',
-    error: 'KILLED_OFFHOST',
-    has: ['closeWindow', 'lockMsite'],
-    check: (r) => expect(lastOutcome(r)).toBe('killed:KILLED_OFFHOST'),
-  },
-  {
-    name: 'AM20: the 15 min backstop in navigating with nothing off-host seen is a plain TIMEOUT',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      r.tick(INACTIVITY_TIMEOUT_MS).send({ type: 'timer', timer: 'inactivity' });
-    },
-    phase: 'closing',
-    error: 'TIMEOUT',
-    lacks: ['lockMsite'],
-  },
-  {
-    name: 'AM20: hidden-URL loads and no www commit by the deadline → KILLED_OFFHOST',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      r.send(tab('loading', undefined), tab('complete', undefined));
-      r.tick(NAVIGATION_TIMEOUT_MS).send({ type: 'timer', timer: 'navigation' });
-    },
-    phase: 'closing',
-    error: 'KILLED_OFFHOST',
-    has: ['lockMsite'],
-  },
-  {
-    name: 'AM20: a late navigation deadline after the reload does nothing',
-    script: (r) => toReloading(r).send({ type: 'timer', timer: 'navigation' }),
-    phase: 'reloading',
-    lacks: ['closeWindow'],
-  },
-
-  // AM28 (R2S-1, R2S-3): once a fresh agent shows a new document, the interrupted phase is gone.
-  {
-    name: 'AM28: a new document, then a same-document load before its report: still probed strictly, never resumed',
-    script: (r) => {
-      toShare(r).send(...NEW_DOCUMENT, ...SAME_DOCUMENT);
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitReport', strict: true, resumeFrom: null });
-      r.send(report({ isMobile: 'unknown' }));
-    },
-    phase: 'closing',
-    error: 'DESKTOP_SHELL',
-    injects: 1,
-  },
-  {
-    name: 'AM28: from injecting, a new document then a same-document load: re-probed, a pass is H0 with its own watch',
-    script: (r) => {
-      toInjecting(r).send(...NEW_DOCUMENT, ...SAME_DOCUMENT);
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitReport', resumeFrom: null });
-      r.send(report());
-    },
-    phase: 'awaitingPick',
-    error: 'INJECTION_IGNORED',
-    injects: 1,
-    check: (r) => {
-      expect(r.state).toMatchObject({ level: 'H0', degradedFrom: 'INJECTION_IGNORED' });
-      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([INJECT_READY_TIMEOUT_MS, 0]);
-    },
-  },
-  {
-    name: 'AM28: rehearsal off, home while the new document is probed: not "posted", not held open, C5 homeOnly',
-    script: (r) => {
-      toShareRehearsalOff(r).send(...NEW_DOCUMENT, tab('loading', HOME));
-      expect(r.state).toMatchObject({ phase: 'probing', route: 'homeOnly' });
-      r.send(tab('complete', HOME), injected(true), report({ storyInput: 'absent' }));
-    },
-    phase: 'awaitingPick',
-    check: (r) => {
-      expect(r.statuses.some((st) => st.phase === 'finished')).toBe(false);
-      expect(r.state).toMatchObject({ route: 'homeOnly', level: 'H0' });
-    },
-  },
-  {
-    name: 'AM28: an unknown page while the new document is probed is UNEXPECTED_PAGE, not an unanswered "Posted?"',
-    script: (r) => toShareRehearsalOff(r).send(...NEW_DOCUMENT, tab(undefined, CONSENT)),
-    phase: 'closing',
-    error: 'UNEXPECTED_PAGE',
-    check: (r) => expect(r.statuses.some((st) => st.phase === 'finished')).toBe(false),
-  },
-
-  // AM28 (R2S-2): an insert dispatched but never confirmed by C6 keeps the composer engaged.
-  {
-    name: 'AM28: insert dispatched, C6 never confirmed, then home: C9 with no pre-answer, held open, route kept',
-    script: (r) => {
-      toInjecting(r).send({ type: 'agentGetFile' }, agent('inject-unconfirmed'));
-      expect(r.state).toMatchObject({
-        phase: 'awaitingPick',
-        level: 'H0',
-        degradedFrom: 'INJECTION_IGNORED',
-        insertDispatched: true,
-      });
-      expect(r.lastStatus?.error).toBe('INJECTION_IGNORED');
-      r.send(tab(undefined, HOME));
-    },
-    phase: 'finished',
-    injects: 1,
-    lacks: ['closeWindow'],
-    check: (r) => {
-      expect(r.state).toMatchObject({ detectedPosted: false, postedUnknown: true, holdOpen: true, route: 'direct' });
-      expect(r.lastStatus).toMatchObject({ detectedPosted: false, postedUnknown: true, holdOpen: true });
-      expect(r.effects.some((e) => e.type === 'armTimer' && e.timer === 'closeDelay')).toBe(false);
-      expect(lastRecord(r)).toMatchObject({ outcome: 'not-posted', detail: expect.stringContaining('not confirmed') });
-      // A later timeout closes it, and the outcome stays answerable.
-      r.tick(INACTIVITY_TIMEOUT_MS).send({ type: 'timer', timer: 'inactivity' });
-      expect(r.phase).toBe('closing');
-      expect(r.send({ type: 'outcome', handoffId: 'hof_u1', posted: true })).toEqual([
-        { type: 'patchRecordOutcome', handoffId: 'hof_u1', outcome: 'posted-confirmed' },
-      ]);
-    },
-  },
-  {
-    name: "AM28: after an unconfirmed insert, the agent's composer-left is C9 too",
-    script: (r) => toInjecting(r).send({ type: 'agentGetFile' }, agent('inject-unconfirmed'), agent('composer-left')),
-    phase: 'finished',
-    check: (r) => expect(r.state).toMatchObject({ postedUnknown: true, holdOpen: true }),
-  },
-  {
-    name: 'AM28: after an unconfirmed insert the owner picks by hand: C6, Share, home → "posted", closes in 3 s',
-    script: (r) =>
-      toInjecting(r).send(
-        { type: 'agentGetFile' },
-        agent('inject-unconfirmed'),
-        agent('composer-ready'),
-        tab(undefined, HOME),
-      ),
-    phase: 'finished',
-    check: (r) => {
-      expect(r.state).toMatchObject({ detectedPosted: true, postedUnknown: false, holdOpen: false });
-      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'closeDelay', ms: CLOSE_DELAY_MS });
-    },
-  },
-  {
-    name: 'AM28: an insert that could not be made (inject-ignored), then home → still C5: awaitingPick homeOnly',
-    script: (r) => toInjecting(r).send({ type: 'agentGetFile' }, agent('inject-ignored'), tab(undefined, HOME)),
-    phase: 'awaitingPick',
-    check: (r) => expect(r.state).toMatchObject({ route: 'homeOnly', insertDispatched: false }),
-  },
-  {
-    name: 'AM28: an unconfirmed insert, then a new document: the insert went with it, home is C5 again',
-    script: (r) => {
-      toInjecting(r).send({ type: 'agentGetFile' }, agent('inject-unconfirmed'), ...NEW_DOCUMENT, report());
-      expect(r.state).toMatchObject({ phase: 'awaitingPick', insertDispatched: false });
-      r.send(tab(undefined, HOME));
-    },
-    phase: 'awaitingPick',
-    check: (r) => expect(r.state).toMatchObject({ route: 'homeOnly' }),
-  },
-  {
-    name: 'AM28: an unconfirmed insert, then an unknown page: finished with no pre-answer, the status names the page',
-    script: (r) => toInjecting(r).send({ type: 'agentGetFile' }, agent('inject-unconfirmed'), tab(undefined, CONSENT)),
-    phase: 'finished',
-    error: 'UNEXPECTED_PAGE',
-    check: (r) => expect(r.lastStatus).toMatchObject({ postedUnknown: true, detail: 'page /consent/', holdOpen: true }),
-  },
-
-  // AM23 (SAFE-7): guarded builds refuse in branded browsers before any window opens.
-  {
-    name: 'AM23/AM28: a guarded build in a branded browser → BRANDED_BROWSER (not the marker check), no window, no open noted',
-    opts: { brandedBrowser: true },
+    name: 'AM23: a guarded build in a branded browser → BRANDED_BROWSER, no window',
+    opts: { guarded: true, brandedBrowser: true },
     script: (r) => r.send(startEv()),
     phase: 'idle',
     error: 'BRANDED_BROWSER',
     lacks: ['openWindow', 'noteOpen'],
-    check: (r) => expect(r.lastStatus).toMatchObject({ handoffId: null }),
   },
   {
-    name: 'AM23: the live build in a branded browser proceeds',
-    opts: { guarded: false, brandedBrowser: true },
-    script: (r) => r.send(startEv()),
-    phase: 'opening',
-    has: ['openWindow'],
+    name: 'P6: a guarded build refuses when the editor reports Arc',
+    opts: { guarded: true },
+    script: (r) => r.send(startEv('post', SCREEN, { browser: 'arc' } as Partial<HandoffEvent>)),
+    phase: 'idle',
+    error: 'BRANDED_BROWSER',
+    check: (r) => expect(r.lastStatus).toMatchObject({ detail: 'browser arc' }),
+  },
+  {
+    name: 'every test blocks Instagram’s writes for the tab (and workers); a post in live does not',
+    script: (r) => {
+      r.send(startEv('test'));
+      expect(r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB })[0]).toEqual({
+        type: 'installRules',
+        removeRuleIds: SESSION_IDS,
+        addRules: [uaRule(TAB, 155, 'full'), ...rehearsalRules(TAB)],
+      });
+      expect(r.state).toMatchObject({ writeBlocked: true });
+      const live = new Run();
+      live.send(startEv());
+      expect(live.state).toMatchObject({ writeBlocked: false });
+      // A guarded build's static ruleset blocks a post's writes: it decides with Share-test semantics.
+      const mock = new Run({ guarded: true });
+      mock.send(startEv());
+      expect(mock.state).toMatchObject({ writeBlocked: true });
+    },
+    phase: 'scoping',
   },
 
-  // W2/W3 (Arc, 2026-10-12): a verified fit, one retry, then the guided resize.
+  // ---- W2/W3: the verified fit, its retry, the guided resize ----------------------------------
   {
-    name: 'W2 hardening: the runner re-applied the box within the first update (Arc dropped the early ones) → navigating, no retry',
+    name: 'W1/W2: Arc ignored the create; one retry 300 ms later fits → navigating',
     script: (r) => {
       toArcFit(r);
       const f = fitFor();
-      r.send(verify(f, true, ARC_TAB, 3));
-    },
-    phase: 'navigating',
-    has: ['navigate'],
-    check: (r) => {
-      expect(r.count((e) => e.type === 'updateWindow')).toBe(1);
-      expect(r.count((e) => e.type === 'armTimer' && e.timer === 'fitRetry')).toBe(0);
-      if (r.state.phase === 'idle') throw new Error('unreachable');
-      expect(r.state.win).toMatchObject({ attempts: 1, created: ARC_WINDOW });
-      expect(r.state.win.updates).toEqual([expect.objectContaining({ step: 'fit', fitted: true, applied: 3 })]);
-      r.send({ type: 'cancel' });
-      expect(lastRecord(r)?.window?.updates[0]?.applied).toBe(3);
-    },
-  },
-  {
-    name: 'W2 hardening: an implausible `applied` is recorded as one windows.update',
-    script: (r) => {
-      toArcFit(r);
-      r.send(verify(fitFor(), true, ARC_TAB, Number.NaN));
-    },
-    phase: 'navigating',
-    check: (r) => {
-      if (r.state.phase === 'idle') throw new Error('unreachable');
-      expect(r.state.win.updates[0]?.applied).toBe(1);
-    },
-  },
-  {
-    name: 'W1/W2: Arc ignored the create; the first update does not verify; one retry 300 ms later fits → navigating',
-    script: (r) => {
-      toArcFit(r);
-      const f = fitFor();
-      // 524x932 inner (+47 frame), centred on the ultrawide the editor is on.
-      expect(f.outer).toEqual({ left: 2970, top: -212, width: 524, height: 979 });
-      expect(r.steps.at(-1)?.effects).toEqual([
-        { type: 'updateWindow', windowId: WIN, tabId: TAB, box: f.outer, inner: { w: 524, h: 932 }, reapply: true },
-      ]);
+      // 524x932 inner (+47 frame), docked right on the ultrawide the editor is on.
+      expect(f.outer).toEqual({ left: 1512 + 3440 - 524, top: -428, width: 524, height: 979 });
       expect(r.send(verify(f, false))).toEqual([{ type: 'armTimer', timer: 'fitRetry', ms: FIT_RETRY_DELAY_MS }]);
-      expect(r.state).toMatchObject({ phase: 'fitting', fitStep: 'retryWait' });
       expect(r.tick(FIT_RETRY_DELAY_MS).send(RETRY)).toEqual([
         { type: 'updateWindow', windowId: WIN, tabId: TAB, box: f.outer, inner: f.inner, reapply: true },
       ]);
@@ -1907,558 +992,946 @@ const ROWS: Row[] = [
     },
     phase: 'navigating',
     has: ['navigate'],
-    check: (r) => {
-      const guess = firstGuess(OWNER_UW);
-      if (!guess.ok) throw new Error('fixture');
-      expect(r.state).toMatchObject({
-        win: {
-          screen: OWNER_UW,
-          requested: guess.outer,
-          created: ARC_WINDOW,
-          createdTab: ARC_TAB,
-          frameDelta: ARC_DELTA,
-          attempts: 2,
-          manualResize: false,
-          finalTab: { w: 524, h: 932 },
-          zoom: 1,
-        },
-      });
-      if (r.state.phase === 'idle') throw new Error('unreachable');
-      expect(r.state.win.updates.map((u) => [u.step, u.fitted])).toEqual([
-        ['fit', false],
-        ['retry', true],
-      ]);
-      // The record shows created ≠ requested and the final fit (E2E a).
-      r.send({ type: 'cancel' });
-      expect(lastRecord(r)?.window).toMatchObject({ created: ARC_WINDOW, attempts: 2, finalTab: { w: 524, h: 932 } });
-    },
+    check: (r) => expect(r.w.win).toMatchObject({ attempts: 2, created: ARC_WINDOW, docked: true }),
   },
   {
-    name: 'W2: the retry misses but the tab is usable anyway (600x900) → navigating, no guided resize',
+    name: 'W2: the retry misses but the tab is usable anyway (600x900) → navigating',
     script: (r) => {
       const f = fitFor();
       toArcFit(r).send(verify(f, false), RETRY, verify(f, false, { w: 600, h: 900 }));
     },
     phase: 'navigating',
-    has: ['navigate'],
     lacks: ['readSize'],
-    check: (r) =>
-      expect(r.state).toMatchObject({ win: { attempts: 2, manualResize: false, finalTab: { w: 600, h: 900 } } }),
   },
   {
-    name: 'W2: never a third fit update: stray retries and verifications change nothing',
-    script: (r) => {
-      const f = fitFor();
-      toArcFit(r).send(RETRY, verify(f, false), RETRY, RETRY, verify(f, true), RETRY, verify(f, false));
-    },
-    phase: 'navigating',
-    check: (r) => {
-      expect(r.count((e) => e.type === 'updateWindow')).toBe(2);
-      expect(r.count((e) => e.type === 'navigate')).toBe(1);
-    },
-  },
-  {
-    name: 'W2/W3: both updates ignored (1512x902) → resizing: deadline and poll armed, the size shown as not usable',
+    name: 'W2/W3: both updates ignored → resizing; the pre-Share cap pauses',
     script: (r) => toResizing(r),
     phase: 'resizing',
     lacks: ['navigate'],
     check: (r) => {
-      const effects = r.steps.at(-1)?.effects ?? [];
-      expect(effects.slice(0, 2)).toEqual([
+      expect(r.steps.at(-1)?.effects.slice(0, 3)).toEqual([
+        { type: 'clearTimer', timer: 'preShareCap' },
         { type: 'armTimer', timer: 'resizeDeadline', ms: RESIZE_TIMEOUT_MS },
         { type: 'armTimer', timer: 'resizePoll', ms: RESIZE_POLL_MS },
       ]);
-      expect(r.lastStatus).toMatchObject({
-        phase: 'resizing',
-        resize: { tab: ARC_TAB, ok: false, until: T0 + RESIZE_TIMEOUT_MS, maxW: 767 },
-        window: { attempts: 2, manualResize: false },
-      });
+      expect(r.state).toMatchObject({ preShareUntil: null, preShareLeft: PRE_SHARE_CAP_MS });
+      expect(r.lastStatus).toMatchObject({ phase: 'resizing', resize: { tab: ARC_TAB, ok: false, maxW: 767 } });
     },
   },
   {
-    name: 'AF-8: at another default zoom the resize status names the width its ✓ uses (767 × zoom)',
-    script: (r) => {
-      const f = fitFor(OWNER_UW, ARC_DELTA);
-      r.send(startEv('post', OWNER_UW), { type: 'windowCreated', windowId: WIN, tabId: TAB });
-      r.send({ type: 'rulesInstalled' }, { ...ARC_MEASURED, zoom: 1.1 } as HandoffEvent);
-      const up = r.steps.at(-1)?.effects[0];
-      if (up?.type !== 'updateWindow') throw new Error('expected the fit');
-      const missed = verify(f, false);
-      if (missed.type !== 'windowFitted') throw new Error('unreachable');
-      const zoomed: HandoffEvent = { ...missed, box: up.box, target: up.inner };
-      r.send(zoomed, RETRY, zoomed);
-      expect(r.lastStatus).toMatchObject({ phase: 'resizing', resize: { ok: false, maxW: 843 } });
-      // 800 window px at 110% is 727 CSS px: usable, and the status says so with the same limit.
-      r.send(sized(800, 900));
-    },
-    phase: 'navigating',
-    check: (r) => expect(r.lastStatus).toMatchObject({ resize: { tab: { w: 800, h: 900 }, ok: true, maxW: 843 } }),
-  },
-  {
-    name: 'W3: windows.onBoundsChanged reads the size; a usable one → navigating, timers cleared, manual resize recorded',
+    name: 'W3: a usable size navigates; the pre-Share cap resumes with what was left',
     script: (r) => {
       toResizing(r);
-      expect(r.send({ type: 'boundsChanged', windowId: WIN })).toEqual([
-        { type: 'readSize', windowId: WIN, tabId: TAB },
-      ]);
-      expect(r.send({ type: 'boundsChanged', windowId: 99 })).toEqual([]);
-      // Still too wide: only the indicator moves.
-      expect(types(r.send(sized(900, 902)))).toEqual(['notifyEditor']);
-      expect(r.lastStatus).toMatchObject({ phase: 'resizing', resize: { tab: { w: 900, h: 902 }, ok: false } });
-      expect(r.send(sized(900, 902))).toEqual([]);
-      const go = r.send(sized(493, 820));
-      expect(go.slice(0, 4)).toEqual([
-        { type: 'clearTimer', timer: 'resizeDeadline' },
-        { type: 'clearTimer', timer: 'resizePoll' },
-        { type: 'navigate', tabId: TAB, url: COMPOSER_URL },
-        { type: 'armTimer', timer: 'navigation', ms: NAVIGATION_TIMEOUT_MS },
-      ]);
+      r.tick(90_000).send({ type: 'boundsChanged', windowId: WIN }, sized(900, 902), sized(493, 820));
     },
     phase: 'navigating',
     check: (r) => {
-      expect(r.lastStatus).toMatchObject({ phase: 'navigating', resize: { tab: { w: 493, h: 820 }, ok: true } });
-      expect(r.state).toMatchObject({ win: { manualResize: true, finalTab: { w: 493, h: 820 }, attempts: 2 } });
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'preShareCap', ms: PRE_SHARE_CAP_MS });
+      expect(r.w).toMatchObject({ preShareUntil: T0 + 90_000 + PRE_SHARE_CAP_MS, win: { manualResize: true } });
     },
   },
   {
-    name: 'W3: the poll reads the size every second and re-arms; landscape or too short sizes never pass',
-    script: (r) => {
-      toResizing(r);
-      expect(r.tick(RESIZE_POLL_MS).send({ type: 'timer', timer: 'resizePoll' })).toEqual([
-        { type: 'readSize', windowId: WIN, tabId: TAB },
-        { type: 'armTimer', timer: 'resizePoll', ms: RESIZE_POLL_MS },
-      ]);
-      r.send(sized(700, 650), sized(600, 500), sized(500, 600));
-    },
-    phase: 'resizing',
-    lacks: ['navigate'],
-  },
-  {
-    name: 'W3: no usable size within 3 minutes → WINDOW_NOT_FITTED: close, no lock, never navigated',
-    script: (r) => toResizing(r).tick(RESIZE_TIMEOUT_MS).send({ type: 'timer', timer: 'resizeDeadline' }),
+    name: 'W3: no usable size within 2 minutes → WINDOW_NOT_FITTED, never navigated',
+    script: (r) => toResizing(r).tick(RESIZE_TIMEOUT_MS).send(timer('resizeDeadline')),
     phase: 'closing',
     error: 'WINDOW_NOT_FITTED',
-    has: ['closeWindow'],
-    lacks: ['navigate', 'lockMsite', 'hardReload'],
-    check: (r) => {
-      expect(lastOutcome(r)).toBe('failed:WINDOW_NOT_FITTED');
-      expect(lastRecord(r)?.window).toMatchObject({ attempts: 2, manualResize: false, finalTab: ARC_TAB });
-      // Stale timers after the close do nothing.
-      expect(r.send({ type: 'timer', timer: 'resizePoll' })).toEqual([]);
-    },
+    lacks: ['navigate', 'lockMsite'],
+    check: (r) => expect(lastOutcome(r)).toBe('failed:WINDOW_NOT_FITTED'),
   },
   {
-    name: 'W3: a guarded E2E flag shortens the deadline',
-    opts: { resizeTimeoutMs: 2000 },
+    name: 'W3: a guarded E2E flag shortens the deadline; a live build ignores it',
+    opts: { guarded: true, resizeTimeoutMs: 2000 },
     script: (r) => toResizing(r),
     phase: 'resizing',
     check: (r) => {
       expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'resizeDeadline', ms: 2000 });
-      expect(r.state).toMatchObject({ resizeUntil: T0 + 2000 });
+      const live = toResizing(new Run({ guarded: false, resizeTimeoutMs: 2000 }));
+      expect(live.effects).toContainEqual({ type: 'armTimer', timer: 'resizeDeadline', ms: RESIZE_TIMEOUT_MS });
     },
   },
   {
-    name: 'W3: a live build ignores the E2E deadline flag',
-    opts: { guarded: false, resizeTimeoutMs: 2000 },
-    script: (r) => toResizing(r),
-    phase: 'resizing',
-    check: (r) =>
-      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'resizeDeadline', ms: RESIZE_TIMEOUT_MS }),
-  },
-  {
-    name: 'W3: cancel while resizing closes the popup (closeWindow first)',
-    script: (r) => toResizing(r).send({ type: 'cancel' }),
-    phase: 'closing',
-    has: ['closeWindow'],
-    check: (r) => {
-      expect(r.steps.at(-1)?.effects[0]?.type).toBe('closeWindow');
-      expect(lastOutcome(r)).toBe('abandoned');
-    },
-  },
-  {
-    name: 'W2: a failed windows.update while fitting closes the popup (AGENT_UNREACHABLE), never navigates',
+    name: 'W2: a failed windows.update while fitting closes the popup (AGENT_UNREACHABLE)',
     script: (r) => toArcFit(r).send({ type: 'effectFailed', effect: 'updateWindow', message: 'No window' }),
     phase: 'closing',
     error: 'AGENT_UNREACHABLE',
     lacks: ['navigate'],
   },
+
+  // ---- AM20: the first navigation -------------------------------------------------------------
   {
-    name: 'W2: a failed size read while resizing is ignored (the window going away ends it)',
-    script: (r) => toResizing(r).send({ type: 'effectFailed', effect: 'readSize', message: 'No tab' }),
-    phase: 'resizing',
+    name: 'AM20: the first load goes off-host (hidden URL change) → kill and lock, no reload',
+    script: (r) => toNavigating(r).send(tab('loading', undefined), tab(undefined, undefined)),
+    phase: 'closing',
+    error: 'KILLED_OFFHOST',
+    has: ['lockMsite'],
+    lacks: ['hardReload'],
+  },
+  {
+    name: 'AM20: no commit within 30 s → NAVIGATION_TIMEOUT, no lock',
+    script: (r) => toNavigating(r).tick(NAVIGATION_TIMEOUT_MS).send(timer('navigation')),
+    phase: 'closing',
+    error: 'NAVIGATION_TIMEOUT',
+    lacks: ['lockMsite'],
+  },
+  {
+    name: 'NOT_LOGGED_IN on the first load: closes at once, no reload, no lock',
+    script: (r) => toNavigating(r).send(tab('loading', LOGIN)),
+    phase: 'closing',
+    error: 'NOT_LOGGED_IN',
+    lacks: ['hardReload', 'lockMsite'],
+  },
+  {
+    name: 'the reload never completes → TIMEOUT (step Instagram)',
+    script: (r) => toReloading(r).tick(30_000).send(timer('stepDeadline')),
+    phase: 'closing',
+    error: 'TIMEOUT',
+    check: (r) => expect(lastResult(r)).toMatchObject({ code: 'TIMEOUT', detail: 'instagram 30 s' }),
   },
 
-  // P4: the composer must be in msite's mobile layout (≤ 767 CSS px) and portrait.
+  // ---- the probe (§3.6 step 7) ---------------------------------------------------------------
   {
-    name: 'P4: the failed live run’s probe (1512x902, SW-controlled, mobile) now refits instead of DESKTOP_SHELL',
+    name: 'guard fail: guarded build without the marker → GUARD_NOT_FAKE, nothing tapped',
+    opts: { guarded: true },
+    script: (r) => toReport(r).send(report({ marker: false })),
+    phase: 'closing',
+    error: 'GUARD_NOT_FAKE',
+    lacks: ['lockMsite', 'serveFile'],
+  },
+  {
+    name: 'live build + marker → FAKE INSTAGRAM banner, and it carries on',
+    script: (r) => toReport(r).send(report({ marker: true })),
+    phase: 'openingEntry',
+    check: (r) => expect(r.lastStatus?.banner).toBe('FAKE_INSTAGRAM'),
+  },
+  {
+    name: 'DESKTOP_SHELL: is_mobile false',
+    script: (r) => toReport(r).send(report({ isMobile: false })),
+    phase: 'closing',
+    error: 'DESKTOP_SHELL',
+  },
+  {
+    name: 'P3: the probe shows a worker intercepted requests → SW_INTERCEPTS, no lock',
+    script: (r) => toReport(r).send(report({ swIntercepted: true })),
+    phase: 'closing',
+    error: 'SW_INTERCEPTS',
+    lacks: ['lockMsite'],
+  },
+  {
+    name: 'P4: landscape refits once (measure, one update), re-probes, then proceeds',
     script: (r) => {
-      toReport(r).send(
-        report({
-          inner: { w: 1512, h: 902 },
-          portrait: false,
-          swControlled: true,
-          storyInput: 'absent',
-          acceptOk: false,
-          acceptSeen: [],
-        }),
-      );
+      toReport(r).send(report({ portrait: false }));
       expect(r.steps.at(-1)?.effects).toEqual([{ type: 'measureTab', tabId: TAB, windowId: WIN, settle: false }]);
-      r.send(MEASURED, FITTED, report({ swControlled: true }));
+      r.send(MEASURED, FITTED, report());
     },
-    phase: 'injecting',
-    injects: 1,
+    phase: 'openingEntry',
     check: (r) => expect(r.count((e) => e.type === 'updateWindow')).toBe(2),
   },
   {
-    name: 'P4: a portrait composer wider than 767 CSS px refits once, then still too wide → LAYOUT_TOO_WIDE',
+    name: 'P4: still too wide after the refit → LAYOUT_TOO_WIDE',
     script: (r) => {
       const wide = { inner: { w: 800, h: 1200 }, portrait: true };
       toReport(r).send(report(wide), MEASURED, FITTED, report(wide));
     },
     phase: 'closing',
     error: 'LAYOUT_TOO_WIDE',
-    injects: 0,
-    lacks: ['lockMsite'],
-    check: (r) => {
-      expect(lastOutcome(r)).toBe('failed:LAYOUT_TOO_WIDE');
-      expect(lastRecord(r)?.preflight?.C4).toBe('unknown');
-      // W5: the refit is on the record too.
-      expect(lastRecord(r)?.window?.updates.map((u) => u.step)).toEqual(['fit', 'refit']);
-    },
   },
   {
-    name: 'P4: the refit uses the composer page’s zoom to keep the width at or below 767 CSS px',
-    opts: { settings: { composerProfile: { innerW: 820, innerH: 1000, capturedAt: 1 } } },
+    name: 'P5: no story input on home: one wait; it appears → one more probe → proceed',
     script: (r) => {
-      toReport(r).send(report({ inner: { w: 820, h: 1000 } }));
-      r.send({
-        type: 'tabMeasured',
-        inner: { w: 738, h: 900 },
-        outer: { left: 0, top: 33, width: 738, height: 932 },
-        zoom: 0.9,
-      });
-    },
-    phase: 'probing',
-    check: (r) => {
-      const up = r.steps.at(-1)?.effects[0];
-      if (up?.type !== 'updateWindow') throw new Error('expected the refit update');
-      expect(up.inner.w).toBeLessThanOrEqual(Math.floor(767 * 0.9));
-      // After the navigation: one windows.update, never the pre-navigation re-applies (Instagram sees it).
-      expect(up.reapply).toBe(false);
-      expect(r.state).toMatchObject({ step: 'refitUpdate', win: { zoom: 0.9 } });
-    },
-  },
-
-  // P5: on `/` msite mounts the header input after hydration; H1 into it opens the composer by SPA.
-  {
-    name: 'P5: home without the input, it appears → one more probe → H1 into the header input → SPA to the composer → posted',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput', route: 'homeOnly', inputWaitUsed: true });
+      toReport(r).send(report({ storyInput: 'absent', acceptOk: false }));
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput', inputWaitUsed: true });
       expect(r.steps.at(-1)?.effects).toEqual([
-        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/watch', readyTimeoutMs: 0 } },
+        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/watch' } },
         { type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS },
       ]);
-      expect(r.send(agent('input-appeared'))).toEqual([
-        { type: 'clearTimer', timer: 'inputWait' },
-        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } },
-      ]);
-      r.send(homeProbe());
-      expect(r.state).toMatchObject({ phase: 'injecting', level: 'H1', injectAt: 'home' });
-      // Title and favicon updates on home before the insert lands are not "composer left".
-      r.send({ type: 'agentGetFile' }, tab(undefined, HOME), tab('complete', HOME));
-      expect(r.state).toMatchObject({ phase: 'injecting', injectAt: 'home' });
-      // The insert starts msite's story session: an SPA navigation to the composer (AM16).
-      r.send(tab('loading', COMPOSER_URL), agent('composer-ready'), tab('complete', COMPOSER_URL), injected(false));
-      expect(r.state).toMatchObject({ phase: 'awaitingShare', level: 'H1', injectAt: 'composer' });
-      r.send(tab(undefined, HOME));
+      r.send(agent('input-appeared'), report());
+    },
+    phase: 'openingEntry',
+  },
+  {
+    name: 'P5 (E12 h): the account link is there at once, the story input is not: account-appeared does not end the wait early',
+    script: (r) => {
+      toReport(r).send(report({ storyInput: 'absent', acceptOk: false }));
+      r.tick(100).send(agent('account-appeared'), report({ storyInput: 'absent', acceptOk: false }));
+      // Still waiting, for the rest of the one wait (no new agent/watch: the watch reports the input once).
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput' });
+      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS - 100 }]);
+      r.tick(1000).send(agent('input-appeared'), report());
+    },
+    phase: 'openingEntry',
+    check: (r) => {
+      expect(r.count((e) => e.type === 'sendAgent' && e.command.type === 'agent/watch')).toBe(1);
+      expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(2);
+    },
+  },
+  {
+    name: 'P5: an appeared event missed while a re-probe was in flight: the deadline probes once more and decides',
+    script: (r) => {
+      toReport(r).send(report({ storyInput: 'absent', acceptOk: false }));
+      r.tick(100).send(agent('account-appeared'));
+      // input-appeared while the re-probe is in flight is not acted on …
+      r.send(agent('input-appeared'), report({ storyInput: 'absent', acceptOk: false }));
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput' });
+      // … the deadline's probe sees the input.
+      r.tick(INPUT_WAIT_MS).send(INPUT_WAITED, report());
+    },
+    phase: 'openingEntry',
+  },
+  {
+    name: 'P5: the account link mounts late too: the same one wait covers it',
+    script: (r) => {
+      toReport(r).send(report({ account: { handle: null, candidates: 0 } }));
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput' });
+      r.send(agent('account-appeared'), report());
+    },
+    phase: 'openingEntry',
+    check: (r) => expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(1),
+  },
+  {
+    name: 'P5 + offer-manual: no story input within 6 s → INPUT_MISSING, the window kept 60 s for Finish by hand',
+    script: (r) => {
+      toReport(r).send(report({ storyInput: 'absent', acceptOk: false }), INPUT_WAITED);
+      // The wait ran out: one more probe decides on what is there now.
+      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } }]);
+      r.send(report({ storyInput: 'absent', acceptOk: false }));
     },
     phase: 'finished',
-    injects: 1,
+    error: 'INPUT_MISSING',
+    lacks: ['closeWindow'],
     check: (r) => {
-      expect(r.lastStatus).toMatchObject({ detectedPosted: true, route: 'homeOnly' });
+      expect(r.state).toMatchObject({ hold: 'offerManual', result: { kind: 'notPosted', code: 'INPUT_MISSING' } });
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'offerManual', ms: OFFER_MANUAL_MS });
+      expect(r.lastStatus).toMatchObject({ held: 'offerManual', c4: 'fail' });
+      expect(lastRecord(r)).toMatchObject({ outcome: 'failed:INPUT_MISSING' });
+      // Unused, the offer runs out and the window closes.
+      r.tick(OFFER_MANUAL_MS).send(timer('offerManual'));
+      expect(r.phase).toBe('closing');
+    },
+  },
+  {
+    name: 'a test has nothing to finish by hand: an entry failure in a Test run closes the window',
+    script: (r) => toEntrySent(r, 'test').send(entryFact({ result: 'MENU_DRIFT', menuCount: 3, storyIndex: null })),
+    phase: 'closing',
+    error: 'STORY_ENTRY_MISSING',
+    check: (r) => {
+      expect(r.count((e) => e.type === 'armTimer' && e.timer === 'offerManual')).toBe(0);
+      expect(lastRecord(r)).toMatchObject({ outcome: 'failed:STORY_ENTRY_MISSING', mode: 'test' });
+    },
+  },
+  {
+    name: 'accept drift → ACCEPT_DRIFT (offer-manual)',
+    script: (r) => toReport(r).send(report({ acceptOk: false })),
+    phase: 'finished',
+    error: 'ACCEPT_DRIFT',
+  },
+  {
+    name: 'the probe never answers within 15 s → TIMEOUT',
+    script: (r) => toReport(r).tick(HOME_READY_MS).send(timer('stepDeadline')),
+    phase: 'closing',
+    error: 'TIMEOUT',
+  },
+  {
+    name: '§4.6: a hidden page at the probe is raised once before anything is tapped',
+    script: (r) => toReport(r).send(report({ visibility: 'hidden' })),
+    phase: 'openingEntry',
+    has: ['raiseWindow'],
+    check: (r) => {
+      expect(r.w).toMatchObject({ raisedForVisibility: true, hidden: true });
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'hiddenWait', ms: HIDDEN_WAIT_MS });
+      expect(r.count((e) => e.type === 'raiseWindow')).toBe(1);
+    },
+  },
+
+  // ---- the check ------------------------------------------------------------------------------
+  {
+    name: 'check: reads the account and closes at once; never taps, never serves a file',
+    script: (r) => toReport(r, 'check').send(report(), { type: 'agentGetFile' }),
+    phase: 'closing',
+    error: null,
+    lacks: ['serveFile', 'raiseWindow'],
+    check: (r) => {
       expect(lastRecord(r)).toMatchObject({
-        outcome: 'posted-confirmed',
-        level: 'H1',
-        route: 'homeOnly',
-        preflight: { C4: 'pass', C5: 'fail' },
-      });
-    },
-  },
-  {
-    name: 'P5: no input within 6 s → H0 INPUT_MISSING with "tap + → Story" (homeOnly); C4 fail',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
-      r.tick(INPUT_WAIT_MS).send(INPUT_WAITED);
-    },
-    phase: 'awaitingPick',
-    error: 'INPUT_MISSING',
-    injects: 0,
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ route: 'homeOnly', c4: 'fail', path: '/' });
-      // No second watch: the one started for the wait keeps running.
-      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0]);
-    },
-  },
-  {
-    name: 'P5: hydration’s replaceState during the wait resumes it (watch restarted, the rest re-armed)',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent' }));
-      r.tick(2000).send(tab('loading', `${HOME}?hl=en`), tab('complete', `${HOME}?hl=en`));
-      // The deadline passing while the background re-injects does not end the wait by itself.
-      expect(r.send(INPUT_WAITED)).toEqual([]);
-      expect(r.send(injected(false))).toEqual([
-        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/watch', readyTimeoutMs: 0 } },
-        { type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS - 2000 },
-      ]);
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput' });
-      r.send(agent('input-appeared'), homeProbe());
-    },
-    phase: 'injecting',
-    injects: 1,
-    check: (r) => expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(2),
-  },
-  {
-    name: 'P5: a same-document load that outlasts the wait: one more probe decides (no new wait)',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent' }), tab('loading', HOME), tab('complete', HOME));
-      r.tick(INPUT_WAIT_MS).send(injected(false));
-      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } }]);
-      r.send(homeProbe({ storyInput: 'absent' }));
-    },
-    phase: 'awaitingPick',
-    error: 'INPUT_MISSING',
-  },
-  {
-    name: 'P5: a new document during the wait is probed strictly; the wait went with the old one',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent' }), tab('loading', HOME), tab('complete', HOME));
-      r.send(injected(true));
-      expect(r.state).toMatchObject({ step: 'awaitReport', strict: true, inputWaitUntil: null });
-      r.send(homeProbe({ storyInput: 'absent' }));
-    },
-    phase: 'awaitingPick',
-    error: 'INPUT_MISSING',
-    check: (r) => expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(1),
-  },
-  {
-    name: 'P5: one wait only: the re-probe after input-appeared still finds none → H0 at once',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(
-        homeProbe({ storyInput: 'absent' }),
-        agent('input-appeared'),
-        homeProbe({ storyInput: 'absent' }),
-      );
-    },
-    phase: 'awaitingPick',
-    error: 'INPUT_MISSING',
-    check: (r) => expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(1),
-  },
-  {
-    name: 'P5: an insert on home that never opens the composer is not engaged: unconfirmed → H0, home is not C9',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe(), { type: 'agentGetFile' }, agent('inject-unconfirmed'), tab(undefined, HOME));
-    },
-    phase: 'awaitingPick',
-    error: 'INJECTION_IGNORED',
-    check: (r) => expect(r.state).toMatchObject({ insertDispatched: false, injectAt: 'home' }),
-  },
-  // AL-1/AF-1: every first decision that reads C4 waits once for a late story input, not only H1.
-  {
-    name: 'AL-1: probe mode on home without the input waits once; it appears → one more probe → probe-done, C4 pass',
-    script: (r) => {
-      r.send(startEv('probe'), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput', inputWaitUsed: true, c4Reached: false });
-      // A watch is not an inject: probe mode only watches for the input.
-      expect(r.steps.at(-1)?.effects).toEqual([
-        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/watch', readyTimeoutMs: 0 } },
-        { type: 'armTimer', timer: 'inputWait', ms: INPUT_WAIT_MS },
-      ]);
-      expect(r.send(agent('input-appeared'))).toEqual([
-        { type: 'clearTimer', timer: 'inputWait' },
-        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/probe' } },
-      ]);
-      r.send(homeProbe());
-    },
-    phase: 'closing',
-    error: null,
-    injects: 0,
-    lacks: ['serveFile'],
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ c4: 'pass', path: '/', route: 'homeOnly' });
-      expect(r.lastStatus?.probe).toMatchObject({ storyInput: 'present' });
-      expect(lastRecord(r)).toMatchObject({
-        mode: 'probe',
-        outcome: 'not-posted',
-        probe: { storyInput: 'present' },
-        preflight: { C4: 'pass', C5: 'fail' },
-      });
-    },
-  },
-  {
-    name: 'AL-1: probe mode, no input within 6 s → probe-done on that report: C4 fail, checked (no "not checked")',
-    script: (r) => {
-      r.send(startEv('probe'), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
-      r.tick(INPUT_WAIT_MS).send(INPUT_WAITED);
-    },
-    phase: 'closing',
-    error: null,
-    injects: 0,
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ c4: 'fail', path: '/' });
-      expect(lastRecord(r)).toMatchObject({ outcome: 'not-posted', preflight: { C4: 'fail' } });
-      expect(r.count((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(1);
-    },
-  },
-  {
-    name: 'AF-1: H1 off (assisted insert off) on home without the input waits once; it appears → H0 with no error, C4 pass',
-    opts: { settings: { assistedInsert: false } },
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
-      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitInput' });
-      r.send(agent('input-appeared'), homeProbe());
-    },
-    phase: 'awaitingPick',
-    error: null,
-    injects: 0,
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ c4: 'pass', route: 'homeOnly', level: 'H0' });
-      // The re-probe's H0 restarts the watch: harmless, and the document has one either way.
-      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0, 0]);
-    },
-  },
-  {
-    name: 'AF-1: H1 off, no input within 6 s → H0 with no error on that report (C4 fail); the wait’s watch keeps running',
-    opts: { settings: { assistedInsert: false } },
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }));
-      r.tick(INPUT_WAIT_MS).send(INPUT_WAITED);
-    },
-    phase: 'awaitingPick',
-    error: null,
-    injects: 0,
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ c4: 'fail', route: 'homeOnly', level: 'H0' });
-      expect(r.effects.map(watchMs).filter((m) => m !== null)).toEqual([0]);
-      // The owner picks by hand from home as usual.
-      r.send(tab(undefined, COMPOSER_URL), agent('composer-ready'));
-      expect(r.phase).toBe('awaitingShare');
-    },
-  },
-  {
-    name: 'P5: a session that ends during the wait records C4 unknown (the input was not checked to the end)',
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe({ storyInput: 'absent', acceptOk: false, acceptSeen: [] }), { type: 'cancel' });
-      expect(lastRecord(r)).toMatchObject({ outcome: 'abandoned', preflight: { C4: 'unknown' } });
-      // The deadline firing while the window closes changes nothing; the cleanup clears it.
-      expect(r.send(INPUT_WAITED)).toEqual([]);
-      r.send({ type: 'windowRemoved', windowId: WIN });
-    },
-    phase: 'idle',
-    check: (r) => expect(r.steps.at(-1)?.effects).toContainEqual({ type: 'clearTimer', timer: 'inputWait' }),
-  },
-  {
-    name: 'P5: an input present at the first probe, or a decision before C4, never waits',
-    opts: { settings: { assistedInsert: false } },
-    script: (r) => {
-      DRIVE_NAVIGATING(r);
-      toHomeReport(r).send(homeProbe());
-    },
-    phase: 'awaitingPick',
-    error: null,
-    check: (r) => {
-      expect(r.effects.some((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(false);
-      const probe = toReport(new Run(), 'probe').send(report());
-      expect(probe.some((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(false);
-      const wide = toReport(new Run(), 'probe').send(report({ storyInput: 'absent', inner: { w: 900, h: 1300 } }));
-      expect(wide.some((e) => e.type === 'armTimer' && e.timer === 'inputWait')).toBe(false);
-    },
-  },
-  {
-    name: 'P5: a stray inputWait or input-appeared outside the wait does nothing',
-    script: (r) => toInjecting(r).send(INPUT_WAITED, agent('input-appeared')),
-    phase: 'injecting',
-    check: (r) => expect(r.steps.slice(-2).every((st) => st.effects.length === 0)).toBe(true),
-  },
-
-  // P6: the editor's browser flavour.
-  {
-    name: 'P6: a guarded build refuses when the editor reports Arc → BRANDED_BROWSER, no window',
-    script: (r) => r.send({ ...startEv(), browser: 'arc' } as HandoffEvent),
-    phase: 'idle',
-    error: 'BRANDED_BROWSER',
-    lacks: ['openWindow', 'noteOpen'],
-    check: (r) => expect(r.lastStatus).toMatchObject({ handoffId: null, detail: 'browser arc' }),
-  },
-  {
-    name: 'P6: a live build in Arc proceeds and records the flavour',
-    opts: { guarded: false },
-    script: (r) => {
-      r.send({ ...startEv(), browser: 'arc' } as HandoffEvent);
-      r.send({ type: 'cancel' });
-    },
-    phase: 'closing',
-    check: (r) => expect(lastRecord(r)).toMatchObject({ browser: 'arc', outcome: 'abandoned' }),
-  },
-
-  // U1: C4 is judged only when the decision reached it.
-  {
-    name: 'U1: DESKTOP_SHELL stops before the story input: the status and the record say C4 unknown',
-    script: (r) => toReport(r).send(report({ isMobile: false, storyInput: 'absent', acceptOk: false })),
-    phase: 'closing',
-    error: 'DESKTOP_SHELL',
-    check: (r) => {
-      expect(r.lastStatus).toMatchObject({ c4: 'unknown' });
-      expect(lastRecord(r)?.preflight).toMatchObject({ C1: 'fail', C4: 'unknown' });
-    },
-  },
-
-  // Probe mode.
-  {
-    name: 'probe mode: store the report, close, done; never injects or serves a file',
-    script: (r) => toReport(r, 'probe').send(report(), { type: 'agentGetFile' }),
-    phase: 'closing',
-    error: null,
-    injects: 0,
-    lacks: ['serveFile'],
-    check: (r) => {
-      expect(r.statuses.find((s) => s.phase === 'closing')?.probe).toEqual(goodProbe());
-      const rec = r.effects.find((e) => e.type === 'writeRecord');
-      expect(rec?.type === 'writeRecord' && rec.record).toMatchObject({
-        mode: 'probe',
-        outcome: 'not-posted',
+        mode: 'check',
+        outcome: 'checked',
         exportId: null,
+        result: { account: HANDLE },
       });
+      expect(r.count((e) => isEntry(e) || isShare(e) || isInsert(e))).toBe(0);
+      // Checks block writes too, and count toward the pace.
+      expect(r.effects).toContainEqual(expect.objectContaining({ type: 'noteOpen' }));
     },
   },
   {
-    name: 'probe mode still applies the guard',
-    script: (r) => toReport(r, 'probe').send(report({ marker: false })),
+    name: 'check with no account expected yet learns it',
+    opts: { settings: { expectedAccount: null } },
+    script: (r) => toReport(r, 'check').send(report()),
     phase: 'closing',
-    error: 'GUARD_NOT_FAKE',
+    has: ['setExpectedAccount'],
   },
 
-  // Ends, cleanup and timers.
+  // ---- the account (§4.8) -----------------------------------------------------------------------
   {
-    name: 'cancel → close, record abandoned; cleanup on windowRemoved',
-    script: (r) => toShare(r).send({ type: 'cancel' }, { type: 'windowRemoved', windowId: WIN }),
+    name: '§4.8: another account is logged in → paused before any tap; the cap pauses; Post as @other proceeds',
+    script: (r) => {
+      toReport(r).send(report({ account: { handle: 'other', candidates: 1 } }));
+      expect(r.state).toMatchObject({ phase: 'awaitingAccount', prompt: 'mismatch', until: T0 + ACCOUNT_PROMPT_MS });
+      expect(r.lastStatus).toMatchObject({
+        accountPrompt: { kind: 'mismatch', detected: 'other', expected: HANDLE, until: T0 + ACCOUNT_PROMPT_MS },
+        step: 'account',
+      });
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'accountPrompt', ms: ACCOUNT_PROMPT_MS });
+      expect(r.w.preShareUntil).toBeNull();
+      // A stray dwell or a hidden page does nothing while the owner decides.
+      expect(r.send(timer('dwell'))).toEqual([]);
+      r.tick(20_000).send({ type: 'accountChoice', handoffId: 'hof_u1', proceed: true });
+    },
+    phase: 'openingEntry',
+    has: ['setExpectedAccount'],
+    check: (r) => {
+      expect(r.w.account).toMatchObject({ detected: 'other', confirmedBy: 'owner', expected: 'other' });
+      expect(r.effects).toContainEqual({
+        type: 'setExpectedAccount',
+        account: { handle: 'other', detectedAt: T0 + 20_000 },
+      });
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'preShareCap', ms: expect.any(Number) });
+      expect(r.count(isEntry)).toBe(0);
+    },
+  },
+  {
+    name: '§4.8: Cancel at the prompt → Stopped, nothing tapped',
+    script: (r) => {
+      toReport(r).send(report({ account: { handle: 'other', candidates: 1 } }));
+      r.send({ type: 'accountChoice', handoffId: 'hof_u1', proceed: false });
+    },
+    phase: 'closing',
+    lacks: ['serveFile'],
+    check: (r) => {
+      expect(lastRecord(r)).toMatchObject({ outcome: 'cancelled', result: { kind: 'stopped', stoppedBy: 'owner' } });
+      expect(r.count(isEntry)).toBe(0);
+    },
+  },
+  {
+    name: '§4.8: nobody answers within a minute → ACCOUNT_UNCONFIRMED (close), nothing tapped',
+    script: (r) => {
+      const two = report({ account: { handle: null, candidates: 2 } });
+      toReport(r).send(two, INPUT_WAITED, two);
+      expect(r.state).toMatchObject({ phase: 'awaitingAccount', prompt: 'unreadable' });
+      r.tick(ACCOUNT_PROMPT_MS).send(timer('accountPrompt'));
+    },
+    phase: 'closing',
+    error: 'ACCOUNT_UNCONFIRMED',
+    check: (r) => expect(lastResult(r)).toMatchObject({ code: 'ACCOUNT_UNCONFIRMED', detail: 'unreadable' }),
+  },
+  {
+    name: '§4.8: an unreadable account, Post anyway: proceeds without remembering anything',
+    script: (r) => {
+      const none = report({ account: { handle: null, candidates: 0 } });
+      toReport(r).send(none, INPUT_WAITED, none);
+      r.send({ type: 'accountChoice', handoffId: 'hof_u1', proceed: true });
+    },
+    phase: 'openingEntry',
+    lacks: ['setExpectedAccount'],
+  },
+  {
+    name: '§4.8: no account expected (after Forget): a post asks first',
+    opts: { settings: { expectedAccount: null } },
+    script: (r) => toEntry(r),
+    phase: 'awaitingAccount',
+    check: (r) => expect(r.state).toMatchObject({ prompt: 'first' }),
+  },
+  {
+    name: 'the setup test with no account expected learns it without asking',
+    opts: { settings: { expectedAccount: null, lastTestPassAt: null } },
+    script: (r) => toEntry(r, 'test'),
+    phase: 'openingEntry',
+    has: ['setExpectedAccount'],
+    check: (r) => expect(r.w.account).toMatchObject({ decision: 'learn', confirmedBy: 'learned' }),
+  },
+  {
+    name: '"Only post as" off: never asks, whoever is logged in',
+    opts: { settings: { accountLock: false } },
+    script: (r) => toReport(r).send(report({ account: { handle: 'other', candidates: 1 } })),
+    phase: 'openingEntry',
+    check: (r) => expect(r.w.account).toMatchObject({ decision: 'unlocked', confirmedBy: 'unlocked' }),
+  },
+  {
+    name: 'a choice for another hand-off, or outside the prompt, is ignored',
+    script: (r) => {
+      toEntry(r).send({ type: 'accountChoice', handoffId: 'hof_u1', proceed: false });
+      toReport(new Run()).send(report({ account: { handle: 'x', candidates: 1 } }), {
+        type: 'accountChoice',
+        handoffId: 'hof_other',
+        proceed: true,
+      });
+    },
+    phase: 'openingEntry',
+  },
+
+  // ---- + → Story (C10, C11) --------------------------------------------------------------------
+  {
+    name: 'a stored fingerprint goes with the open-entry; an unchanged one is not stored again',
+    opts: { fingerprint: { count: 2, storyIndex: 1, glyph: '0a1b2c3d', savedAt: T0 - 5 } },
+    script: (r) => toInserting(r),
+    phase: 'inserting',
+    lacks: ['storeFingerprint'],
+    check: (r) =>
+      expect(r.effects.find(isEntry)).toMatchObject({
+        command: { fingerprint: { count: 2, storyIndex: 1, glyph: '0a1b2c3d' } },
+      }),
+  },
+  {
+    name: 'C10: the menu is not what instapost expects → STORY_ENTRY_MISSING (offer-manual), nothing more tapped',
+    script: (r) =>
+      toEntrySent(r).send(entryFact({ result: 'MENU_DRIFT', menuCount: 3, storyIndex: null, glyph: null })),
+    phase: 'finished',
+    error: 'STORY_ENTRY_MISSING',
+    lacks: ['closeWindow'],
+    check: (r) => {
+      expect(r.state).toMatchObject({
+        hold: 'offerManual',
+        result: { code: 'STORY_ENTRY_MISSING', detail: 'menu 3 items' },
+      });
+      expect(r.count(isInsert)).toBe(0);
+    },
+  },
+  {
+    name: 'C3a: Instagram refused to start the story (landscape viewport) → LANDSCAPE, close',
+    script: (r) => toEntrySent(r).send(entryFact({ result: 'SESSION_NOT_STARTED' })),
+    phase: 'closing',
+    error: 'LANDSCAPE',
+    check: (r) => expect(lastResult(r)).toMatchObject({ detail: 'story session refused' }),
+  },
+  {
+    name: 'R22: the owner kept clicking in the window → WINDOW_IN_USE (offer-manual)',
+    script: (r) => toEntrySent(r).send(entryFact({ result: 'ACTIVATION_ACTIVE' })),
+    phase: 'finished',
+    error: 'WINDOW_IN_USE',
+  },
+  {
+    name: 'the entry never answers within its budget → TIMEOUT (step Story)',
+    script: (r) => toEntrySent(r).tick(ENTRY_BUDGET_MS).send(timer('stepDeadline')),
+    phase: 'closing',
+    error: 'TIMEOUT',
+    check: (r) => expect(lastResult(r)).toMatchObject({ detail: 'story 30 s' }),
+  },
+  {
+    name: 'an entry fact before the command, or a second one, is ignored',
+    script: (r) => {
+      toEntry(r).send(entryFact());
+      expect(r.phase).toBe('openingEntry');
+      r.send(timer('dwell'), entryFact(), entryFact({ result: 'MENU_MISSING' }));
+    },
+    phase: 'inserting',
+  },
+
+  // ---- the insert and the composer (C12) ----------------------------------------------------------
+  {
+    name: 'the insert failed (accept drift) → ACCEPT_DRIFT (offer-manual)',
+    script: (r) =>
+      toInserting(r).send(
+        timer('dwell'),
+        { type: 'agentGetFile' },
+        fact({ kind: 'insert-failed', why: 'accept-drift' }),
+      ),
+    phase: 'finished',
+    error: 'ACCEPT_DRIFT',
+  },
+  {
+    name: 'the export is missing (serveFile failed) → INJECTION_IGNORED (offer-manual)',
+    script: (r) =>
+      toInserting(r).send(
+        timer('dwell'),
+        { type: 'agentGetFile' },
+        { type: 'effectFailed', effect: 'serveFile', message: 'gone' },
+      ),
+    phase: 'finished',
+    error: 'INJECTION_IGNORED',
+    check: (r) => expect(lastResult(r)).toMatchObject({ detail: 'export missing' }),
+  },
+  {
+    name: 'the composer never drew the photo → INJECTION_IGNORED (offer-manual)',
+    script: (r) => toAwaitComposer(r).tick(INSERT_BUDGET_MS).send(timer('stepDeadline')),
+    phase: 'finished',
+    error: 'INJECTION_IGNORED',
+  },
+  {
+    name: 'C12: no Share control, or two → SHARE_MISSING (offer-manual), nothing pressed',
+    script: (r) => toAwaitComposer(r).send(...TO_COMPOSER, composeFact({ controls: 2, variant: null })),
+    phase: 'finished',
+    error: 'SHARE_MISSING',
+    shares: 0,
+    check: (r) => expect(lastResult(r)).toMatchObject({ detail: '2 Share controls' }),
+  },
+  {
+    name: 'C3b: Instagram’s rotate snackbar → SCREEN_LANDSCAPE, nothing pressed',
+    script: (r) => toAwaitComposer(r).send(...TO_COMPOSER, composeFact({ landscape: true, controls: 0 })),
+    phase: 'closing',
+    error: 'SCREEN_LANDSCAPE',
+    shares: 0,
+  },
+  {
+    name: 'OD12: the v2 footer with Facebook’s badge is recorded and said on Posted',
+    script: (r) => {
+      toAwaitComposer(r).send(...TO_COMPOSER, composeFact({ variant: 'v2', fbAuto: true }));
+      r.send(timer('dwell'), SHARE_DONE, net([upload(200), publish(200)], 2600));
+    },
+    phase: 'finished',
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'posted', facebook: true }),
+  },
+
+  // ---- test runs (§7) ---------------------------------------------------------------------------
+  {
+    name: 'Test run: stops at Share (never pressed), closes at once, remembers the pass',
+    script: (r) => toComposeReady(r, 'test'),
+    phase: 'closing',
+    shares: 0,
+    has: ['setLastTestPass'],
+    check: (r) => {
+      expect(lastRecord(r)).toMatchObject({
+        mode: 'test',
+        outcome: 'tested',
+        result: { kind: 'tested', account: HANDLE },
+      });
+      expect(r.effects).toContainEqual({ type: 'setLastTestPass', at: T0 });
+      expect(r.effects).toContainEqual(expect.objectContaining({ type: 'storeFingerprint' }));
+    },
+  },
+  {
+    name: 'Share test: verifies its write-block rules, then presses Share once; a blocked upload passes',
+    script: (r) => {
+      toAwaitComposer(r, 'shareTest').send(...TO_COMPOSER, composeFact());
+      expect(r.state).toMatchObject({ phase: 'composeReady', sub: 'verifyRules' });
+      expect(r.steps.at(-1)?.effects).toContainEqual({ type: 'verifyTestRules', tabId: TAB });
+      // A dwell before the rules are verified presses nothing.
+      expect(r.send(timer('dwell'))).toEqual([]);
+      r.send({ type: 'rulesVerified', ok: true }, timer('dwell'), SHARE_DONE);
+      r.send(net([upload(0, 1000)], 2000));
+      expect(r.phase).toBe('confirmingUpload');
+      r.tick(3000).send(timer('confirmTick'));
+    },
+    phase: 'finished',
+    shares: 1,
+    check: (r) => expect(lastRecord(r)).toMatchObject({ mode: 'shareTest', outcome: 'share-tested' }),
+  },
+  {
+    name: 'Share test without its rules installed: Share is never pressed (AGENT_UNREACHABLE)',
+    script: (r) =>
+      toAwaitComposer(r, 'shareTest').send(...TO_COMPOSER, composeFact(), { type: 'rulesVerified', ok: false }),
+    phase: 'closing',
+    error: 'AGENT_UNREACHABLE',
+    shares: 0,
+  },
+  {
+    name: 'O10: a Share test whose publish went through → TEST_LEAK: kill and lock',
+    script: (r) => {
+      toAwaitComposer(r, 'shareTest').send(...TO_COMPOSER, composeFact(), { type: 'rulesVerified', ok: true });
+      r.send(timer('dwell'), SHARE_DONE, net([upload(200), publish(200)], 2600));
+    },
+    phase: 'closing',
+    error: 'TEST_LEAK',
+    has: ['lockMsite'],
+    check: (r) =>
+      expect(lastRecord(r)).toMatchObject({
+        outcome: 'killed:TEST_LEAK',
+        result: { code: 'TEST_LEAK', killed: 'TEST_LEAK' },
+      }),
+  },
+
+  // ---- Share and the outcome (§6) -----------------------------------------------------------------
+  {
+    name: 'share-refused (nothing clicked) is a before-Share failure: Nothing was posted, offer-manual',
+    script: (r) => toSharing(r).send(fact({ kind: 'share-refused', why: 'controls' })),
+    phase: 'finished',
+    error: 'SHARE_MISSING',
+    check: (r) => {
+      expect(r.state).toMatchObject({ hold: 'offerManual', shareRefused: 'controls' });
+      expect(lastResult(r)).toMatchObject({ kind: 'notPosted', code: 'SHARE_MISSING' });
+    },
+  },
+  {
+    name: 'O8: no answer to the Share command → Couldn’t confirm, held (an upload may be running)',
+    script: (r) => toSharing(r).tick(SHARE_ACK_MS).send(timer('shareAck')),
+    phase: 'finished',
+    check: (r) => {
+      expect(r.state).toMatchObject({
+        hold: 'upload',
+        result: { kind: 'unknown', why: 'share-not-acknowledged', held: true },
+      });
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'uploadHold', ms: UPLOAD_HOLD_MS });
+      expect(r.effects).toContainEqual({ type: 'setBadge', text: '?', color: '#b7791f' });
+    },
+  },
+  {
+    name: 'O2: the publish answered 400 → Not posted (UPLOAD_FAILED), closes in 3 s',
+    script: (r) => toConfirming(r).send(net([upload(200), publish(400)], 2600)),
+    phase: 'finished',
+    error: 'UPLOAD_FAILED',
+    check: (r) => {
+      expect(r.effects).toContainEqual({ type: 'armTimer', timer: 'closeDelay', ms: CLOSE_DELAY_MS });
+      expect(lastRecord(r)).toMatchObject({ outcome: 'failed:UPLOAD_FAILED' });
+    },
+  },
+  {
+    name: 'O3: a redirect to a login page (200 HTML) is never Posted',
+    script: (r) =>
+      toConfirming(r).send(net([upload(200), publish(200, 2500, { type: 'text/html', redirected: true })], 2600)),
+    phase: 'finished',
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'unknown', why: 'redirected' }),
+  },
+  {
+    name: 'O4: the upload failed (500) and Instagram never published → Not posted after 3 s',
+    script: (r) => {
+      toConfirming(r).send(net([upload(500, 1000)], 1500));
+      r.tick(CONFIRM_TICK_MS * 2).send(timer('confirmTick'));
+    },
+    phase: 'finished',
+    error: 'UPLOAD_FAILED',
+  },
+  {
+    name: 'O5 + §6.4: no publish 75 s after a 2xx upload → held; a late 200 upgrades the record to Posted',
+    script: (r) => {
+      toConfirming(r).send(net([upload(200, 1000)], 1500));
+      r.tick(76_000).send(timer('confirmTick'));
+      expect(r.state).toMatchObject({
+        phase: 'finished',
+        hold: 'upload',
+        result: { kind: 'unknown', why: 'no-finalize-after-upload' },
+      });
+      r.tick(30_000).send(net([publish(200, 107_000)], 107_100));
+    },
+    phase: 'finished',
+    has: ['patchRecordOutcome'],
+    check: (r) => {
+      expect(r.state).toMatchObject({ hold: 'none', result: { kind: 'posted', late: true } });
+      expect(r.effects).toContainEqual(
+        expect.objectContaining({ type: 'patchRecordOutcome', handoffId: 'hof_u1', outcome: 'posted' }),
+      );
+      expect(r.count((e) => e.type === 'writeRecord')).toBe(1);
+    },
+  },
+  {
+    name: 'O6: no upload at all within 120 s → Couldn’t confirm, held up to 15 minutes, then closed',
+    script: (r) => {
+      toConfirming(r).tick(120_000).send(timer('confirmTick'));
+      expect(r.state).toMatchObject({ hold: 'upload', result: { why: 'no-upload-seen' } });
+      r.tick(UPLOAD_HOLD_MS).send(timer('uploadHold'));
+    },
+    phase: 'closing',
+    check: (r) => expect(lastOutcome(r)).toBe('unknown'),
+  },
+  {
+    name: 'a guarded E2E budget scale shortens O6 (a guarded post’s writes are blocked by its static ruleset)',
+    opts: { guarded: true, budgetScale: 0.01, rate: { ok: true } },
+    script: (r) => toConfirming(r).tick(1300).send(timer('confirmTick')),
+    phase: 'finished',
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'unknown', why: 'no-upload-seen' }),
+  },
+  {
+    name: 'O7: two publish requests: Posted, with the duplicate alarm',
+    script: (r) => toConfirming(r).send(net([upload(200), publish(200, 2500), publish(200, 2700)], 2800)),
+    phase: 'finished',
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'posted', alarms: ['DUPLICATE_UPLOAD'] }),
+  },
+
+  // ---- Stop, the window, the kill switch after Share ---------------------------------------------
+  {
+    name: 'Stop before Share → Stopped, Nothing was posted; cleanup on windowRemoved',
+    script: (r) => toComposeReady(r).send({ type: 'cancel' }, { type: 'windowRemoved', windowId: WIN }),
     phase: 'idle',
     has: ['closeWindow', 'removeRules'],
-    check: (r) => expect(lastOutcome(r)).toBe('abandoned'),
+    shares: 0,
+    check: (r) =>
+      expect(lastRecord(r)).toMatchObject({ outcome: 'cancelled', result: { kind: 'stopped', stoppedBy: 'owner' } }),
+  },
+  {
+    name: 'Stop after the Share command is not honoured',
+    script: (r) => toSharing(r).send({ type: 'cancel' }, SHARE_DONE, { type: 'cancel' }),
+    phase: 'confirmingUpload',
+    lacks: ['closeWindow'],
+  },
+  {
+    name: 'the window closed by hand before Share → Stopped (you closed the Instagram window)',
+    script: (r) => toInserting(r).send({ type: 'windowRemoved', windowId: WIN }),
+    phase: 'idle',
+    check: (r) => expect(lastRecord(r)).toMatchObject({ result: { kind: 'stopped', stoppedBy: 'window' } }),
+  },
+  {
+    name: 'O8: the window closed after Share → Couldn’t confirm (window-closed)',
+    script: (r) => toConfirming(r).send({ type: 'windowRemoved', windowId: WIN }),
+    phase: 'idle',
+    check: (r) => expect(lastRecord(r)).toMatchObject({ outcome: 'unknown', result: { why: 'window-closed' } }),
+  },
+  {
+    name: 'IR12: a security check after Share, before Instagram answered → Couldn’t confirm and the lock',
+    script: (r) => toConfirming(r).send(tab('loading', CHALLENGE)),
+    phase: 'closing',
+    error: 'KILLED_CHALLENGE',
+    has: ['lockMsite'],
+    check: (r) =>
+      expect(lastRecord(r)).toMatchObject({
+        outcome: 'killed:KILLED_CHALLENGE',
+        result: { kind: 'unknown', killed: 'KILLED_CHALLENGE' },
+      }),
+  },
+  {
+    name: 'IR12: a security check after Posted keeps Posted, and locks',
+    script: (r) => toPosted(r).send(tab('loading', CHECKPOINT)),
+    phase: 'closing',
+    has: ['lockMsite', 'patchRecordOutcome'],
+    check: (r) => {
+      expect(r.effects).toContainEqual(
+        expect.objectContaining({
+          type: 'patchRecordOutcome',
+          outcome: 'posted',
+          result: expect.objectContaining({ kind: 'posted', killed: 'KILLED_CHALLENGE' }),
+        }),
+      );
+      expect(r.lastStatus).toMatchObject({ result: { kind: 'posted', killed: 'KILLED_CHALLENGE' } });
+    },
+  },
+  {
+    name: 'a login page after Share → Couldn’t confirm (unexpected page), no lock',
+    script: (r) => toConfirming(r).send(tab('loading', LOGIN)),
+    phase: 'finished',
+    lacks: ['lockMsite'],
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'unknown', why: 'unexpected-page' }),
+  },
+  {
+    name: 'an unknown www page after Share → Couldn’t confirm, never "Nothing was posted"',
+    script: (r) => toConfirming(r).send(tab(undefined, CONSENT)),
+    phase: 'finished',
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'unknown', detail: 'page /consent/' }),
+  },
+  {
+    name: 'a new document after Share: the old observer is gone → Couldn’t confirm (agent-lost), not held',
+    script: (r) => toConfirming(r).send(tab('loading', HOME), tab('complete', HOME), injectedWith(true)),
+    phase: 'finished',
+    check: (r) => expect(r.state).toMatchObject({ hold: 'none', result: { kind: 'unknown', why: 'agent-lost' } }),
+  },
+  {
+    name: 'P3: a worker intercepting after Share cuts nothing off',
+    script: (r) => toConfirming(r).send(agent('sw-intercepted')),
+    phase: 'confirmingUpload',
+    lacks: ['closeWindow'],
+  },
+
+  // ---- the kill switch before Share --------------------------------------------------------------
+  {
+    name: 'challenge before Share → kill: close first, lock 7 days, Not posted',
+    script: (r) => toInserting(r).send(tab('loading', CHALLENGE)),
+    phase: 'closing',
+    error: 'KILLED_CHALLENGE',
+    has: ['lockMsite'],
+    check: (r) => {
+      expect(r.steps.at(-1)?.effects[0]?.type).toBe('closeWindow');
+      expect(lastRecord(r)).toMatchObject({ outcome: 'killed:KILLED_CHALLENGE', result: { kind: 'notPosted' } });
+    },
+  },
+  {
+    name: 'AM17: /accounts/suspended on the reload → kill, never injected',
+    script: (r) => toNavigating(r).send(tab('loading', COMPOSER_URL), tab('complete', SUSPENDED)),
+    phase: 'closing',
+    error: 'KILLED_CHALLENGE',
+    lacks: ['injectAgent'],
+  },
+  {
+    name: 'AM17: /auth_platform/codeentry at the composer → kill',
+    script: (r) => toComposeReady(r).send(tab(undefined, CODE_ENTRY)),
+    phase: 'closing',
+    error: 'KILLED_CHALLENGE',
+  },
+  {
+    name: 'off-host (accountscenter) before Share → kill',
+    script: (r) => toEntry(r).send(tab('loading', ACCOUNTS_CENTER)),
+    phase: 'closing',
+    error: 'KILLED_OFFHOST',
+    has: ['lockMsite'],
+  },
+  {
+    name: 'AM17: an unknown www page before Share → UNEXPECTED_PAGE, no lock',
+    script: (r) => toEntrySent(r).send(tab('loading', CONSENT)),
+    phase: 'closing',
+    error: 'UNEXPECTED_PAGE',
+    lacks: ['lockMsite'],
+    check: (r) => expect(r.lastStatus?.detail).toBe('page /consent/'),
+  },
+  {
+    name: 'updates of other tabs never trip the kill switch',
+    script: (r) => toComposeReady(r).send(tab('loading', CHALLENGE, 99)),
+    phase: 'composeReady',
+    lacks: ['lockMsite', 'closeWindow'],
+  },
+  {
+    name: 'P3: the watch reports an intercepted request before Share → SW_INTERCEPTS, no lock',
+    script: (r) => toInserting(r).send(agent('sw-intercepted')),
+    phase: 'closing',
+    error: 'SW_INTERCEPTS',
+    lacks: ['lockMsite'],
+  },
+
+  // ---- document checks (AM16) and AM37 at the composer ---------------------------------------------
+  {
+    name: 'AM16: a new document before any tap is probed again, strictly; the account is decided again',
+    script: (r) => {
+      toEntry(r).send(tab('loading', HOME), tab('complete', HOME), injectedWith(true, SHIM_INSTALLED));
+      expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitReport', strict: true, decided: false });
+      r.send(report());
+    },
+    phase: 'openingEntry',
+    check: (r) => expect(r.count(isEntry)).toBe(0),
+  },
+  {
+    name: 'AM16: a new document after the open-entry → STORY_ENTRY_MISSING (page reloaded), never a second open-entry',
+    script: (r) => toEntrySent(r).send(tab('loading', HOME), tab('complete', HOME), injectedWith(true)),
+    phase: 'finished',
+    error: 'STORY_ENTRY_MISSING',
+    check: (r) => expect(r.count(isEntry)).toBe(1),
+  },
+  {
+    name: 'AM16: a new document while inserting → INJECTION_IGNORED (page reloaded)',
+    script: (r) =>
+      toAwaitComposer(r).send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injectedWith(true)),
+    phase: 'finished',
+    error: 'INJECTION_IGNORED',
+  },
+  {
+    name: 'AM37: the insert’s navigation reaches the composer while the page reads landscape → SCREEN_LANDSCAPE',
+    script: (r) =>
+      toAwaitComposer(r).send(
+        tab('loading', COMPOSER_URL),
+        tab('complete', COMPOSER_URL),
+        injectedWith(false, SHIM_OFF),
+      ),
+    phase: 'closing',
+    error: 'SCREEN_LANDSCAPE',
+    shares: 0,
+    check: (r) => expect(r.lastStatus?.detail).toBe('screen landscape-primary, portrait shim off'),
+  },
+  {
+    name: 'SH-1: home read portrait; the shim installed only on the composer → SCREEN_LANDSCAPE',
+    script: (r) => {
+      toReloading(r).send(
+        tab('complete', HOME),
+        injectedWith(true, { type: 'portrait-primary', shim: 'portrait' }),
+        report(),
+      );
+      r.send(timer('dwell'), entryFact(), timer('dwell'), { type: 'agentGetFile' }, fact({ kind: 'inserted' }));
+      r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injectedWith(false, SHIM_INSTALLED));
+    },
+    phase: 'closing',
+    error: 'SCREEN_LANDSCAPE',
+    check: (r) =>
+      expect(r.lastStatus?.detail).toBe('screen portrait-primary, portrait shim installed after the composer mounted'),
+  },
+  {
+    name: 'AM37 row 5b: the reload lands on the composer reading landscape → SCREEN_LANDSCAPE, nothing tapped',
+    script: (r) =>
+      toNavigating(r).send(
+        tab('loading', COMPOSER_URL),
+        tab('loading', COMPOSER_URL),
+        tab('complete', COMPOSER_URL),
+        injectedWith(true, SHIM_OFF),
+        report(),
+      ),
+    phase: 'closing',
+    error: 'SCREEN_LANDSCAPE',
+    check: (r) => expect(lastRecord(r)).toMatchObject({ route: 'direct', preflight: { C3b: 'fail', C4: 'unknown' } }),
+  },
+
+  // ---- visibility (§4.6) -----------------------------------------------------------------------------
+  {
+    name: '§4.6: hidden before a tap → raised once; visible again within 10 s → carries on',
+    script: (r) => {
+      toEntrySent(r).send(fact({ kind: 'visibility', hidden: true }));
+      expect(r.steps.at(-1)?.effects).toEqual([
+        { type: 'raiseWindow', windowId: WIN },
+        { type: 'armTimer', timer: 'hiddenWait', ms: HIDDEN_WAIT_MS },
+      ]);
+      r.send(fact({ kind: 'visibility', hidden: false }));
+      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'clearTimer', timer: 'hiddenWait' }]);
+      r.send(fact({ kind: 'visibility', hidden: true }));
+      expect(r.count((e) => e.type === 'raiseWindow')).toBe(1);
+      r.send(fact({ kind: 'visibility', hidden: false }), entryFact());
+    },
+    phase: 'inserting',
+  },
+  {
+    name: '§4.6: still hidden 10 s later → WINDOW_HIDDEN (close), nothing more tapped',
+    script: (r) => {
+      toEntrySent(r).send(fact({ kind: 'visibility', hidden: true }));
+      r.tick(HIDDEN_WAIT_MS).send(timer('hiddenWait'));
+    },
+    phase: 'closing',
+    error: 'WINDOW_HIDDEN',
+  },
+  {
+    name: '§4.6: after Share visibility no longer matters',
+    script: (r) => toConfirming(r).send(fact({ kind: 'visibility', hidden: true }), timer('hiddenWait')),
+    phase: 'confirmingUpload',
+    lacks: ['raiseWindow'],
+  },
+
+  // ---- Finish by hand (§4.9) ---------------------------------------------------------------------------
+  {
+    name: '§4.9: Finish by hand after a drift failure: instapost observes; the owner’s Share → Posted, the record patched',
+    script: (r) => {
+      toEntrySent(r).send(entryFact({ result: 'MENU_MISSING', menuCount: null, storyIndex: null, glyph: null }));
+      expect(r.state).toMatchObject({ phase: 'finished', hold: 'offerManual' });
+      const m = r.send({ type: 'manual', handoffId: 'hof_u1' });
+      expect(m.slice(0, 4)).toEqual([
+        { type: 'clearTimer', timer: 'offerManual' },
+        { type: 'raiseWindow', windowId: WIN },
+        { type: 'sendAgent', tabId: TAB, command: { type: 'agent/observe', from: 'manual' } },
+        { type: 'armTimer', timer: 'manualDeadline', ms: MANUAL_DEADLINE_MS },
+      ]);
+      expect(r.state).toMatchObject({ phase: 'manual', needs: 'pick' });
+      expect(r.lastStatus).toMatchObject({ phase: 'manual', manual: { needs: 'pick' }, canStop: true });
+      // The owner picks: the composer draws; then taps Share.
+      r.send(...TO_COMPOSER, composeFact());
+      expect(r.state).toMatchObject({ needs: 'share' });
+      r.send(fact({ kind: 'owner-share', t0Wall: T0 }), net([upload(200), publish(200)], 2600));
+    },
+    phase: 'finished',
+    shares: 0,
+    has: ['patchRecordOutcome'],
+    check: (r) => {
+      expect(r.state).toMatchObject({ result: { kind: 'posted' }, sharedBy: 'owner' });
+      expect(r.count((e) => e.type === 'writeRecord')).toBe(1);
+      expect(r.count(isInsert)).toBe(0);
+    },
+  },
+  {
+    name: '§4.9: the owner’s click missed but Instagram uploads: shared by hand all the same',
+    script: (r) => {
+      toEntrySent(r).send(entryFact({ result: 'NOT_ARMED' }), { type: 'manual', handoffId: 'hof_u1' });
+      r.send(net([upload(200)], 30_000));
+      expect(r.state).toMatchObject({ phase: 'confirmingUpload', sharedBy: 'owner' });
+    },
+    phase: 'confirmingUpload',
+  },
+  {
+    name: '§4.9: nothing within 5 minutes → TIMEOUT, Nothing was posted',
+    script: (r) => {
+      toEntrySent(r).send(entryFact({ result: 'NOT_ARMED' }), { type: 'manual', handoffId: 'hof_u1' });
+      r.tick(MANUAL_DEADLINE_MS).send(timer('manualDeadline'));
+    },
+    phase: 'closing',
+    error: 'TIMEOUT',
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'notPosted', detail: 'manual 300 s' }),
+  },
+  {
+    name: '§4.9: Finish by hand is only possible while the window is offered',
+    script: (r) => toEntry(r).send({ type: 'manual', handoffId: 'hof_u1' }),
+    phase: 'openingEntry',
+    lacks: ['raiseWindow'],
+  },
+
+  // ---- ends, cleanup, timers, failed effects -----------------------------------------------------------
+  {
+    name: 'the pre-Share cap: 2 minutes before Share → TIMEOUT',
+    script: (r) => toEntry(r).tick(PRE_SHARE_CAP_MS).send(timer('preShareCap')),
+    phase: 'closing',
+    error: 'TIMEOUT',
   },
   {
     name: 'cancel while the window is still opening: the late window is closed',
@@ -2471,85 +1944,63 @@ const ROWS: Row[] = [
     lacks: ['installRules'],
   },
   {
-    name: 'a window created after the session ended is closed (orphan)',
+    name: 'a window whose windowRemoved never comes ends after the backstop',
     script: (r) => {
-      r.send(startEv(), { type: 'effectFailed', effect: 'openWindow', message: 'x' });
-      r.send({ type: 'windowCreated', windowId: WIN, tabId: TAB });
+      toEntry(r).send({ type: 'cancel' });
+      r.tick(CLOSING_BACKSTOP_MS).send(timer('stepDeadline'));
     },
-    phase: 'idle',
-    error: 'AGENT_UNREACHABLE',
-    check: (r) => expect(r.steps.at(-1)?.effects).toEqual([{ type: 'closeWindow', windowId: WIN }]),
-  },
-  {
-    name: 'other windows closing are ignored mid-session',
-    script: (r) => toShare(r).send({ type: 'windowRemoved', windowId: 99 }, { type: 'tabRemoved', tabId: 98 }),
-    phase: 'awaitingShare',
-    lacks: ['removeRules'],
-  },
-  {
-    name: 'startup mid-session: close the stale popup, then remove the rules',
-    script: (r) => toShare(r).send({ type: 'startup' }),
-    phase: 'idle',
-    check: (r) => {
-      expect(types(r.steps.at(-1)?.effects ?? []).slice(0, 2)).toEqual(['closeWindow', 'removeRules']);
-      expect(lastOutcome(r)).toBe('abandoned');
-    },
-  },
-  {
-    name: 'inactivity: re-armed for the remainder, then TIMEOUT after 15 quiet minutes',
-    script: (r) => {
-      toPick(r);
-      r.tick(10 * 60_000).send({ type: 'timer', timer: 'inactivity' });
-      expect(r.steps.at(-1)?.effects).toEqual([{ type: 'armTimer', timer: 'inactivity', ms: 5 * 60_000 }]);
-      r.tick(5 * 60_000).send({ type: 'timer', timer: 'inactivity' });
-    },
-    phase: 'closing',
-    error: 'TIMEOUT',
-    has: ['closeWindow'],
-  },
-  {
-    name: 'activity resets the inactivity clock',
-    script: (r) => {
-      toPick(r);
-      r.tick(14 * 60_000).send(agent('composer-ready'));
-      r.tick(60_000).send({ type: 'timer', timer: 'inactivity' });
-    },
-    phase: 'awaitingShare',
-    check: (r) => expect(r.steps.at(-1)?.effects).toEqual([{ type: 'armTimer', timer: 'inactivity', ms: 14 * 60_000 }]),
-  },
-  {
-    name: 'a failed rule install closes the popup (AGENT_UNREACHABLE), never navigates',
-    script: (r) => {
-      r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB });
-      r.send({ type: 'effectFailed', effect: 'installRules', message: 'quota' });
-    },
-    phase: 'closing',
-    error: 'AGENT_UNREACHABLE',
-    lacks: ['navigate', 'measureTab'],
-    check: (r) => expect(r.lastStatus?.detail).toBe('installRules: quota'),
-  },
-  {
-    name: 'a failed hard reload closes the popup and is never retried',
-    script: (r) => toReloading(r).send({ type: 'effectFailed', effect: 'hardReload', message: 'x' }),
-    phase: 'closing',
-    error: 'AGENT_UNREACHABLE',
-  },
-  {
-    name: 'a stale failure (old document) is ignored',
-    script: (r) =>
-      toShare(r).send(tab('loading', COMPOSER_URL), { type: 'effectFailed', effect: 'sendAgent', message: 'gone' }),
-    phase: 'probing',
-  },
-  {
-    name: 'closeWindow failing (already gone) still cleans up',
-    script: (r) =>
-      toShare(r).send({ type: 'cancel' }, { type: 'effectFailed', effect: 'closeWindow', message: 'No window' }),
     phase: 'idle',
     has: ['removeRules'],
   },
+  {
+    name: 'startup mid-session: close the stale popup, then remove the rules',
+    script: (r) => toInserting(r).send({ type: 'startup' }),
+    phase: 'idle',
+    check: (r) => {
+      expect(types(r.steps.at(-1)?.effects ?? []).slice(0, 2)).toEqual(['closeWindow', 'removeRules']);
+      expect(lastRecord(r)).toMatchObject({ result: { code: 'AGENT_UNREACHABLE', detail: 'browser restarted' } });
+    },
+  },
+  {
+    name: 'startup after Share: Couldn’t confirm (agent-lost)',
+    script: (r) => toConfirming(r).send({ type: 'startup' }),
+    phase: 'idle',
+    check: (r) => expect(lastOutcome(r)).toBe('unknown'),
+  },
+  {
+    name: 'an agent that cannot be reached for the Share command → Couldn’t confirm',
+    script: (r) => toSharing(r).send({ type: 'effectFailed', effect: 'sendAgent', message: 'gone' }),
+    phase: 'finished',
+    check: (r) => expect(lastResult(r)).toMatchObject({ kind: 'unknown', why: 'share-not-acknowledged' }),
+  },
+  {
+    name: 'an agent that cannot be reached before Share → AGENT_UNREACHABLE',
+    script: (r) => toEntrySent(r).send({ type: 'effectFailed', effect: 'sendAgent', message: 'gone' }),
+    phase: 'closing',
+    error: 'AGENT_UNREACHABLE',
+  },
+  {
+    name: 'a failed rule install closes the popup, never navigates',
+    script: (r) =>
+      r.send(
+        startEv(),
+        { type: 'windowCreated', windowId: WIN, tabId: TAB },
+        { type: 'effectFailed', effect: 'installRules', message: 'quota' },
+      ),
+    phase: 'closing',
+    error: 'AGENT_UNREACHABLE',
+    lacks: ['navigate', 'measureTab'],
+  },
+  {
+    name: 'History’s mark goes to the runner (it applies to a Couldn’t confirm record only)',
+    script: (r) => r.send({ type: 'mark', handoffId: 'hof_x', posted: true }),
+    phase: 'idle',
+    has: ['markRecord'],
+    check: (r) => expect(r.steps.at(-1)?.effects).toEqual([{ type: 'markRecord', handoffId: 'hof_x', posted: true }]),
+  },
 ];
 
-describe('U9 hand-off reducer: transition table', () => {
+describe('U19 hand-off reducer: transition table', () => {
   it.each(ROWS)('$name', (row) => {
     const r = new Run(row.opts);
     row.script(r);
@@ -2557,42 +2008,10 @@ describe('U9 hand-off reducer: transition table', () => {
     if (row.error !== undefined) expect(r.lastStatus?.error ?? null).toBe(row.error);
     for (const t of row.has ?? []) expect(types(r.effects)).toContain(t);
     for (const t of row.lacks ?? []) expect(types(r.effects)).not.toContain(t);
-    if (row.injects !== undefined) expect(r.injects).toBe(row.injects);
+    if (row.shares !== undefined) expect(r.shares).toBe(row.shares);
     row.check?.(r);
     checkRun(r);
   });
-
-  const DRIVE: Partial<Record<HandoffPhase, (r: Run) => void>> = {
-    scoping: (r) => r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }),
-    fitting: (r) => r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' }),
-    navigating: (r) => {
-      r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-      r.send(MEASURED, FITTED);
-    },
-    reloading: (r) => toReloading(r),
-    probing: (r) => toReport(r),
-    injecting: (r) => toInjecting(r),
-    awaitingPick: (r) => toPick(r),
-    awaitingShare: (r) => toShare(r),
-    finished: (r) => toShare(r).send(tab(undefined, HOME)),
-  };
-
-  it.each(Object.keys(DRIVE) as HandoffPhase[])(
-    'window closed by the owner in %s → cleanup: rules 1001–1019 removed, idle',
-    (phase) => {
-      const r = new Run();
-      DRIVE[phase]?.(r);
-      expect(r.phase).toBe(phase);
-      const out = r.send(
-        phase === 'scoping' ? { type: 'tabRemoved', tabId: TAB } : { type: 'windowRemoved', windowId: WIN },
-      );
-      expect(out[0]).toEqual({ type: 'removeRules', ruleIds: SESSION_IDS });
-      expect(r.state).toMatchObject({ phase: 'idle', last: { handoffId: 'hof_u1' } });
-      expect(r.count((e) => e.type === 'writeRecord')).toBe(1);
-      expect(lastOutcome(r)).toBe(phase === 'finished' ? 'posted-confirmed' : 'abandoned');
-      checkRun(r);
-    },
-  );
 
   it('cleanup is idempotent in idle: windowRemoved, tabRemoved and startup each remove 1001–1019', () => {
     const r = new Run();
@@ -2607,360 +2026,99 @@ describe('U9 hand-off reducer: transition table', () => {
   });
 
   it('ignored events return the very same state object', () => {
-    const r = toShare(new Run());
+    const r = toComposeReady(new Run());
     const before = r.state;
     for (const ev of [
       agent('input-appeared'),
       { type: 'rulesInstalled' },
       FITTED,
       { type: 'agentInjected' },
-      { type: 'timer', timer: 'closeDelay' },
-      tab('complete', COMPOSER_URL),
+      timer('closeDelay'),
+      { type: 'agentGetFile' },
+      entryFact(),
+      fact({ kind: 'share-done', t0Wall: 1 }),
     ] as HandoffEvent[]) {
       expect(r.send(ev)).toEqual([]);
       expect(r.state).toBe(before);
     }
-    // A report outside `probing` and `awaitingShare` is ignored too.
-    const pick = toPick(new Run());
-    const picking = pick.state;
-    expect(pick.send(report())).toEqual([]);
-    expect(pick.state).toBe(picking);
   });
 
-  it('AM13: a report in awaitingShare only records C8; it never re-evaluates the flow', () => {
-    const r = toShare(new Run());
-    expect(r.steps.at(-1)?.effects.filter(isProbeCmd)).toHaveLength(1);
-    // Even a report that would fail every row changes nothing but readyProbe.
-    const bad = goodProbe({ marker: false, isMobile: false, portrait: false, storyInput: 'absent', acceptOk: false });
-    expect(types(r.send({ type: 'agentReport', probe: bad }))).toEqual(['notifyEditor']);
-    expect(r.state).toMatchObject({ phase: 'awaitingShare', level: 'H1', readyProbe: bad, probe: goodProbe() });
-    // H0 reaches the same probe when the owner's pick makes the composer ready.
-    const h0 = toPick(new Run()).send(agent('composer-ready'));
-    expect(h0.filter(isProbeCmd)).toHaveLength(1);
-  });
-
-  it("the owner's answer patches finished, closing and idle records, but never a failure", () => {
-    const answer = (r: Run, posted: boolean, handoffId = 'hof_u1') => r.send({ type: 'outcome', handoffId, posted });
-    const patch = (outcome: string) => [{ type: 'patchRecordOutcome', handoffId: 'hof_u1', outcome }];
-
-    const r = toShare(new Run());
-    expect(answer(r, false)).toEqual([]); // not finished yet: nothing to patch
-    r.send(tab(undefined, HOME));
-    expect(answer(r, false)).toEqual(patch('not-posted'));
-    expect(answer(r, false)).toEqual([]); // unchanged
-    r.send({ type: 'timer', timer: 'closeDelay' });
-    expect(answer(r, true)).toEqual(patch('posted-confirmed'));
-    expect(answer(r, false, 'other')).toEqual([]);
-    r.send({ type: 'windowRemoved', windowId: WIN });
-    expect(answer(r, false)).toEqual(patch('not-posted'));
-    expect(r.state).toMatchObject({ last: { outcome: 'not-posted' } });
-
-    const failed = toReport(new Run());
-    failed.send(report({ isMobile: false }));
-    expect(answer(failed, true)).toEqual([]);
-    failed.send({ type: 'windowRemoved', windowId: WIN });
-    expect(answer(failed, true)).toEqual([]);
-    expect(failed.state).toMatchObject({ last: { outcome: 'failed:DESKTOP_SHELL' } });
-  });
-});
-
-// ---------------------------------------------------------------------------------------
-// AM37 (2026-10-12): the portrait shim's reading (C3b) and SCREEN_LANDSCAPE.
-
-/** The records the run wrote, in order. */
-const written = (r: Run): HandoffRecord[] => r.effects.flatMap((e) => (e.type === 'writeRecord' ? [e.record] : []));
-
-/** Through the hard reload to the first probe on home (`/`, msite's usual landing), injected with `o`. */
-function toHomeShim(r: Run, o: PageOrientation, mode: 'post' | 'probe' = 'post'): Run {
-  r.send(startEv(mode), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-  r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', HOME), tab('complete', HOME));
-  r.send(injectedWith(true, o));
-  return r;
-}
-
-/** The pick's (or the insert's) SPA navigation to the composer: a same-document load, `o` its reading. */
-const toComposer = (o: PageOrientation): HandoffEvent[] => [
-  tab('loading', COMPOSER_URL),
-  tab('complete', COMPOSER_URL),
-  injectedWith(false, o),
-];
-
-describe('U9 AM37: the composer’s screen-orientation gate (C3b) and SCREEN_LANDSCAPE', () => {
-  it('every report is stamped with the shim’s reading; the record’s preflight has C3b', () => {
-    const r = toHomeShim(new Run(), SHIM_INSTALLED);
-    // The agent's own report never carries it (normalizeProbeReport); the background adds it.
-    r.send(report());
-    expect(r.state).toMatchObject({ phase: 'injecting', pageOrientation: SHIM_INSTALLED });
-    expect(r.state.phase !== 'idle' && 'probe' in r.state ? r.state.probe?.orientation : null).toEqual(SHIM_INSTALLED);
-    expect(r.statuses.find((s) => s.probe)?.probe?.orientation).toEqual(SHIM_INSTALLED);
-    // The insert's SPA navigation reaches the composer; the shim is still in place there.
-    r.send({ type: 'agentGetFile' }, ...toComposer(SHIM_PRESENT), agent('composer-ready'));
-    expect(r.phase).toBe('awaitingShare');
-    // AM13's C8 report is stamped with the composer document's reading.
-    r.send(report({ canvas: { w: 1022, h: 1816, css: { x: 0, y: 0, w: 511, h: 908 } } }));
-    expect(r.state).toMatchObject({ readyProbe: { orientation: SHIM_PRESENT } });
-    r.send(tab(undefined, HOME));
-    const [rec] = written(r);
-    expect(rec?.outcome).toBe('posted-confirmed');
-    expect(rec?.preflight).toMatchObject({ C3: 'pass', C3b: 'pass' });
-    checkRun(r);
-  });
-
-  it('H0 from home, shim off: the pick reaches the composer while the page reads landscape → SCREEN_LANDSCAPE', () => {
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
-    // On home the composer is not mounted yet: the reading is recorded, the owner is asked to pick.
-    r.send(report());
-    expect(r.phase).toBe('awaitingPick');
-    expect(r.lastStatus?.probe?.orientation).toEqual(SHIM_OFF);
-    const out = r.send(...toComposer(SHIM_OFF));
-    expect(r.phase).toBe('closing');
-    expect(types(out)).toEqual(['closeWindow', 'notifyEditor', 'writeRecord']);
-    expect(r.lastStatus).toMatchObject({
-      error: 'SCREEN_LANDSCAPE',
-      detail: 'screen landscape-primary, portrait shim off',
-      probe: { orientation: SHIM_OFF },
-    });
-    const [rec] = written(r);
-    expect(rec).toMatchObject({
-      outcome: 'failed:SCREEN_LANDSCAPE',
-      level: 'H0',
-      detail: 'screen landscape-primary, portrait shim off',
-      probe: { orientation: SHIM_OFF },
-    });
-    // C3a passed (the + → Story session start reads the portrait viewport), C3b failed.
-    expect(rec?.preflight).toMatchObject({ C3: 'pass', C3b: 'fail' });
-    // A close, never a kill: no lock.
-    expect(r.count((e) => e.type === 'lockMsite')).toBe(0);
-    r.send({ type: 'windowRemoved', windowId: WIN });
-    expect(r.state).toMatchObject({ phase: 'idle', last: { outcome: 'failed:SCREEN_LANDSCAPE' } });
-    checkRun(r);
-  });
-
-  it('H1 on home, shim off: SCREEN_LANDSCAPE once the insert’s navigation reaches the composer; one inject', () => {
-    const r = toHomeShim(new Run(), SHIM_OFF);
-    r.send(report(), { type: 'agentGetFile' });
-    expect(r.phase).toBe('injecting');
-    r.send(...toComposer(SHIM_OFF));
-    expect(r.phase).toBe('closing');
-    expect(r.lastStatus?.error).toBe('SCREEN_LANDSCAPE');
-    expect(r.injects).toBe(1);
-    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE', level: 'H1' });
-    checkRun(r);
-  });
-
-  it('a composer-ready that came first (awaitingShare) still ends in SCREEN_LANDSCAPE at the composer', () => {
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
-    r.send(report(), agent('composer-ready'));
-    expect(r.phase).toBe('awaitingShare');
-    r.send(...toComposer(SHIM_OFF));
-    expect(r.phase).toBe('closing');
-    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE' });
-    checkRun(r);
-  });
-
-  it('with the shim in place the same navigation resumes the interrupted phase', () => {
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
-    r.send(report());
-    r.send(...toComposer(SHIM_PRESENT));
-    expect(r.phase).toBe('awaitingPick');
-    expect(r.state).toMatchObject({ pageOrientation: SHIM_PRESENT });
-    r.send(agent('composer-ready'));
-    expect(r.phase).toBe('awaitingShare');
-    checkRun(r);
-  });
-
-  it('the composer at the first probe (route direct), page reading landscape: row 5b, nothing inserted', () => {
-    const r = toReloading(new Run());
-    r.send(tab('complete', COMPOSER_URL), injectedWith(true, SHIM_OFF), report());
-    expect(r.phase).toBe('closing');
-    expect(r.injects).toBe(0);
-    expect(r.lastStatus).toMatchObject({
-      error: 'SCREEN_LANDSCAPE',
-      detail: 'screen landscape-primary, portrait shim off',
-      c4: 'unknown',
-    });
-    expect(written(r)[0]).toMatchObject({
-      outcome: 'failed:SCREEN_LANDSCAPE',
-      route: 'direct',
-      preflight: { C3b: 'fail', C4: 'unknown' },
-    });
-    checkRun(r);
-  });
-
-  it('probe mode on home records the reading (C3b) and finishes normally', () => {
-    const r = toHomeShim(new Run(), SHIM_OFF, 'probe');
-    r.send(report());
-    expect(r.phase).toBe('closing');
-    expect(r.lastStatus?.error).toBeUndefined();
-    expect(written(r)[0]).toMatchObject({ outcome: 'not-posted', preflight: { C3b: 'fail' } });
-    const ok = toHomeShim(new Run(), SHIM_INSTALLED, 'probe').send(report());
-    expect(ok.find((e) => e.type === 'writeRecord')).toMatchObject({ record: { preflight: { C3b: 'pass' } } });
-  });
-
-  it('a new document starts from its own reading; one injected without a reading forgets the old one', () => {
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
-    r.send(report());
-    // A full-document load (fresh agent) brings the shim's new reading with it.
-    r.send(tab('loading', HOME), tab('complete', HOME), injectedWith(true, SHIM_INSTALLED));
-    expect(r.state).toMatchObject({ phase: 'probing', pageOrientation: SHIM_INSTALLED });
-    r.send(tab('loading', HOME), tab('complete', HOME), { type: 'agentInjected', fresh: true });
-    expect(r.state).toMatchObject({ phase: 'probing', pageOrientation: null });
-    // The same document without a reading keeps the one it had (and home is no composer: no failure).
-    const same = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_OFF);
-    same.send(report(), tab('loading', `${HOME}?x`), tab('complete', `${HOME}?x`), injected(false));
-    expect(same.state).toMatchObject({ phase: 'awaitingPick', pageOrientation: SHIM_OFF });
-    checkRun(same);
-  });
-
-  it('SCREEN_LANDSCAPE closes without a lock (§3.10 effect)', () => {
-    expect(ERROR_EFFECT.SCREEN_LANDSCAPE).toBe('close');
-  });
-
-  // SH-1 (2026-10-13): Instagram reads the orientation when the composer mounts (and on resize). A shim
-  // that installs itself only at the injection after the composer was entered came too late.
-  const LATE: PageOrientation = { ...SHIM_INSTALLED, afterComposerMount: true };
-  const LATE_DETAIL = 'screen portrait-primary, portrait shim installed after the composer mounted';
-
-  it('SH-1 (b): home read a portrait screen (nothing installed); by the pick it is landscape: installed on the composer → SCREEN_LANDSCAPE', () => {
-    const PORTRAIT: PageOrientation = { type: 'portrait-primary', shim: 'portrait' };
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), PORTRAIT);
-    r.send(report());
-    expect(r.phase).toBe('awaitingPick');
-    const out = r.send(...toComposer(SHIM_INSTALLED));
-    expect(r.phase).toBe('closing');
-    expect(types(out)).toEqual(['closeWindow', 'notifyEditor', 'writeRecord']);
-    expect(r.lastStatus).toMatchObject({
-      error: 'SCREEN_LANDSCAPE',
-      detail: LATE_DETAIL,
-      probe: { orientation: LATE },
-    });
-    const [rec] = written(r);
-    expect(rec).toMatchObject({
-      outcome: 'failed:SCREEN_LANDSCAPE',
-      level: 'H0',
-      detail: LATE_DETAIL,
-      probe: { orientation: LATE },
-      preflight: { C3: 'pass', C3b: 'fail' },
-    });
-    expect(r.count((e) => e.type === 'lockMsite')).toBe(0);
-    checkRun(r);
-  });
-
-  it('SH-1 (b): the same with H1 on home: the insert’s navigation reaches the composer, the shim installs only there', () => {
-    const r = toHomeShim(new Run(), { type: 'portrait-primary', shim: 'portrait' });
-    r.send(report(), { type: 'agentGetFile' });
-    expect(r.phase).toBe('injecting');
-    r.send(...toComposer(SHIM_INSTALLED));
-    expect(r.lastStatus).toMatchObject({ error: 'SCREEN_LANDSCAPE', detail: LATE_DETAIL });
-    expect(r.injects).toBe(1);
-    checkRun(r);
-  });
-
-  it('SH-1: no late shim when it was there before the composer (present), or the screen reads portrait there', () => {
-    for (const there of [SHIM_PRESENT, { type: 'portrait-primary', shim: 'portrait' } as const]) {
-      const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
-      r.send(report(), ...toComposer(there));
-      expect(r.phase).toBe('awaitingPick');
-      expect(r.state).toMatchObject({ pageOrientation: there, composerEntered: false });
-      checkRun(r);
-    }
-  });
-
-  it('SH-1: a later same-document load that stays on the composer is no entry (the composer did not mount again)', () => {
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
-    r.send(report(), ...toComposer(SHIM_PRESENT), agent('composer-ready'));
-    expect(r.phase).toBe('awaitingShare');
-    // E.g. the screen became landscape on another display, and the shim's getters were gone: it installs.
-    r.send(
-      tab('loading', `${COMPOSER_URL}?x=1`),
-      tab('complete', `${COMPOSER_URL}?x=1`),
-      injectedWith(false, SHIM_INSTALLED),
-    );
-    expect(r.phase).toBe('awaitingShare');
-    expect(r.state).toMatchObject({ pageOrientation: SHIM_INSTALLED });
-    checkRun(r);
-  });
-
-  it('SH-1: a new document on the composer (a full load) is no late shim: its composer has no photo yet', () => {
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), SHIM_INSTALLED);
-    r.send(report());
-    r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injectedWith(true, SHIM_INSTALLED));
-    expect(r.state).toMatchObject({ phase: 'probing', step: 'awaitReport', pageOrientation: SHIM_INSTALLED });
-    r.send(report());
-    expect(r.phase).toBe('awaitingPick');
-    checkRun(r);
-  });
-
-  it('SH-1 (a): the owner picked before the reloaded home completed: the first injection lands on the composer → SCREEN_LANDSCAPE', () => {
-    const r = new Run({ settings: { assistedInsert: false } });
-    r.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-    // First load, the reload's own commit (home), the pick's SPA navigation, then the first `complete`.
-    r.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', HOME), tab('loading', COMPOSER_URL));
-    expect(r.state).toMatchObject({ phase: 'reloading', composerEntered: true });
-    r.send(tab('complete', COMPOSER_URL), injectedWith(true, SHIM_INSTALLED));
-    expect(r.state).toMatchObject({ phase: 'probing', pageOrientation: LATE, composerEntered: false });
-    r.send(report());
-    expect(r.phase).toBe('closing');
-    expect(r.injects).toBe(0);
-    expect(r.lastStatus).toMatchObject({ error: 'SCREEN_LANDSCAPE', detail: LATE_DETAIL });
-    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE', preflight: { C3b: 'fail' } });
-    checkRun(r);
-  });
-
-  it('SH-1 (a): the reload’s own commit to the composer (route direct) is no entry: installed there passes', () => {
-    const r = toReloading(new Run());
-    expect(r.state).toMatchObject({ phase: 'reloading', composerEntered: false });
-    r.send(tab('complete', COMPOSER_URL), injectedWith(true, SHIM_INSTALLED), report());
-    expect(r.phase).toBe('injecting');
-    expect(r.state).toMatchObject({ pageOrientation: SHIM_INSTALLED, route: 'direct' });
-    // A portrait reading after a later commit onto the composer is fine as well.
-    const p = new Run({ settings: { assistedInsert: false } });
-    p.send(startEv(), { type: 'windowCreated', windowId: WIN, tabId: TAB }, { type: 'rulesInstalled' });
-    p.send(MEASURED, FITTED, tab('loading', COMPOSER_URL), tab('loading', HOME), tab('loading', COMPOSER_URL));
-    p.send(tab('complete', COMPOSER_URL), injectedWith(true, { type: 'portrait-primary', shim: 'portrait' }), report());
-    expect(p.phase).toBe('awaitingPick');
-    checkRun(p);
-  });
-
-  // SH-2 (2026-10-13): an unreadable reading ({null, failed}: the shim threw, or its result was
-  // malformed) is never a pass: C3b unknown, and on the composer SCREEN_LANDSCAPE.
-  const UNREADABLE: PageOrientation = { type: null, shim: 'failed' };
-
-  it('SH-2: unreadable on home is recorded (C3b unknown); the pick reaching the composer unreadable → SCREEN_LANDSCAPE', () => {
-    const r = toHomeShim(new Run({ settings: { assistedInsert: false } }), UNREADABLE);
-    r.send(report());
-    expect(r.phase).toBe('awaitingPick');
-    r.send(...toComposer(UNREADABLE));
-    expect(r.phase).toBe('closing');
-    expect(r.lastStatus).toMatchObject({
-      error: 'SCREEN_LANDSCAPE',
-      detail: 'screen unknown, portrait shim failed',
-      probe: { orientation: UNREADABLE },
-    });
-    expect(written(r)[0]).toMatchObject({
-      outcome: 'failed:SCREEN_LANDSCAPE',
-      detail: 'screen unknown, portrait shim failed',
-      preflight: { C3b: 'unknown' },
-    });
-    checkRun(r);
-  });
-
-  it('SH-2: unreadable at the first probe on the composer (route direct): row 5b, nothing inserted', () => {
-    const r = toReloading(new Run());
-    r.send(tab('complete', COMPOSER_URL), injectedWith(true, UNREADABLE), report());
-    expect(r.phase).toBe('closing');
-    expect(r.injects).toBe(0);
-    expect(written(r)[0]).toMatchObject({ outcome: 'failed:SCREEN_LANDSCAPE', preflight: { C3b: 'unknown' } });
-    // In probe mode on home it is only recorded: C3b unknown, not a pass.
-    const probe = toHomeShim(new Run(), UNREADABLE, 'probe').send(report());
-    expect(probe.find((e) => e.type === 'writeRecord')).toMatchObject({
-      record: { outcome: 'not-posted', preflight: { C3b: 'unknown' } },
+  it('the error effects are as specified (§5)', () => {
+    expect(ERROR_EFFECT).toMatchObject({
+      INPUT_MISSING: 'offer-manual',
+      ACCEPT_DRIFT: 'offer-manual',
+      INJECTION_IGNORED: 'offer-manual',
+      STORY_ENTRY_MISSING: 'offer-manual',
+      SHARE_MISSING: 'offer-manual',
+      WINDOW_IN_USE: 'offer-manual',
+      OUTCOME_UNKNOWN: 'hold',
+      TEST_LEAK: 'kill',
+      UPLOAD_FAILED: 'close',
+      WINDOW_HIDDEN: 'close',
+      ACCOUNT_UNCONFIRMED: 'close',
+      SCREEN_LANDSCAPE: 'close',
     });
   });
 });
 
 // ---------------------------------------------------------------------------------------
-// "No transition ever emits a retry", generically: seeded random event sequences.
+// Share once (IR11): across a re-injection, a new document and a worker restart
+
+describe('U19 Share once', () => {
+  it('a same-document re-injection during sharing and confirming never sends a second Share', () => {
+    const r = toSharing(new Run());
+    r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injectedWith(false, SHIM_PRESENT));
+    r.send(SHARE_DONE, tab('loading', HOME), tab('complete', HOME), injectedWith(false, SHIM_PRESENT));
+    r.send(timer('dwell'), timer('dwell'), composeFact(), timer('confirmTick'));
+    expect(r.shares).toBe(1);
+    expect(r.phase).toBe('confirmingUpload');
+    checkRun(r);
+  });
+
+  it('a worker restart re-feeding the persisted state never sends a second Share', () => {
+    const r = toSharing(new Run());
+    const persisted = JSON.parse(JSON.stringify(r.state)) as HandoffState;
+    expect(persisted).toMatchObject({ phase: 'sharing', shareSent: true });
+    // A fresh runner over storage.session: every later event, timers included.
+    const again = new Run();
+    again.state = persisted;
+    again.now = r.now;
+    again.send(timer('dwell'), composeFact(), timer('shareAck'));
+    expect(again.shares).toBe(0);
+    expect(again.state).toMatchObject({
+      phase: 'finished',
+      result: { kind: 'unknown', why: 'share-not-acknowledged' },
+    });
+    // …and a stored composeReady whose Share went out (a crash between persisting and the next step).
+    const composed = toComposeReady(new Run());
+    const sent = { ...(composed.state as WindowedSession), shareSent: true } as unknown as HandoffState;
+    const next = handoffReducer(sent, timer('dwell'), composed.ctx());
+    expect(next.effects.some(isShare)).toBe(false);
+  });
+
+  it('a new document after Share ends the run (Couldn’t confirm) and never shares again', () => {
+    const r = toConfirming(new Run());
+    r.send(tab('loading', COMPOSER_URL), tab('complete', COMPOSER_URL), injectedWith(true, SHIM_PRESENT));
+    r.send(composeFact(), timer('dwell'));
+    expect(r.shares).toBe(1);
+    expect(r.state).toMatchObject({ phase: 'finished', result: { kind: 'unknown' } });
+    checkRun(r);
+  });
+
+  it('no Share in a test run, whatever arrives; no Share in a Share test before the rules are verified', () => {
+    const t = toComposeReady(new Run(), 'test');
+    t.send(timer('dwell'), composeFact(), timer('dwell'));
+    expect(t.shares).toBe(0);
+    const s = toAwaitComposer(new Run(), 'shareTest');
+    s.send(...TO_COMPOSER, composeFact(), timer('dwell'), timer('dwell'));
+    expect(s.shares).toBe(0);
+    s.send({ type: 'rulesVerified', ok: true }, timer('dwell'), timer('dwell'));
+    expect(s.shares).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// "No transition ever emits a retry", Share once and the rest, generically: seeded random sequences.
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -2978,7 +2136,6 @@ const pick = <T>(rnd: () => number, xs: readonly T[]): T => xs[Math.floor(rnd() 
 const URLS: readonly (string | undefined)[] = [
   COMPOSER_URL,
   COMPOSER_URL,
-  `${COMPOSER_URL}edit/`,
   HOME,
   HOME,
   LOGIN,
@@ -2987,18 +2144,13 @@ const URLS: readonly (string | undefined)[] = [
   ACCOUNTS_CENTER,
   undefined,
   'about:blank',
-  'http://www.instagram.com/create/story/',
   'https://www.instagram.com/someone/',
   SUSPENDED,
-  CODE_ENTRY,
   CONSENT,
 ];
 const AGENT_EVENTS: readonly AgentEventName[] = [
   'input-appeared',
-  'composer-ready',
-  'composer-left',
-  'inject-ignored',
-  'inject-unconfirmed',
+  'account-appeared',
   'sw-controller-change',
   'sw-intercepted',
 ];
@@ -3013,11 +2165,8 @@ const EFFECT_TYPES: readonly HandoffEffect['type'][] = [
   'sendAgent',
   'serveFile',
   'readSize',
-  'notifyEditor',
   'closeWindow',
-  'removeRules',
-  'writeRecord',
-  'lockMsite',
+  'verifyTestRules',
 ];
 
 function randomProbe(rnd: () => number): ProbeReport {
@@ -3032,18 +2181,52 @@ function randomProbe(rnd: () => number): ProbeReport {
           { w: 1512, h: 902 },
           { w: 800, h: 1200 },
         ]),
-    swControlled: rnd() < 0.5 ? true : pick(rnd, [false, 'unknown'] as const),
     swIntercepted: good() ? false : pick(rnd, [true, 'unknown'] as const),
     storyInput: good() ? 'present' : 'absent',
     acceptOk: good(),
+    account: good()
+      ? { handle: HANDLE, candidates: 1 }
+      : pick(rnd, [
+          { handle: 'other', candidates: 1 },
+          { handle: null, candidates: 0 },
+        ]),
+    visibility: rnd() < 0.95 ? 'visible' : 'hidden',
   });
+}
+
+function randomNet(rnd: () => number): NetEntry[] {
+  const out: NetEntry[] = [];
+  if (rnd() < 0.6) out.push(upload(pick(rnd, [200, 200, 0, 500]), 1500));
+  if (rnd() < 0.5) {
+    out.push(
+      publish(pick(rnd, [200, 200, 400, 500, 0]), 2500, {
+        type: pick(rnd, ['application/json', 'text/html', '']),
+        redirected: rnd() < 0.1,
+      }),
+    );
+  }
+  if (rnd() < 0.3)
+    out.push({
+      host: 'www',
+      path: '/graphql/query',
+      status: 200,
+      type: 'application/json',
+      redirected: false,
+      start: 10,
+      end: 20,
+    });
+  return out;
 }
 
 /** What a cooperative runner and agent would send next. */
 function happy(s: HandoffState, rnd: () => number): HandoffEvent {
   switch (s.phase) {
     case 'idle':
-      return startEv(rnd() < 0.8 ? 'post' : 'probe', SCREEN, rnd() < 0.7);
+      return startEv(pick(rnd, ['post', 'post', 'post', 'test', 'shareTest', 'check'] as const), SCREEN, {
+        queue: rnd() < 0.3,
+      } as Partial<HandoffEvent>);
+    case 'queued':
+      return timer('queue');
     case 'opening':
       return { type: 'windowCreated', windowId: WIN, tabId: TAB };
     case 'scoping':
@@ -3056,73 +2239,81 @@ function happy(s: HandoffState, rnd: () => number): HandoffEvent {
         case 'retry':
           return rnd() < 0.6 ? FITTED : pick(rnd, [NOT_FITTED, fittedEv(false, { w: 600, h: 900 })]);
         case 'retryWait':
-          return { type: 'timer', timer: 'fitRetry' };
+          return RETRY;
       }
       break;
     case 'resizing':
       return pick(rnd, [
         sized(1512, 902),
-        sized(700, 650),
         sized(524, 965),
         { type: 'boundsChanged', windowId: WIN },
-        { type: 'timer', timer: 'resizePoll' },
-        { type: 'timer', timer: 'resizeDeadline' },
+        timer('resizeDeadline'),
       ] as HandoffEvent[]);
     case 'navigating':
       return rnd() < 0.9 ? tab('loading', COMPOSER_URL) : tab(pick(rnd, ['loading', 'complete'] as const), undefined);
     case 'reloading':
-      return tab(s.loadsSinceReload === 0 ? 'loading' : 'complete', rnd() < 0.9 ? COMPOSER_URL : HOME);
+      return tab(s.loadsSinceReload === 0 ? 'loading' : 'complete', rnd() < 0.8 ? HOME : COMPOSER_URL);
     case 'probing':
       switch (s.step) {
         case 'awaitComplete':
-          return tab('complete', COMPOSER_URL);
+          return tab('complete', HOME);
         case 'injectAgent':
-          // AM37: the shim's reading comes with it, mostly portrait (installed), sometimes landscape.
-          return rnd() < 0.4
-            ? { type: 'agentInjected' }
-            : injectedWith(rnd() < 0.5, rnd() < 0.85 ? SHIM_INSTALLED : SHIM_OFF);
+          return injectedWith(rnd() < 0.5, rnd() < 0.9 ? SHIM_INSTALLED : SHIM_OFF);
         case 'awaitReport':
-          // AM28: a same-document load, or home, can come before the report of a new document.
-          return rnd() < 0.85
-            ? { type: 'agentReport', probe: randomProbe(rnd) }
-            : pick(rnd, [tab('loading', `${COMPOSER_URL}?x`), tab(undefined, HOME), tab('loading', HOME)]);
+          return rnd() < 0.9 ? { type: 'agentReport', probe: randomProbe(rnd) } : tab('loading', HOME);
         case 'refitMeasure':
           return MEASURED;
         case 'refitUpdate':
           return rnd() < 0.8 ? FITTED : NOT_FITTED;
         case 'awaitInput':
-          return pick(rnd, [agent('input-appeared'), INPUT_WAITED, agent('sw-controller-change')]);
+          return pick(rnd, [agent('input-appeared'), agent('account-appeared'), INPUT_WAITED]);
       }
       break;
-    // Post-probe phases also see later document loads (AM2), which must re-probe.
-    case 'injecting':
+    case 'awaitingAccount':
       return pick(rnd, [
-        { type: 'agentGetFile' },
-        agent('composer-ready'),
-        agent('inject-ignored'),
-        agent('inject-unconfirmed'),
-        tab('loading', COMPOSER_URL),
+        { type: 'accountChoice', handoffId: s.handoffId, proceed: true },
+        { type: 'accountChoice', handoffId: s.handoffId, proceed: false },
+        timer('accountPrompt'),
       ] as HandoffEvent[]);
-    case 'awaitingPick':
+    case 'openingEntry':
+      if (s.sub === 'dwell') return timer('dwell');
+      return rnd() < 0.85
+        ? entryFact()
+        : entryFact({
+            result: pick(rnd, ['MENU_DRIFT', 'ACTIVATION_ACTIVE', 'HIDDEN', 'SESSION_NOT_STARTED'] as const),
+          });
+    case 'inserting':
+      switch (s.sub) {
+        case 'dwell':
+          return timer('dwell');
+        case 'sent':
+          return { type: 'agentGetFile' };
+        case 'served':
+          return rnd() < 0.9 ? fact({ kind: 'inserted' }) : fact({ kind: 'insert-failed', why: 'accept-drift' });
+        case 'awaitComposer':
+          return rnd() < 0.5
+            ? pick(rnd, TO_COMPOSER)
+            : composeFact(rnd() < 0.85 ? {} : pick(rnd, [{ controls: 0 }, { landscape: true }, { drawn: false }]));
+      }
+      break;
+    case 'composeReady':
+      return s.sub === 'verifyRules' ? { type: 'rulesVerified', ok: rnd() < 0.9 } : timer('dwell');
+    case 'sharing':
+      return rnd() < 0.85
+        ? SHARE_DONE
+        : pick(rnd, [fact({ kind: 'share-refused', why: 'activation' }), timer('shareAck')]);
+    case 'confirmingUpload':
+      return rnd() < 0.7 ? net(randomNet(rnd), Math.floor(rnd() * 130_000)) : timer('confirmTick');
+    case 'manual':
       return pick(rnd, [
-        agent('composer-ready'),
-        agent('composer-ready'),
-        tab('loading', COMPOSER_URL),
-        tab(undefined, HOME),
-        tab(undefined, CONSENT),
-      ]);
-    case 'awaitingShare':
-      return pick(rnd, [
-        tab(undefined, HOME),
-        agent('composer-left'),
-        tab('loading', COMPOSER_URL),
-        tab('loading', HOME),
-        tab(undefined, CONSENT),
+        fact({ kind: 'owner-share', t0Wall: 1 }),
+        composeFact(),
+        timer('manualDeadline'),
+        net(randomNet(rnd), 5000),
       ]);
     case 'finished':
-      return rnd() < 0.7
-        ? { type: 'timer', timer: 'closeDelay' }
-        : { type: 'outcome', handoffId: s.handoffId, posted: rnd() < 0.5 };
+      if (s.hold === 'offerManual' && rnd() < 0.5) return { type: 'manual', handoffId: s.handoffId };
+      return pick(rnd, [timer('closeDelay'), timer('uploadHold'), timer('offerManual'), net(randomNet(rnd), 200_000)]);
     case 'closing':
       return { type: 'windowRemoved', windowId: s.windowId ?? WIN };
   }
@@ -3131,8 +2322,7 @@ function happy(s: HandoffState, rnd: () => number): HandoffEvent {
 
 /** Anything at all, including events for other tabs and windows and stale effect results. */
 function noise(rnd: () => number): HandoffEvent {
-  const kind = Math.floor(rnd() * 16);
-  switch (kind) {
+  switch (Math.floor(rnd() * 18)) {
     case 0:
     case 1:
     case 2:
@@ -3146,94 +2336,362 @@ function noise(rnd: () => number): HandoffEvent {
     case 6:
       return pick(rnd, [
         { type: 'agentInjected' },
-        { type: 'agentInjected', fresh: false, orientation: SHIM_OFF },
+        injectedWith(false, SHIM_OFF),
+        injectedWith(true, SHIM_INSTALLED),
         FITTED,
-        NOT_FITTED,
         { type: 'rulesInstalled' },
         MEASURED,
-        sized(524, 965),
-        { type: 'boundsChanged', windowId: rnd() < 0.5 ? WIN : 99 },
-      ]);
+        { type: 'rulesVerified', ok: true },
+      ] as HandoffEvent[]);
     case 7:
       return { type: 'effectFailed', effect: pick(rnd, EFFECT_TYPES), message: 'boom' };
     case 8:
-      return { type: 'timer', timer: pick(rnd, HANDOFF_TIMERS) };
+      return timer(pick(rnd, HANDOFF_TIMERS));
     case 9:
       return { type: 'cancel' };
     case 10:
-      return {
-        ...startEv(pick(rnd, ['post', 'probe'] as const)),
-        browser: pick(rnd, ['chromium', 'arc', 'unknown']),
-      } as HandoffEvent;
+      return startEv(pick(rnd, ['post', 'test', 'check'] as const));
     case 11:
-      return { type: 'outcome', handoffId: pick(rnd, ['hof_u1', 'hof_u3', 'x']), posted: rnd() < 0.5 };
+      return fact(
+        pick(rnd, [
+          { kind: 'share-done', t0Wall: 1 },
+          { kind: 'inserted' },
+          { kind: 'visibility', hidden: rnd() < 0.5 },
+          { kind: 'owner-share', t0Wall: 1 },
+          { kind: 'ui', progressSeen: true, toast: 'plain', wentHome: true },
+        ] as AgentFact[]),
+      );
     case 12:
-      return { type: 'windowRemoved', windowId: rnd() < 0.5 ? WIN : 99 };
+      return net(randomNet(rnd), Math.floor(rnd() * 200_000));
     case 13:
-      return { type: 'tabRemoved', tabId: rnd() < 0.5 ? TAB : 98 };
+      return pick(rnd, [entryFact(), composeFact(), composeFact({ controls: 2 })]);
     case 14:
+      return { type: 'windowRemoved', windowId: rnd() < 0.5 ? WIN : 99 };
+    case 15:
       return { type: 'startup' };
+    case 16:
+      return { type: 'accountChoice', handoffId: 'hof_u1', proceed: rnd() < 0.5 };
     default:
       return { type: 'windowCreated', windowId: rnd() < 0.5 ? WIN : 8, tabId: rnd() < 0.5 ? TAB : 43 };
   }
 }
 
-describe('U9 hand-off reducer: no transition ever emits a retry (random sequences)', () => {
-  it('holds every invariant over 300 seeded runs of 150 events', () => {
+describe('U19 hand-off reducer: random sequences keep every invariant', () => {
+  it('holds over 300 seeded runs of 160 events', () => {
     const reached = new Set<string>();
     const emitted = new Set<string>();
+    const results = new Set<string>();
     for (let seed = 1; seed <= 300; seed++) {
       const rnd = mulberry32(seed);
-      const guarded = rnd() < 0.5;
       const r = new Run({
-        guarded,
-        settings: { assistedInsert: rnd() < 0.7, chMode: rnd() < 0.5 ? 'full' : 'uaOnly' },
-        rate: rnd() < 0.9 ? { ok: true } : { ok: false, code: 'RATE_LIMITED', rule: 'hour', freeAt: T0 + HOUR },
+        guarded: rnd() < 0.5,
+        settings: {
+          chMode: rnd() < 0.5 ? 'full' : 'uaOnly',
+          accountLock: rnd() < 0.85,
+          expectedAccount: rnd() < 0.8 ? EXPECTED : null,
+        },
+        rate:
+          rnd() < 0.85
+            ? { ok: true }
+            : { ok: false, code: 'RATE_LIMITED', rule: rnd() < 0.5 ? 'spacing' : 'hour', freeAt: T0 + 30_000 },
+        fingerprint: rnd() < 0.5 ? { count: 2, storyIndex: 1, glyph: '0a1b2c3d', savedAt: T0 } : null,
       });
-      const happyBias = 0.55 + rnd() * 0.4;
-      for (let i = 0; i < 150; i++) {
-        r.tick(pick(rnd, [0, 5, 250, 3000, 60_000, 60_000, 16 * 60_000]));
+      const happyBias = 0.6 + rnd() * 0.35;
+      for (let i = 0; i < 160; i++) {
+        r.tick(pick(rnd, [0, 5, 250, 3000, 60_000, 130_000]));
         const ev = rnd() < happyBias ? happy(r.state, rnd) : noise(rnd);
         expect(() => r.send(ev)).not.toThrow();
         reached.add(r.phase);
-        if (r.state.phase === 'probing') reached.add(`probing:${r.state.step}`);
-        if (r.state.phase === 'fitting') reached.add(`fitting:${r.state.fitStep}`);
-        for (const e of r.steps.at(-1)?.effects ?? []) emitted.add(isInject(e) ? 'inject' : e.type);
+        for (const e of r.steps.at(-1)?.effects ?? []) {
+          emitted.add(key(e));
+          if (e.type === 'notifyEditor' && e.status.result) results.add(e.status.result.kind);
+        }
       }
       checkRun(r);
     }
-    // The exploration really reached every phase and every risky effect.
-    const phases: HandoffPhase[] = [
+    for (const p of [
       'idle',
+      'queued',
       'opening',
-      'scoping',
       'fitting',
       'resizing',
       'navigating',
       'reloading',
       'probing',
-      'injecting',
-      'awaitingPick',
-      'awaitingShare',
+      'awaitingAccount',
+      'openingEntry',
+      'inserting',
+      'composeReady',
+      'sharing',
+      'confirmingUpload',
+      'manual',
       'finished',
       'closing',
-    ];
-    for (const p of phases) expect(reached).toContain(p);
-    for (const step of ['probing:awaitInput', 'probing:refitUpdate', 'fitting:retryWait', 'fitting:retry']) {
-      expect(reached).toContain(step);
+    ]) {
+      expect(reached, p).toContain(p);
     }
     for (const e of [
-      'inject',
-      'hardReload',
+      'drive:open-entry',
+      'drive:insert',
+      'drive:share',
       'serveFile',
       'lockMsite',
       'patchRecordOutcome',
-      'updateWindow',
-      'readSize',
-      'rememberWindow',
-      'forgetWindow',
+      'raiseWindow',
+      'verifyTestRules',
     ]) {
-      expect(emitted).toContain(e);
+      expect(emitted, e).toContain(e);
     }
+    for (const k of ['posted', 'notPosted', 'unknown', 'tested', 'checked', 'stopped']) expect(results, k).toContain(k);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Review fixes AP-1, AP-2, AP-4, AP-5, AP-12 (2026-10-13)
+
+/** Instagram's background XHRs (GraphQL, logging): never decide anything. */
+const others = (n: number, from = 0): NetEntry[] =>
+  Array.from({ length: n }, (_, i) => ({
+    host: 'www' as const,
+    path: '/graphql/query',
+    status: 200,
+    type: 'application/json',
+    redirected: false,
+    start: 10 + from + i,
+    end: 20 + from + i,
+  }));
+
+/** A Share test (or any run) at its Share dwell, its write-block rules verified. */
+function toShareTestSharing(r: Run): Run {
+  toAwaitComposer(r, 'shareTest').send(...TO_COMPOSER, composeFact(), { type: 'rulesVerified', ok: true });
+  r.send(timer('dwell'));
+  expect(r.state).toMatchObject({ phase: 'sharing', writeBlocked: true });
+  return r;
+}
+
+describe('AP-1 the net cap never drops the upload and publish entries that decide', () => {
+  it('confirming: 64 other entries first, then upload 200 and publish 200 → Posted', () => {
+    const r = toConfirming(new Run());
+    r.send(net(others(MAX_NET_ENTRIES), 1000));
+    r.tick(3000).send(net([upload(200, 2000), publish(200, 3000)], 3100));
+    expect(r.state).toMatchObject({ phase: 'finished', result: { kind: 'posted' } });
+    expect(r.w.net.length).toBeLessThanOrEqual(MAX_NET_ENTRIES);
+    expect(r.w.net.filter((e) => classifyEntry(e) === 'other').length).toBe(MAX_OTHER_NET_ENTRIES);
+    checkRun(r);
+  });
+
+  it('held (O6, hold upload): the window filled with other entries, a late publish 200 still upgrades', () => {
+    const r = toConfirming(new Run()).tick(120_000);
+    r.send(timer('confirmTick'));
+    expect(r.state).toMatchObject({ phase: 'finished', hold: 'upload', result: { why: 'no-upload-seen' } });
+    r.tick(60_000).send(net(others(MAX_NET_ENTRIES), 180_000), net(others(MAX_NET_ENTRIES, 100), 181_000));
+    r.tick(60_000).send(net([upload(200, 200_000), publish(200, 240_000)], 240_100));
+    expect(r.state).toMatchObject({ phase: 'finished', hold: 'none', result: { kind: 'posted', late: true } });
+    expect(r.effects).toContainEqual(expect.objectContaining({ type: 'patchRecordOutcome', outcome: 'posted' }));
+    checkRun(r);
+  });
+
+  it('the write entries are capped too, generously: O7’s duplicate alarm still fires', () => {
+    const r = toConfirming(new Run());
+    r.send(net(others(MAX_NET_ENTRIES), 1000));
+    r.send(net([upload(200), publish(200, 2500), publish(200, 2700)], 2800));
+    expect(r.state).toMatchObject({ result: { kind: 'posted', alarms: ['DUPLICATE_UPLOAD'] } });
+    checkRun(r);
+    const c = toConfirming(new Run());
+    c.send(
+      net(
+        Array.from({ length: 20 }, () => upload(0)),
+        1600,
+      ),
+    );
+    expect(c.w.net.length).toBe(MAX_WRITE_NET_ENTRIES);
+  });
+
+  it('Finish by hand: other entries are not kept; a missed Share click is still seen by its upload', () => {
+    const r = new Run();
+    toEntrySent(r).send(entryFact({ result: 'NOT_ARMED' }), { type: 'manual', handoffId: 'hof_u1' });
+    expect(r.state).toMatchObject({ phase: 'manual' });
+    // Minutes of Instagram's own XHRs while the owner picks the photo.
+    for (let i = 0; i < 4; i++) r.tick(30_000).send(net(others(MAX_NET_ENTRIES, i * 100), 30_000 * (i + 1)));
+    expect(r.w.net).toEqual([]);
+    expect(r.lastStatus?.canStop).toBe(true);
+    // The owner's Share click was missed; Instagram's upload and publish show it was shared.
+    r.tick(10_000).send(net([upload(200, 130_000), publish(200, 131_000)], 131_100));
+    expect(r.state).toMatchObject({ phase: 'finished', sharedBy: 'owner', result: { kind: 'posted' } });
+    r.tick(MANUAL_DEADLINE_MS).send(timer('manualDeadline'));
+    expect(lastResult(r)).toMatchObject({ kind: 'posted' });
+    expect(r.statuses.some((st) => st.error === 'TIMEOUT')).toBe(false);
+    checkRun(r);
+  });
+
+  it('Finish by hand: the upload alone moves the run to confirming, never TIMEOUT “Nothing was posted”', () => {
+    const r = new Run();
+    toEntrySent(r).send(entryFact({ result: 'NOT_ARMED' }), { type: 'manual', handoffId: 'hof_u1' });
+    r.tick(60_000).send(net(others(MAX_NET_ENTRIES), 60_000));
+    r.tick(1000).send(net([upload(200, 61_000)], 61_100));
+    expect(r.state).toMatchObject({ phase: 'confirmingUpload', sharedBy: 'owner' });
+    r.tick(MANUAL_DEADLINE_MS).send(timer('manualDeadline'));
+    expect(r.statuses.some((st) => st.error === 'TIMEOUT')).toBe(false);
+    checkRun(r);
+  });
+});
+
+describe('AP-2 a late answer obeys writeBlocked', () => {
+  it('Share test: Share unacknowledged (held), then a late publish 200 → TEST_LEAK, kill and lock, never Posted', () => {
+    const r = toShareTestSharing(new Run());
+    r.tick(SHARE_ACK_MS).send(timer('shareAck'));
+    expect(r.state).toMatchObject({ phase: 'finished', hold: 'upload', result: { why: 'share-not-acknowledged' } });
+    r.tick(2000).send(net([upload(200), publish(200)], 2600));
+    expect(r.state).toMatchObject({
+      phase: 'closing',
+      result: { kind: 'unknown', code: 'TEST_LEAK', killed: 'TEST_LEAK', late: true },
+    });
+    expect(r.effects).toContainEqual({ type: 'lockMsite', until: r.now + MSITE_LOCK_MS, reason: 'TEST_LEAK' });
+    expect(r.lastStatus).toMatchObject({ error: 'TEST_LEAK' });
+    expect(r.effects).toContainEqual(
+      expect.objectContaining({ type: 'patchRecordOutcome', outcome: 'killed:TEST_LEAK' }),
+    );
+    expect(r.statuses.some((st) => st.result?.kind === 'posted')).toBe(false);
+    checkRun(r);
+  });
+
+  it('Share test: a late 2xx upload alone is a leak too', () => {
+    const r = toShareTestSharing(new Run());
+    r.tick(SHARE_ACK_MS).send(timer('shareAck'));
+    r.tick(2000).send(net([upload(200)], 2000));
+    expect(r.state).toMatchObject({ phase: 'closing', result: { code: 'TEST_LEAK' } });
+    checkRun(r);
+  });
+
+  it('Share test: a late blocked upload (status 0) passes the Share test, never “Not posted”', () => {
+    const r = toShareTestSharing(new Run());
+    r.tick(SHARE_ACK_MS).send(timer('shareAck'));
+    r.tick(2000).send(net([upload(0, 1500)], 2000));
+    expect(r.state).toMatchObject({ phase: 'finished', hold: 'none', result: { kind: 'shareTested', late: true } });
+    expect(r.effects).toContainEqual(expect.objectContaining({ type: 'patchRecordOutcome', outcome: 'share-tested' }));
+    checkRun(r);
+  });
+
+  it('Share test: a late upload that reached a server (403) leaves Couldn’t confirm as it is', () => {
+    const r = toShareTestSharing(new Run());
+    r.tick(SHARE_ACK_MS).send(timer('shareAck'));
+    const before = r.state;
+    expect(r.tick(2000).send(net([upload(403, 1500)], 2000))).toEqual([]);
+    expect(r.state).toMatchObject({ phase: 'finished', result: (before as { result: unknown }).result });
+    checkRun(r);
+  });
+
+  it('a guarded post (writes blocked by the static ruleset): a late publish 200 is TEST_LEAK, not Posted', () => {
+    const r = new Run({ guarded: true });
+    toSharing(r);
+    expect(r.w.writeBlocked).toBe(true);
+    r.tick(SHARE_ACK_MS).send(timer('shareAck'));
+    r.tick(2000).send(net([upload(200), publish(200)], 2600));
+    expect(r.state).toMatchObject({ phase: 'closing', result: { code: 'TEST_LEAK', killed: 'TEST_LEAK' } });
+    checkRun(r);
+  });
+});
+
+describe('AP-5 Share is sent only to a visible page, and a late refusal lets the window go', () => {
+  it('SHARE_ACK_MS covers both of the agent’s waits (visibility, then activation) plus a margin', () => {
+    expect(SHARE_ACK_MS).toBeGreaterThanOrEqual(2 * SHARE_ACTIVATION_WAIT_MS + 2000);
+  });
+
+  it('hidden at the Share dwell: raised, Share waits; visible again → Share once', () => {
+    const r = toComposeReady(new Run());
+    r.send(fact({ kind: 'visibility', hidden: true }));
+    expect(r.steps.at(-1)?.effects).toEqual([
+      { type: 'raiseWindow', windowId: WIN },
+      { type: 'armTimer', timer: 'hiddenWait', ms: HIDDEN_WAIT_MS },
+    ]);
+    r.tick(3000).send(timer('dwell'));
+    expect(r.state).toMatchObject({ phase: 'composeReady', sub: 'awaitVisible', shareSent: false });
+    expect(r.shares).toBe(0);
+    expect(r.count((e) => e.type === 'raiseWindow')).toBe(1);
+    r.tick(4000).send(fact({ kind: 'visibility', hidden: false }));
+    expect(r.shares).toBe(1);
+    expect(r.state).toMatchObject({ phase: 'sharing', shareSent: true });
+    expect(r.steps.at(-1)?.effects[0]).toEqual({ type: 'clearTimer', timer: 'hiddenWait' });
+    expect(r.steps.at(-1)?.effects).toContainEqual({ type: 'armTimer', timer: 'shareAck', ms: SHARE_ACK_MS });
+    checkRun(r);
+  });
+
+  it('hidden at the Share dwell and never shown again → WINDOW_HIDDEN, Nothing was posted, no Share', () => {
+    const r = toComposeReady(new Run());
+    r.send(fact({ kind: 'visibility', hidden: true }), timer('dwell'));
+    r.tick(HIDDEN_WAIT_MS).send(timer('hiddenWait'));
+    expect(r.phase).toBe('closing');
+    expect(r.lastStatus).toMatchObject({ error: 'WINDOW_HIDDEN' });
+    expect(r.shares).toBe(0);
+    checkRun(r);
+  });
+
+  it('a refusal that arrives after the shareAck hold → the before-Share failure; the hold is let go', () => {
+    const r = toSharing(new Run());
+    r.tick(SHARE_ACK_MS).send(timer('shareAck'));
+    expect(r.state).toMatchObject({ hold: 'upload', result: { why: 'share-not-acknowledged' } });
+    r.tick(1500).send(fact({ kind: 'share-refused', why: 'activation' }));
+    expect(r.state).toMatchObject({
+      phase: 'finished',
+      hold: 'offerManual',
+      shareRefused: 'activation',
+      result: { kind: 'notPosted', code: 'WINDOW_IN_USE' },
+    });
+    expect(r.steps.at(-1)?.effects).toContainEqual({ type: 'clearTimer', timer: 'uploadHold' });
+    expect(r.effects).toContainEqual(
+      expect.objectContaining({ type: 'patchRecordOutcome', outcome: 'failed:WINDOW_IN_USE' }),
+    );
+    // Nothing was pressed and nothing was seen: "Nothing was posted" may be said.
+    expect(r.w.shareRefused).toBe('activation');
+    expect(r.w.net).toEqual([]);
+    checkRun(r);
+  });
+
+  it('a late refusal still hidden → WINDOW_HIDDEN closes the window', () => {
+    const r = toSharing(new Run());
+    r.tick(SHARE_ACK_MS).send(timer('shareAck'), fact({ kind: 'share-refused', why: 'hidden' }));
+    expect(r.phase).toBe('closing');
+    expect(r.lastStatus).toMatchObject({ error: 'WINDOW_HIDDEN' });
+    checkRun(r);
+  });
+
+  it('a late refusal is ignored once a write was seen, or for any other held result', () => {
+    const a = toSharing(new Run());
+    a.tick(SHARE_ACK_MS).send(timer('shareAck'), net([upload(200, 1000)], 1100));
+    expect(a.send(fact({ kind: 'share-refused', why: 'activation' }))).toEqual([]);
+    expect(a.state).toMatchObject({ hold: 'upload', result: { kind: 'unknown' } });
+    const b = toConfirming(new Run()).tick(120_000);
+    b.send(timer('confirmTick'));
+    expect(b.send(fact({ kind: 'share-refused', why: 'activation' }))).toEqual([]);
+    checkRun(a);
+    checkRun(b);
+  });
+});
+
+describe('AP-4 a check reports a mismatch, never “Posts go to this account”', () => {
+  it('the lock on and another account logged in: checked, lockedTo the expected one, nothing learned', () => {
+    const r = toReport(new Run(), 'check');
+    r.send(report({ account: { handle: 'someoneelse', candidates: 1 } }));
+    expect(r.phase).toBe('closing');
+    expect(lastResult(r)).toMatchObject({ kind: 'checked', account: 'someoneelse', lockedTo: HANDLE });
+    expect(r.lastStatus?.account).toMatchObject({ decision: 'mismatch', confirmedBy: null, expected: HANDLE });
+    expect(r.count((e) => e.type === 'setExpectedAccount')).toBe(0);
+    checkRun(r);
+  });
+
+  it('the expected account logged in: checked with a match and no lockedTo', () => {
+    const r = toReport(new Run(), 'check');
+    r.send(report());
+    expect(lastResult(r)).toMatchObject({ kind: 'checked', account: HANDLE });
+    expect(lastResult(r)?.lockedTo).toBeUndefined();
+    expect(r.lastStatus?.account).toMatchObject({ decision: 'ok', confirmedBy: 'match' });
+  });
+});
+
+describe('AP-12 the lock says why', () => {
+  it('a kill switch lock carries its reason', () => {
+    const r = toConfirming(new Run());
+    r.send(tab('loading', CHALLENGE));
+    expect(r.effects).toContainEqual({ type: 'lockMsite', until: T0 + MSITE_LOCK_MS, reason: 'KILLED_CHALLENGE' });
   });
 });

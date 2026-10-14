@@ -5,7 +5,8 @@
  * inner width = round(h × 9/16), or h × the profile's ratio when a composerProfile exists;
  * W4 (2026-10-12): the inner width never exceeds MSITE_MAX_CSS_WIDTH (767 CSS px, × the tab zoom in
  * window pixels), lowering the height to keep the ratio, because msite has no story entry above it;
- * below 640 px of inner height → SCREEN_TOO_SMALL; the window is centred in the available area.
+ * below 640 px of inner height → SCREEN_TOO_SMALL. ux.md §4.6 (2026-10-13): the window is docked at the
+ * right edge of the available area, at its top (`docked`), so the editor's run view stays visible beside it.
  *
  * Measured on the owner's 1512x982@2 screen (docs/contract.md S8): avail 1512x949 at top 33,
  * frame delta 0x32, fitted inner 511x909, reached with one windows.update. Arc (2026-10-12 live run,
@@ -97,13 +98,16 @@ function innerFor(
   return { w: Math.min(Math.round(h * ratio), h - 1), h };
 }
 
-/** Outer box for an inner size, centred in the available area. */
-function centred(screen: ScreenAvail, inner: Size, delta: FrameDelta): WindowBox {
+/**
+ * ux.md §4.6: the outer box for an inner size, docked at the right edge of the available area and at its
+ * top (`availLeft`/`availTop` may be negative on a secondary display). Never left of the area.
+ */
+export function docked(screen: ScreenAvail, inner: Size, delta: FrameDelta): WindowBox {
   const width = inner.w + delta.w;
   const height = inner.h + delta.h;
   return {
-    left: screen.availLeft + Math.round((screen.availWidth - width) / 2),
-    top: screen.availTop + Math.round((screen.availHeight - height) / 2),
+    left: screen.availLeft + Math.max(0, Math.round(screen.availWidth - width)),
+    top: screen.availTop,
     width,
     height,
   };
@@ -121,7 +125,7 @@ export function firstGuess(screen: ScreenAvail, profile?: ComposerProfile | null
   if (best.h < MIN_INNER_H) return { ok: false, code: 'SCREEN_TOO_SMALL', maxInnerH: best.h };
   const guessDelta: FrameDelta = { w: 0, h: FIRST_GUESS_EXTRA_H };
   const inner = innerFor(screen, guessDelta, screen.availHeight - FIRST_GUESS_EXTRA_H - SCREEN_MARGIN, profile);
-  return { ok: true, inner, outer: centred(screen, inner, guessDelta) };
+  return { ok: true, inner, outer: docked(screen, inner, guessDelta) };
 }
 
 /**
@@ -138,7 +142,7 @@ export function windowFit(
 ): WindowFitResult {
   const inner = innerFor(screen, delta, screen.availHeight - delta.h - SCREEN_MARGIN, profile, zoom);
   if (inner.h < MIN_INNER_H) return { ok: false, code: 'SCREEN_TOO_SMALL', maxInnerH: inner.h };
-  return { ok: true, inner, outer: centred(screen, inner, delta) };
+  return { ok: true, inner, outer: docked(screen, inner, delta) };
 }
 
 /** Outer minus inner size, never negative; null when either size is not a finite number. */

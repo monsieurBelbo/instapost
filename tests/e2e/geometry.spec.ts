@@ -1,39 +1,27 @@
 /**
- * E13 (strategy §7.11, §3.9 C8, A6, A18, §11 AM13): for each composer geometry model, the
- * agent's C8 report of the ready composer equals the fake's ground truth
- * (`document.documentElement.dataset.fakeGeometry`): backing size, CSS rect, DPR and inner size.
+ * E13 (strategy §7.11, §3.9 C8, A6, A18, §11 AM13): for each composer geometry model, the agent's C8
+ * report of the drawn composer equals the fake's ground truth: backing size, CSS rect, DPR and inner size.
  * And a popup forced to landscape is refitted once, then probed portrait.
  *
- * - C8 is the report the background asks for when the composer becomes ready (AM13); it lands
- *   in the record as `readyProbe` and `preflight.C8`.
- * - **cssFixed:360x640 runs in a smaller popup.** In the default fitted popup (511x909 on the
- *   owner's screen, S8) a 360x640 CSS canvas covers 49.6% of the viewport, below C6's 50%, so the
- *   composer never counts as ready and no C8 is taken; C6's threshold is the contract's and is
- *   kept. The case sets `composerProfile` to 450x800 (the setting L5/D7 will write; it has no UI
- *   yet, so the test writes it to storage.local), where the box covers 64%.
+ * - C8 is the report the background asks for when the autopilot's compose watch saw the photo drawn
+ *   (composeReady, AM13); it lands in the record as `readyProbe` and `preflight.C8`. A Test run ends at the
+ *   compose fact and takes no C8, so this runs a Post story: Posted on the live artifact, a Share test on
+ *   the mock one (its static ruleset blocks the upload).
+ * - The truth: the fake's `dataset.fakeGeometry` while the composer is up (mock: after the blocked upload,
+ *   until the window closes), or the geometry the fake's Share sent with the upload (live: the composer goes
+ *   home right after a published story).
+ * - **cssFixed:360x640 now runs in the default popup.** AM14 moved it to a 450x800 popup because C6 (the
+ *   canvas covering half the viewport) decided readiness; since AM39 the compose watch reads Instagram's own
+ *   canvas (`canvas._aa3c`, drawn = a backing store) and C6 decides nothing, so the default window is fine
+ *   (this also retires E12 v, an insert that C6 never confirmed).
  */
 import type { Worker } from '@playwright/test';
-import type { HandoffRecord } from '../../src/core/handoff/state.ts';
+import type { HandoffState } from '../../src/core/handoff/state.ts';
 import { type ExtGlobal, expect, test, whenClosed } from './fixtures.ts';
-import {
-  cancelHandoff,
-  loadPhoto,
-  photoFile,
-  postFromDesktop,
-  setSwitches,
-  shownError,
-  waitPhase,
-} from './helpers/editor-flow.ts';
-import { fakeGeometry } from './helpers/fake-page.ts';
+import { checkConnection, lastRecord, loadPhoto, photoFile, postStory, waitResult } from './helpers/editor-flow.ts';
+import { type FakeGeometry, fakeGeometry } from './helpers/fake-page.ts';
 
 const MODELS = ['viewportDpr', 'source', 'fixed:1080x1920', 'cssFixed:360x640'] as const;
-const SMALL_POPUP = { innerW: 450, innerH: 800 };
-
-async function lastRecord(records: () => Promise<HandoffRecord[]>): Promise<HandoffRecord> {
-  const rec = (await records()).at(-1);
-  if (!rec) throw new Error('no hand-off record');
-  return rec;
-}
 
 for (const model of MODELS) {
   test(`E13 geometry ${model}: the agent's C8 report equals the fake's ground truth`, async ({
@@ -42,33 +30,39 @@ for (const model of MODELS) {
     editor,
     composer,
     fake,
+    handoffState,
     handoffRecords,
   }, testInfo) => {
     await fake.setKnobs({ geometry: model });
-    if (model.startsWith('cssFixed:')) {
-      await extension.sw.evaluate(async (profile) => {
-        const { local } = (globalThis as ExtGlobal).chrome.storage;
-        const { settings } = await local.get('settings');
-        await local.set({ settings: { ...(settings ?? {}), composerProfile: { ...profile, capturedAt: Date.now() } } });
-      }, SMALL_POPUP);
-    }
     const page = await editor();
-    await setSwitches(page, { assisted: true });
     await loadPhoto(page, await photoFile(context, testInfo));
-    await postFromDesktop(page);
+    await postStory(page);
     const popup = await composer();
-    await waitPhase(page, 'awaitingShare');
-    // The C8 report of the ready composer reaches the panel.
-    await expect(page.getByTestId('handoff-probe')).toContainText('Canvas');
-    const truth = await fakeGeometry(popup);
-    await cancelHandoff(page);
+    let truth: FakeGeometry;
+    if (extension.mode === 'mock') {
+      // After Share the blocked upload leaves the composer up until the window closes.
+      await expect
+        .poll(async () => ((await handoffState()) as HandoffState | undefined)?.phase, {
+          intervals: [50],
+          timeout: 30_000,
+        })
+        .toBe('confirmingUpload');
+      truth = await fakeGeometry(popup);
+      await waitResult(page, 'shareTested');
+    } else {
+      await waitResult(page, 'posted');
+      const [story] = await fake.stories();
+      if (!story?.meta) throw new Error('no story meta');
+      truth = story.meta.geometry;
+    }
     await whenClosed(popup);
-    await waitPhase(page, 'idle');
 
     const rec = await lastRecord(handoffRecords);
     const c8 = { inner: truth.inner, dpr: truth.dpr, canvas: { w: truth.canvas.w, h: truth.canvas.h, css: truth.css } };
     expect(rec.preflight?.C8).toEqual(c8);
     expect(rec.readyProbe).toMatchObject(c8);
+    // The compose watch read the same backing store.
+    expect(rec.compose?.canvas).toEqual({ w: truth.canvas.w, h: truth.canvas.h });
     testInfo.annotations.push({ type: 'C8', description: JSON.stringify(c8) });
 
     // Each model's own signature, so a wrong knob cannot pass by accident.
@@ -85,7 +79,8 @@ for (const model of MODELS) {
       case 'cssFixed:360x640':
         expect({ w: css.w, h: css.h }).toEqual({ w: 360, h: 640 });
         expect(canvas).toEqual({ w: 360 * dpr, h: 640 * dpr });
-        expect(truth.inner).toEqual({ w: SMALL_POPUP.innerW, h: SMALL_POPUP.innerH });
+        // Less than half of the default window's viewport, and still drawn and shared.
+        expect(css.w * css.h).toBeLessThan(0.5 * truth.inner.w * truth.inner.h);
         break;
     }
   });
@@ -107,7 +102,7 @@ async function forceLandscapeOnFirstLoad(sw: Worker): Promise<void> {
       if (log.forcedWindow !== null || info.status !== 'loading') return;
       if (!tab.url?.startsWith('https://www.instagram.com/')) return;
       log.forcedWindow = tab.windowId;
-      void g.chrome.windows.update(tab.windowId, { width: 960, height: 600 });
+      void g.chrome.windows.update(tab.windowId, { left: 0, top: 0, width: 960, height: 600 });
     });
     g.chrome.windows.onBoundsChanged.addListener((w) => {
       if (w.id === log.forcedWindow) log.bounds.push({ w: w.width ?? 0, h: w.height ?? 0 });
@@ -122,14 +117,13 @@ test('E13 a popup forced to landscape is refitted once, then probed portrait', a
   handoffRecords,
 }, testInfo) => {
   await forceLandscapeOnFirstLoad(extension.sw);
-  const page = await editor('#/settings');
-  await page.getByTestId('setting-probe').click();
+  const page = await editor();
+  await checkConnection(page);
   await whenClosed(await composer());
-  await waitPhase(page, 'idle');
-  expect(await shownError(page)).toBeNull();
+  await waitResult(page, 'checked');
 
   const rec = await lastRecord(handoffRecords);
-  expect(rec.outcome).toBe('not-posted');
+  expect(rec.outcome).toBe('checked');
   expect(rec.probe?.portrait).toBe(true);
   expect(rec.preflight?.C3).toBe('pass');
   const log = (await extension.sw.evaluate(() => (globalThis as { __e2eGeo?: BoundsLog }).__e2eGeo)) as BoundsLog;

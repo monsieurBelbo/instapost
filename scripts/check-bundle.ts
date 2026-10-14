@@ -7,8 +7,10 @@
  * - T2 The static `block_ig_writes` ruleset and the `declarative_net_request` key are present in
  *   mock and absent in live; the JSON equals blockRuleset().
  * - T3 Forbidden patterns (tools/bundle/patterns.ts, self-tested): in every bundle; in
- *   composer-agent.js (no clicks, no synthetic events but input/change, no network, no storage, no
- *   fake hooks); in background.js (no network APIs) and the editor chunks (no network APIs but
+ *   composer-agent.js (ux.md IT1: exactly one `.click()`, inside the audited tap helper, and exactly one
+ *   click listener, with capture; no string-keyed or borrowed click, file chooser, focus or navigation; no
+ *   synthetic events but input/change, no network, no storage, no fake hooks); in background.js (no
+ *   network APIs, no clicks) and the editor chunks (no network APIs but
  *   Vite's modulepreload, no Meta-host URLs); the write-endpoint strings outside background.js and
  *   rules/*.json; and the fake's test ids in extension source. F2 (2026-10-12): no E2E hook (the
  *   window-quirk shim and its `__e2e…` storage flags, the portrait shim's off switch) in any live
@@ -34,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { blockRuleset, STATIC_RULESET_ID, STATIC_RULESET_PATH } from '../src/core/ig-contract/rules.ts';
 import {
   AGENT_ONLY,
+  agentClickProblems,
   BACKGROUND_ONLY,
   backgroundMainWorldProblems,
   E2E_HOOK_MARKERS,
@@ -159,6 +162,7 @@ function expectedManifest(m: Mode): Record<string, unknown> {
     host_permissions: ['https://www.instagram.com/*', 'https://i.instagram.com/*'],
     content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" },
     action: { default_title: name, default_icon: icons },
+    commands: { _execute_action: { suggested_key: { default: 'Alt+Shift+S' } } },
     ...(guarded
       ? {
           declarative_net_request: {
@@ -247,6 +251,7 @@ function t3(m: Mode): void {
     }
     if (f === 'composer-agent.js') {
       for (const label of hits(text, AGENT_ONLY)) problems.push(`${f}: ${label}`);
+      for (const p of agentClickProblems(text)) problems.push(`${f}: ${p}`);
       for (const d of forbiddenDispatches(text)) problems.push(`${f}: dispatchEvent other than input/change: ${d}`);
     }
     if (f === 'background.js') for (const label of hits(text, BACKGROUND_ONLY)) problems.push(`${f}: ${label}`);

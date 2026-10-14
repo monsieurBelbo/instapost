@@ -13,7 +13,7 @@ import type { TabUpdate } from '../platform/tabs.ts';
 
 /** The composer tab of the session, or null (idle, opening, or closing before the window existed). */
 export function composerTabId(state: HandoffState): number | null {
-  if (state.phase === 'idle' || state.phase === 'opening') return null;
+  if (state.phase === 'idle' || state.phase === 'queued' || state.phase === 'opening') return null;
   return state.tabId;
 }
 

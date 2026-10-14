@@ -1,7 +1,7 @@
 /**
- * Editor state (strategy §7.10): one StoryDoc with one photo frame, holding at most one image
- * layer (bottom) and one text layer (top). Signals at module scope, so the state survives the
- * switch between `#/` and `#/settings`. Drafts and undo arrive in P8.
+ * Editor state (strategy §7.10, ux.md §4.3): one StoryDoc with one photo frame, holding at most one image
+ * layer (bottom) and one text layer (top). Signals at module scope. Drafts autosave (drafts.ts); a photo
+ * replaced under existing text keeps the text.
  */
 import { batch, computed, signal } from '@preact/signals';
 import type { Size } from '../core/geometry/fit.ts';
@@ -123,6 +123,37 @@ export function errorNotice(err: unknown): Notice {
   return typeof code === 'string' ? { kind: 'error', text, code } : { kind: 'error', text };
 }
 
+/** New story (§4.7 New story): a fresh doc with an empty text layer; the image is released. */
+export function newStory(): void {
+  const previous = image.value;
+  batch(() => {
+    image.value = null;
+    doc.value = freshDoc();
+  });
+  if (previous) releaseImage(previous);
+  setNotice(null);
+}
+
+/** Continue draft (§4.3): the saved doc with its original, decoded again. */
+export async function restoreDraft(saved: StoryDoc, original: Blob | null): Promise<void> {
+  if (busy.value) return;
+  busy.value = 'import';
+  setNotice(null);
+  try {
+    const loaded = original ? await importImage(original, async () => undefined) : null;
+    const previous = image.value;
+    batch(() => {
+      image.value = loaded;
+      doc.value = { ...saved, updatedAt: Date.now() };
+    });
+    if (previous) releaseImage(previous);
+  } catch (err) {
+    setNotice(errorNotice(err));
+  } finally {
+    busy.value = null;
+  }
+}
+
 // ---- image ------------------------------------------------------------------------------
 
 /** Loads a file as the frame's image (replacing the previous one), cover-fitted and centred. */
@@ -146,8 +177,10 @@ export async function loadImageFile(file: Blob): Promise<void> {
       updateFrame((f) => ({ ...f, layers: [layer, ...f.layers.filter((l) => l.kind !== 'image')] }));
     });
     if (previous) releaseImage(previous);
+    const hasText = (textLayer.value?.text.trim() ?? '') !== '';
     if (!loaded.stored)
       setNotice({ kind: 'info', text: 'The original could not be saved locally; editing still works.' });
+    else if (previous && hasText) setNotice({ kind: 'info', text: 'Photo replaced; your text is kept.' });
   } catch (err) {
     setNotice(errorNotice(err));
   } finally {

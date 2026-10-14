@@ -11,7 +11,22 @@ import { type ComposerRoute, classifyComposerUrl } from './urls.ts';
 export const CONTRACT_VERSION = 1;
 
 /** `C3` is C3a since AM37 (2026-10-12): the viewport at the story session start; `C3b` the screen orientation. */
-export type ContractId = 'C1' | 'C2' | 'C3' | 'C3b' | 'C4' | 'C5' | 'C6' | 'C7' | 'C8' | 'C9';
+export type ContractId =
+  | 'C1'
+  | 'C2'
+  | 'C3'
+  | 'C3b'
+  | 'C4'
+  | 'C5'
+  | 'C6'
+  | 'C7'
+  | 'C8'
+  | 'C9'
+  | 'C10'
+  | 'C11'
+  | 'C12'
+  | 'C13'
+  | 'C14';
 
 export interface ContractItem {
   id: ContractId;
@@ -102,8 +117,51 @@ export const CONTRACT: readonly ContractItem[] = [
   },
   {
     id: 'C9',
-    item: 'Composer left',
-    probe: 'URL leaves /create/story, or the C6 canvas is gone for more than 2 s',
+    item: 'Composer left (diagnostic since AM39: going home after Share is corroboration only)',
+    probe: 'URL leaves /create/story',
+    by: 'background',
+    decides: false,
+    preflight: false,
+  },
+  {
+    id: 'C10',
+    item: 'The + entry and its menu (ux.md §10, unverified L18)',
+    probe:
+      'The story input (C4), its form[role=presentation], the sibling post form and the single svg pressable in the previous sibling box; after its tap a new [role=dialog] with exactly two outermost pressables',
+    by: 'agent',
+    decides: true,
+    preflight: false,
+  },
+  {
+    id: 'C11',
+    item: 'The story session armed by Story (startStoryCreationSession, then input.click())',
+    probe: 'The story input receives a click within 3 s of the Story tap (a capture listener)',
+    by: 'agent',
+    decides: true,
+    preflight: false,
+  },
+  {
+    id: 'C12',
+    item: 'The composer drew the photo and shows one Share control',
+    probe:
+      'canvas._aa3c with width > 0, header._aa3d, no ._aa3b snackbar, one visible footer (not _aa3k) with one button (v1) or [role=button] (v2), quiet for 1.5 s',
+    by: 'agent',
+    decides: true,
+    preflight: false,
+  },
+  {
+    id: 'C13',
+    item: 'The outcome: Instagram’s upload and publish requests after Share (ux.md §6)',
+    probe:
+      'Resource timing entries: i.instagram.com/rupload_igphoto/fb_uploader_<n>, /api/v1/media/configure_to_story/ (status, content type, redirect)',
+    by: 'background',
+    decides: true,
+    preflight: false,
+  },
+  {
+    id: 'C14',
+    item: 'The logged-in account',
+    probe: 'The one navigation link to /<username>/ holding an img or svg (feed links ignored)',
     by: 'agent',
     decides: true,
     preflight: false,
@@ -201,13 +259,26 @@ export function c3bOf(o: PageOrientation | null | undefined): CheckResult {
   return isUnreadableOrientation(o) ? 'unknown' : 'pass';
 }
 
-/** C4 candidate rule: an accept list that names image types only (the post input also accepts video). */
+/** An accept list that names image types only. */
 export function isImageOnlyAccept(accept: string): boolean {
   const list = accept
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s !== '');
   return list.length > 0 && list.every((t) => /^image\//i.test(t));
+}
+
+/**
+ * C4/C10: the post input's accept set, beside the story input (PolarisMobileCreationNavItem passes
+ * `["image/jpeg"]`, logged-out reading 2026-10-13). It names an image type only, so the candidate rule
+ * excludes it by its exact set; otherwise a page without the story input would read as ACCEPT_DRIFT
+ * instead of INPUT_MISSING.
+ */
+export const POST_ACCEPT = ['image/jpeg'] as const;
+
+/** C4 candidate rule: an image-only accept list that is not the post input's (`image/jpeg` alone). */
+export function isStoryCandidateAccept(accept: string): boolean {
+  return isImageOnlyAccept(accept) && !acceptSetEquals(accept, POST_ACCEPT);
 }
 
 /** PerformanceNavigationTiming.type of the probed document; `unknown` when it cannot be read. */
@@ -273,6 +344,18 @@ export interface ProbeReport {
    * dropped (normalizeProbeReport). Absent on records of earlier builds.
    */
   orientation?: PageOrientation;
+  /**
+   * ux.md C14 (IA5): the account Instagram's navigation names (the one link to `/<username>/`), or null
+   * when none or several were found (`candidates` counts the distinct handles seen). Absent on records of
+   * earlier builds.
+   */
+  account?: { handle: string | null; candidates: number };
+  /** ux.md C10 (IA5): the + entry beside the story input was found structurally. */
+  entryFound?: boolean;
+  /** ux.md §10 (IA5): navigator.userActivation as the page has it (the owner clicking in the window). */
+  activation?: { isActive: boolean; hasBeenActive: boolean };
+  /** ux.md §4.6 (IA5): the page's visibilityState (Instagram throttles hidden pages). */
+  visibility?: 'visible' | 'hidden';
 }
 
 export type CheckResult = 'pass' | 'fail' | 'unknown';
@@ -393,6 +476,20 @@ export interface Baseline {
     insets: [number, number];
     saveExposed: boolean | 'unknown';
   };
+  /**
+   * C10 (ux.md §10, unverified until L18): the order of the two items in the + menu (`storyPost`: Story
+   * first). The menu module is not readable logged out; the fake models both orders.
+   */
+  menuOrder?: 'postStory' | 'storyPost' | 'unknown';
+  /** C10 (L18): how many outermost pressables the + menu holds (2 per PolarisMobileCreationNavItem's props). */
+  menuItemCount?: number | 'unknown';
+  /**
+   * C12 (L18): the Share footer this account's composer shows: `v1` (PolarisStoryCreationShareFooter, a
+   * button) or `v2` (ShareFooterV2, a role=button with the avatar: a linked Facebook destination).
+   */
+  shareFooter?: 'v1' | 'v2' | 'unknown';
+  /** C13 (L20): the content type of the publish request's 2xx answer (`application/json` expected). */
+  configureContentType?: string;
   /**
    * Where each non-default fact comes from (a live run, a code reading, research), e.g.
    * `"route": "live run 2026-10-12 …"`. Documentation only; nothing reads it.

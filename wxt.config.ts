@@ -67,6 +67,8 @@ export default defineConfig({
       host_permissions: ['https://www.instagram.com/*', 'https://i.instagram.com/*'],
       content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" },
       action: { default_title: name, default_icon: icons },
+      // ux.md §4.1 (IB4): the toolbar action's shortcut, ⌥⇧S, changeable at chrome://extensions/shortcuts.
+      commands: { _execute_action: { suggested_key: { default: 'Alt+Shift+S' } } },
       icons,
       ...(guarded
         ? {
