@@ -1,6 +1,7 @@
 /**
  * Settings in chrome.storage.local (strategy §3.3, ux.md §4.12, IU8), shared with the background. The
- * editor shows and edits its own keys (`settings`: the account lock, Keep copies, onboarding); the
+ * editor shows and edits its own keys (`settings`: the account lock, Keep copies, onboarding, the language
+ * (AM44), which i18n.ts follows); the
  * background owns the kill-switch lock (`msiteLock`, AM25), the detected account (`expectedAccount`), the
  * setup test's pass (`lastTestPassAt`) and the last result (`lastResult`), which the editor only shows:
  * Resume and Forget this account are requests to the background. Editor writes touch the `settings` object
@@ -13,6 +14,7 @@ import { accountOf, editorSettings, lockReasonsOf } from '../handoff/local-state
 import { local } from '../platform/storage.ts';
 import { GUARDED } from '../shared/env.ts';
 import { isRunResult } from '../shared/protocol.ts';
+import { setLangSetting } from './i18n.ts';
 import { requestResume } from './run-state.ts';
 
 export const settings = signal<Settings>(editorSettings(undefined, GUARDED));
@@ -30,6 +32,12 @@ let storedTestAt: unknown;
 
 const later = (a: number | null, b: number | null): number | null => (a === null ? b : b === null ? a : Math.max(a, b));
 const lockValue = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+
+/** Shows `next` (and follows its language, AM44). */
+function apply(next: Settings): void {
+  settings.value = next;
+  setLangSetting(next.lang);
+}
 
 /** The stored settings over the defaults, with the background-owned keys merged in. */
 function view(): Settings {
@@ -74,7 +82,7 @@ export async function initSettings(): Promise<void> {
     }
     if (changes.lastResult) lastResult.value = lastOf(changes.lastResult.newValue);
     if (changes.msiteLockReasons) msiteLockReasons.value = lockReasonsOf(changes.msiteLockReasons.newValue);
-    if (touched) settings.value = view();
+    if (touched) apply(view());
   });
   const [s, l, a, t, r, why] = await Promise.all([
     local.get('settings'),
@@ -90,12 +98,12 @@ export async function initSettings(): Promise<void> {
   storedTestAt = t;
   lastResult.value = lastOf(r);
   msiteLockReasons.value = lockReasonsOf(why);
-  settings.value = view();
+  apply(view());
   settingsLoaded.value = true;
 }
 
 /** The keys the editor may write. */
-export type EditorPatch = Partial<Pick<Settings, 'accountLock' | 'keepCopies' | 'onboardedAt'>>;
+export type EditorPatch = Partial<Pick<Settings, 'accountLock' | 'keepCopies' | 'onboardedAt' | 'lang'>>;
 
 let writes: Promise<void> = Promise.resolve();
 
@@ -108,7 +116,8 @@ export function updateSettings(patch: EditorPatch): Promise<void> {
   if (patch.accountLock !== undefined) own.accountLock = patch.accountLock;
   if (patch.keepCopies !== undefined) own.keepCopies = patch.keepCopies;
   if (patch.onboardedAt !== undefined) own.onboardedAt = patch.onboardedAt;
-  settings.value = { ...settings.value, ...own };
+  if (patch.lang !== undefined) own.lang = patch.lang;
+  apply({ ...settings.value, ...own });
   const write = writes.then(async () => {
     const stored = (await local.get('settings')) as Stored;
     await local.set('settings', { ...(stored ?? {}), ...own } as unknown as Settings);

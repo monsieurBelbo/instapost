@@ -8,6 +8,7 @@ import { ACCEPT_ATTR } from '../raster/decode.ts';
 import { clock, ERROR_COPY } from './copy.ts';
 import { continueDraft, pickRecent, recentPhotos, savedDraft } from './drafts.ts';
 import { busy, loadImageFile, notice } from './editor-state.ts';
+import { t } from './i18n.ts';
 import { dropping } from './ui-state.ts';
 
 export function ImportSurface() {
@@ -17,12 +18,12 @@ export function ImportSurface() {
   return (
     <div class={`import-surface${dropping.value ? ' is-drop-target' : ''}`} data-testid="import-surface">
       <div class="drop-zone">
-        <p class="drop-title">Drop a photo here</p>
+        <p class="drop-title">{t('import.drop')}</p>
         <p class="hint">
-          or paste it <kbd>⌘V</kbd>
+          {t('import.paste')} <kbd>⌘V</kbd>
         </p>
         <label class="button primary file-button" data-testid="import-choose">
-          Choose photo… <kbd>⌘O</kbd>
+          {t('import.choose')} <kbd>⌘O</kbd>
           <input
             type="file"
             accept={ACCEPT_ATTR}
@@ -39,7 +40,10 @@ export function ImportSurface() {
         <p class="hint">JPEG · PNG · WebP · AVIF</p>
         {decodeFailed && (
           <p class="notice error" data-testid="import-error" data-code="DECODE_FAILED" role="alert">
-            {ERROR_COPY.DECODE_FAILED.title}. {ERROR_COPY.DECODE_FAILED.body({ nothingPosted: true })}
+            {t('notice.errorCopy', {
+              title: ERROR_COPY.DECODE_FAILED.title,
+              body: ERROR_COPY.DECODE_FAILED.body({ nothingPosted: true }),
+            })}
           </p>
         )}
       </div>
@@ -47,7 +51,7 @@ export function ImportSurface() {
         <div class="recent">
           {recentPhotos.value.length > 0 && (
             <>
-              <h2>Recent photos</h2>
+              <h2>{t('import.recent')}</h2>
               <div class="recent-grid">
                 {recentPhotos.value.map((p) => (
                   <button
@@ -66,7 +70,7 @@ export function ImportSurface() {
           )}
           {draft && (
             <button type="button" class="link" data-testid="continue-draft" onClick={() => void continueDraft()}>
-              Continue draft · edited {clock(draft.savedAt)} ▸
+              {t('import.continue', { time: clock(draft.savedAt) })}
             </button>
           )}
         </div>

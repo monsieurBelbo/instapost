@@ -9,8 +9,9 @@
 import { useSignal } from '@preact/signals';
 import { GUARDED } from '../shared/env.ts';
 import { testRun } from './actions.ts';
-import { at, HOW_IT_WORKS } from './copy.ts';
+import { ACTION_LABEL, at, howItWorks } from './copy.ts';
 import { busy } from './editor-state.ts';
+import { t, tParts } from './i18n.ts';
 import { openInstagram, runActive } from './run-state.ts';
 import { lastResult, lastRunNotLoggedIn, settings, updateSettings } from './settings-state.ts';
 
@@ -23,43 +24,37 @@ export function Onboarding() {
   const finish = () => void updateSettings({ onboardedAt: Date.now() });
   return (
     <div class="onboarding card" data-testid="onboarding" data-passed={passed ? 'true' : 'false'}>
-      <h1>Post stories from Arc in one click</h1>
-      <p>
-        When you press <strong>Post story</strong>, instapost opens Instagram’s own mobile site in a narrow window at
-        the right of your screen and does the taps for you: + → Story, your photo, Share.
-      </p>
-      {GUARDED && <p class="chip amber">Test build: posts go to the fake Instagram only.</p>}
+      <h1>{t('onboarding.title')}</h1>
+      <p>{tParts('onboarding.intro', { post: <strong key="post">{t('post.label.post')}</strong> })}</p>
+      {GUARDED && <p class="chip amber">{t('onboarding.guarded')}</p>}
       <ol class="onboarding-steps">
         <li class={notLoggedIn ? 'is-highlighted' : ''}>
-          <strong>Log in to Instagram in a normal tab</strong>
-          <p class="hint">instapost never sees your password and never logs in.</p>
-          {notLoggedIn && (
-            <p class="notice error">Not logged in yet. Log in at instagram.com, then run the test again.</p>
-          )}
+          <strong>{t('onboarding.step1')}</strong>
+          <p class="hint">{t('onboarding.step1Hint')}</p>
+          {notLoggedIn && <p class="notice error">{t('onboarding.notLoggedIn')}</p>}
           <button
             type="button"
             class="button"
             data-testid="onboarding-open-instagram"
             onClick={() => openInstagram('home')}
           >
-            Open instagram.com ↗
+            {ACTION_LABEL.openInstagram}
           </button>
         </li>
         <li>
-          <strong>Run the setup test</strong>
+          <strong>{t('onboarding.step2')}</strong>
           {passed ? (
             <p data-testid="onboarding-ready">
-              Ready. You’re posting as {st.expectedAccount ? at(st.expectedAccount.handle) : 'your account'}.
+              {t('onboarding.ready', {
+                account: st.expectedAccount ? at(st.expectedAccount.handle) : t('onboarding.yourAccount'),
+              })}
             </p>
           ) : (
-            <p class="hint">
-              About 20 seconds. Everything runs up to Instagram’s Share button, which is not pressed. Nothing is posted.
-              It also finds which account you use.
-            </p>
+            <p class="hint">{t('onboarding.step2Hint')}</p>
           )}
           {passed ? (
             <button type="button" class="button primary" data-testid="onboarding-start" onClick={finish}>
-              Start
+              {t('onboarding.start')}
             </button>
           ) : (
             <button
@@ -69,7 +64,7 @@ export function Onboarding() {
               disabled={busy.value !== null || runActive.value}
               onClick={() => void testRun()}
             >
-              Run setup test
+              {t('onboarding.runSetupTest')}
             </button>
           )}
         </li>
@@ -84,16 +79,14 @@ export function Onboarding() {
             how.value = !how.value;
           }}
         >
-          How it works {how.value ? '▾' : '▸'}
+          {t('onboarding.how')} {how.value ? '▾' : '▸'}
         </button>
         <button type="button" class="link" data-testid="onboarding-skip" onClick={finish}>
-          Skip for now
+          {t('onboarding.skip')}
         </button>
       </div>
-      {how.value && <p class="hint how">{HOW_IT_WORKS}</p>}
-      <p class="hint">
-        Tip: pin instapost to the toolbar. Keep the Instagram window in view while it works; you don’t need to click it.
-      </p>
+      {how.value && <p class="hint how">{howItWorks()}</p>}
+      <p class="hint">{t('onboarding.tip')}</p>
     </div>
   );
 }

@@ -984,6 +984,28 @@ describe('U27 fake core: control reports (IF9) and the telemetry log (IF8)', () 
     });
   });
 
+  it('AM45: a report keeps the control’s label and the page’s language on its log line; junk is dropped', () => {
+    const { postJson, api } = setup();
+    expect(
+      postJson('/__fake__/control', {
+        control: 'story',
+        isTrusted: false,
+        doc: 'd1',
+        label: 'Historia',
+        lang: 'es',
+      }).status,
+    ).toBe(200);
+    postJson('/__fake__/control', { control: 'create', isTrusted: false, doc: 'd1', label: '', lang: 'not a tag!' });
+    const taps = api<{ step: string; fields: Record<string, unknown> }[]>('log').filter((l) =>
+      l.step.startsWith('tap:'),
+    );
+    expect(taps.map((l) => l.fields)).toEqual([
+      { isTrusted: false, repeat: false, label: 'Historia', lang: 'es' },
+      { isTrusted: false, repeat: false },
+    ]);
+    expect(parseControlReport({ control: 'share', isTrusted: true, label: 'x'.repeat(200) })?.label).toHaveLength(80);
+  });
+
   it('the log keeps the page’s steps in order, per document; GET /__fake__/api/log?since=', () => {
     const { postJson, api, get } = setup();
     expect(

@@ -10,5 +10,7 @@ playwright-report
 captures/
 .env*.local
 .spikes/
+.arc/
 .vitest-attachments
 __screenshots__/
+.claude/worktrees/

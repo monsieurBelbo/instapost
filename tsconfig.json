@@ -11,5 +11,5 @@
     "jsxImportSource": "preact",
     "types": ["node"]
   },
-  "exclude": ["tools/fake-ig/client", ".output", "node_modules", ".cache", ".profiles", ".fake-ig", ".spikes"]
+  "exclude": ["tools/fake-ig/client", ".output", "node_modules", ".cache", ".profiles", ".fake-ig", ".spikes", ".arc"]
 }

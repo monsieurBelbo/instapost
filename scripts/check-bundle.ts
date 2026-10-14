@@ -3,7 +3,8 @@
  * Run after `pnpm run build:all`: `pnpm run check:bundle` (node scripts/check-bundle.ts).
  * Offline: reads files, runs `tsc -p src/core`, never starts a browser or touches the network.
  *
- * - T1 Manifest snapshot per mode: the built manifest equals the one §5 specifies, exactly.
+ * - T1 Manifest snapshot per mode: the built manifest equals the one §5 specifies, exactly; the
+ *   description's _locales (en, es; AM44) are there with the same keys.
  * - T2 The static `block_ig_writes` ruleset and the `declarative_net_request` key are present in
  *   mock and absent in live; the JSON equals blockRuleset().
  * - T3 Forbidden patterns (tools/bundle/patterns.ts, self-tested): in every bundle; in
@@ -61,6 +62,8 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 type Mode = 'mock' | 'live';
 const MODES: readonly Mode[] = ['mock', 'live'];
 const ARTIFACT: Readonly<Record<Mode, string>> = { mock: '.output/chrome-mv3-mock', live: '.output/chrome-mv3-live' };
+/** AM44: the manifest's locales (the description; the editor's own copy is in src/ui/catalog.*.ts). */
+const LOCALES: readonly string[] = ['en', 'es'];
 const MODE_INFO: Readonly<Record<Mode, { name: string; icon: string; guarded: boolean }>> = {
   mock: { name: 'instapost MOCK', icon: 'mock', guarded: true },
   live: { name: 'instapost', icon: 'live', guarded: false },
@@ -146,7 +149,8 @@ function expectedManifest(m: Mode): Record<string, unknown> {
   return {
     manifest_version: 3,
     name,
-    description: 'Prepare Instagram stories on desktop.',
+    default_locale: 'en',
+    description: '__MSG_extDescription__',
     version: pkg.version,
     icons,
     key: readFileSync(resolve(ROOT, 'keys', `${m}.pub.b64`), 'utf8').trim(),
@@ -195,6 +199,22 @@ function t1(m: Mode): void {
   if (!files.includes('background.js')) problems.push('background.js missing');
   if (!files.includes('composer-agent.js')) problems.push('composer-agent.js missing');
   if (!files.includes('editor.html')) problems.push('editor.html missing');
+  // AM44: the description's messages, en (default_locale) and es, with the same keys and no empty message.
+  const messages = LOCALES.map((l) => `_locales/${l}/messages.json`);
+  for (const f of messages) if (!files.includes(f)) problems.push(`${f} missing`);
+  if (messages.every((f) => files.includes(f))) {
+    const keys = messages.map((f) => {
+      const json = JSON.parse(readFileSync(join(dir, f), 'utf8')) as Record<string, { message?: unknown }>;
+      for (const [k, v] of Object.entries(json)) {
+        if (typeof v.message !== 'string' || v.message.trim() === '') problems.push(`${f}: ${k} has no message`);
+      }
+      return Object.keys(json).sort().join(',');
+    });
+    if (new Set(keys).size !== 1) problems.push(`_locales keys differ: ${keys.join(' | ')}`);
+    if (!keys[0]?.split(',').includes('extDescription')) problems.push('_locales: extDescription missing');
+  }
+  const otherLocales = files.filter((f) => f.startsWith('_locales/') && !messages.includes(f));
+  if (otherLocales.length) problems.push(`unexpected locale files: ${otherLocales.join(', ')}`);
   const foreignIcons = files.filter((f) => f.startsWith('icons/') && !f.startsWith(`icons/${MODE_INFO[m].icon}/`));
   if (foreignIcons.length) problems.push(`other modes' icons shipped: ${foreignIcons.join(', ')}`);
   check('T1', `${m} manifest snapshot (§5)`, problems);

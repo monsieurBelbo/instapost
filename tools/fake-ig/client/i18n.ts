@@ -3,6 +3,15 @@
  * Every visible string of the fake, in `en` and `es` (strategy §6.1 `locale` knob). The agent
  * never matches text (§3.9), so these may change freely; the two toasts mirror research §1 item 2.
  * Also used server-side for the login and challenge placeholders.
+ *
+ * `es` (AM45, live checklist L21): **every Spanish string is (unverified).** No Spanish Instagram page
+ * has been seen: the saved msite bundles are logged-out English, and nothing in this repo may load
+ * real Instagram from a test browser. They are plausible renderings of Instagram's controls, never quoted
+ * from Instagram, and exist so the autopilot is proven against a page whose every visible string and
+ * aria-label differs from English: the + link's aria-label (Instagram's Home string, by a bug of theirs:
+ * `navHome`), the menu items, the Share footer, the toasts with their action, the rotate snackbar and the
+ * upload dialog. E45 checks that a locale=es run sees these strings on the controls it taps and in the
+ * toasts (the control and toast logs); i18n.test.ts in tools/fake-ig checks that es translates every key.
  */
 
 export type Locale = 'en' | 'es';

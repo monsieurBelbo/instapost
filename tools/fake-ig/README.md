@@ -75,7 +75,7 @@ Defaults come from `src/core/ig-contract/baseline.json` (U16: `DEFAULT_KNOBS` mu
 | `challenge` | `none`, `afterReady`, `afterReadySpa`, `afterShare`, `afterShareSpa` | A security challenge mid-run: 0.8 s after the photo was drawn, or after the Share flow settled (home after a published story, or the "Upload failed." toast), by a full navigation to `/challenge/` or (`…Spa`) a `pushState` to it |
 | `desktopComposer` | `302`, `desktopShell` | What a desktop UA gets for `/create/story/`: a 302 to `/`, or the desktop shell at that URL |
 | `reload` | `none`, `afterReady` | The composer document reloads itself 0.5 s after the photo was drawn (a new document, which 302s home) |
-| `locale` | `en`, `es` | Visible strings and `html[lang]` |
+| `locale` | `en`, `es` | Visible strings, aria-labels and `html[lang]` (every `es` string is unverified: no Spanish Instagram page has been seen; strategy AM45, live checklist L21) |
 | `drift` | `none`, `renamed` | Random class names (Instagram's own `_aa3c`, `_aa3d`, `_aa3b`, `_a6hd`, `_aswp` included), root id and UA-script attribute |
 | `marker` | `on`, `off` | `<meta name="instapost-fake-instagram" content="1">` |
 | `slowMs` | `0` | The composer draws the photo this long after it took the file |
@@ -90,8 +90,8 @@ All paths are on `www.instagram.com`. `/__fake__/` traffic is never part of the 
 | Method and path | Result |
 |---|---|
 | `GET /__fake__/health` (any host, `127.0.0.1` included) | `{ok:true, fake:true, certValidTo, sourceHash}`. `sourceHash` is `fakeSourceHash()` (`source-hash.ts`) when the server started; the E2E global setup refuses a fake whose hash differs from the working tree |
-| `POST /__fake__/control` | `{control, isTrusted, repeat?, doc}` from the fake's own controls; logged as `tap:<control>`. A second Share in one composer session is `DOUBLE_SHARE` (whoever clicked); an untrusted Retry is `RETRY_CLICKED`; an untrusted click on anything but +, Story, Share and Post (the autopilot's one trial) is `TAP_OUTSIDE_ALLOWLIST` |
-| `POST /__fake__/log`, `GET /__fake__/api/log[?since=<seq>]` | The page's telemetry steps (`{step, doc, fields}`), oldest first; `doc` is a per-document id |
+| `POST /__fake__/control` | `{control, isTrusted, repeat?, doc, label?, lang?}` from the fake's own controls; logged as `tap:<control>` with `isTrusted`, `repeat` and (AM45) the control's visible label and the page's language (E45 checks that a `locale=es` run tapped the Spanish controls). A second Share in one composer session is `DOUBLE_SHARE` (whoever clicked); an untrusted Retry is `RETRY_CLICKED`; an untrusted click on anything but +, Story, Share and Post (the autopilot's one trial) is `TAP_OUTSIDE_ALLOWLIST` |
+| `POST /__fake__/log`, `GET /__fake__/api/log[?since=<seq>]` | The page's telemetry steps (`{step, doc, fields}`), oldest first; `doc` is a per-document id. Also (AM45) every toast (`toast`: `text`, `action`, `kind`, `lang`) and the rotate snackbar (`snackbar`: `text`, `lang`), diagnostics only |
 | `GET /__fake__/api/stories` | Recorded stories, oldest first. Each image is at `/__fake__/stories/<id>.jpg` |
 | `GET /__fake__/api/uploads` | The uploads the server received, answered or not (the last 50) |
 | `GET /__fake__/api/requests[?since=<seq>]` | Logged requests (the last 1000) |

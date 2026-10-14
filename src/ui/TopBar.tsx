@@ -7,6 +7,7 @@
  */
 import { MODE } from '../shared/env.ts';
 import { at, clock } from './copy.ts';
+import { t } from './i18n.ts';
 import { lastResult, settings } from './settings-state.ts';
 import { openOverlay } from './ui-state.ts';
 
@@ -28,33 +29,29 @@ export function TopBar() {
     <header class="topbar">
       <span class="brand">instapost</span>
       {MODE !== 'live' && <span class={`mode-badge mode-${MODE}`}>{MODE}</span>}
-      <span
-        class="account-chip"
-        data-testid="account-chip"
-        title={handle ? 'Posts go to this account' : 'No account yet'}
-      >
+      <span class="account-chip" data-testid="account-chip" title={handle ? t('top.postsGoHere') : t('top.noAccount')}>
         <span class="monogram" aria-hidden="true">
           {handle ? handle.slice(0, 1).toUpperCase() : '?'}
         </span>
-        {handle ? at(handle) : 'No account yet'}
+        {handle ? at(handle) : t('top.noAccount')}
       </span>
       {last && (
         <span class="last-result" data-testid="last-result" data-kind={last.result.kind}>
-          Last: {ICON[last.result.kind] ?? ''} {clock(last.result.at)}
+          {t('top.last')} {ICON[last.result.kind] ?? ''} {clock(last.result.at)}
         </span>
       )}
-      <nav class="topbar-actions" aria-label="Panels">
+      <nav class="topbar-actions" aria-label={t('top.panels')}>
         <button type="button" class="link" data-testid="history-open" onClick={() => openOverlay('history')}>
-          History <kbd>H</kbd>
+          {t('top.history')} <kbd>H</kbd>
         </button>
         <button type="button" class="link" data-testid="settings-open" onClick={() => openOverlay('settings')}>
-          Settings <kbd>,</kbd>
+          {t('top.settings')} <kbd>,</kbd>
         </button>
         <button
           type="button"
           class="link"
           data-testid="shortcuts-open"
-          aria-label="Keyboard shortcuts"
+          aria-label={t('top.shortcuts')}
           onClick={() => openOverlay('shortcuts')}
         >
           <kbd>?</kbd>

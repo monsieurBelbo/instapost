@@ -1,7 +1,8 @@
 /**
  * Lane picker, minimal (strategy §2.2, §7.10; the full picker is P7). The desktop (msite) lane
  * carries a photo with burned-in content only. Anything Instagram adds in the app forces the
- * phone lane: video, the licensed music sticker, interactive stickers and Close Friends.
+ * phone lane: video, the licensed music sticker, interactive stickers and Close Friends. The words for
+ * each reason are the editor's (src/ui/copy.ts `laneReasonText`, both languages).
  */
 import type { Frame } from '../core/model/story.ts';
 
@@ -13,13 +14,6 @@ export interface LaneDecision {
   /** Why not, in a stable order; empty when `desktop`. */
   reasons: LaneReason[];
 }
-
-export const LANE_REASON_TEXT: Readonly<Record<LaneReason, string>> = {
-  video: 'Video stories can only be posted from the phone.',
-  music: 'The music sticker can only be added in the Instagram app.',
-  stickers: 'Mention, link, poll and location stickers can only be added in the Instagram app.',
-  closeFriends: 'Close Friends stories can only be posted from the phone.',
-};
 
 export function laneFor(frame: Frame): LaneDecision {
   const has = (r: LaneReason): boolean => {

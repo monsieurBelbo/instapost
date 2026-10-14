@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AccountFacts, RunResult, StepTimes } from '../core/handoff/state.ts';
-import { ERROR_COPY, SLOW_20_TEXT, SLOW_60_TEXT, STEP_COPY, UPLOADING_TEXT } from './copy.ts';
+import { ERROR_COPY, STEP_COPY, slow20Text, slow60Text, uploadingText } from './copy.ts';
 import { type StepSource, stepOrder, stepsFrom } from './run-steps.ts';
 
 const T = Date.UTC(2026, 9, 13, 12);
@@ -62,10 +62,10 @@ describe('U20 while running', () => {
 
   it('confirming: Instagram is uploading, with a note after 20 s and another after 60 s', () => {
     const src = { phase: 'confirmingUpload' as const, step: 'confirm' as const, steps: steps(4) };
-    expect(view(src, T + 9600 + 5000)[4]).toMatchObject({ status: 'active', text: UPLOADING_TEXT });
+    expect(view(src, T + 9600 + 5000)[4]).toMatchObject({ status: 'active', text: uploadingText() });
     expect(view(src, T + 9600 + 5000)[4]?.note).toBeUndefined();
-    expect(view(src, T + 9600 + 21_000)[4]?.note).toBe(SLOW_20_TEXT);
-    expect(view(src, T + 9600 + 61_000)[4]?.note).toBe(SLOW_60_TEXT);
+    expect(view(src, T + 9600 + 21_000)[4]?.note).toBe(slow20Text());
+    expect(view(src, T + 9600 + 61_000)[4]?.note).toBe(slow60Text());
   });
 
   it('the Instagram step shows the window it got', () => {

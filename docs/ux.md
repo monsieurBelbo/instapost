@@ -7,7 +7,7 @@
 - **Conventions:**
   - **(unverified)** marks anything not yet seen on real Instagram. Every such item has a live check (§12).
   - Ids are stable. Never renumber or reuse one; strike through a dropped item instead.
-  - Copy in `code font` or quotes is the exact UI text. `{x}` is a placeholder. Times use the browser locale (`14:05`). `@handle` is the detected Instagram username.
+  - Copy in `code font` or quotes is the exact UI text, in English. Since strategy §11 AM44 (2026-10-14) the editor also speaks Spanish: the English text here is `src/ui/catalog.en.ts`, the Spanish one `src/ui/catalog.es.ts` (same keys, same placeholders; Settings → Language: Auto (browser), English, Español). `{x}` is a placeholder. Times use the chosen language through `Intl` (`14:05`). `@handle` is the detected Instagram username.
   - Copy never quotes Instagram's own UI strings beyond the names of its controls (+, Story, Share).
 
 ---
@@ -391,6 +391,10 @@ The text names each reason stored with the lock (`msiteLockReasons`, cleared by 
  COPIES
    [ ] Also keep every posted story in Downloads/instapost
        (Stories that are not posted are always saved there.)
+
+ LANGUAGE (AM44)
+   [ Auto (browser) ▾ ]   Auto (browser) · English · Español
+   Auto follows your browser: Spanish when your browser is in Spanish, English otherwise.
 
  PACE AND SAFETY
    At most 1 post a minute, 6 an hour and 15 a day. Tests and checks count too.

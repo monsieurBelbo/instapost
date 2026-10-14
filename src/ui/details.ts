@@ -5,7 +5,8 @@
  * Image check, Steps, Quality, Requests, Alarms, Code and Run.
  *
  * Never a Meta-host URL and never a write-endpoint string in this module (check-bundle T3): request paths
- * arrive as data from the background, already normalised.
+ * arrive as data from the background, already normalised. Labels and values are in the current language
+ * (AM44); Copy diagnostics stays structural JSON.
  */
 import type { Size } from '../core/geometry/fit.ts';
 import type {
@@ -28,7 +29,8 @@ import {
   type ProbeReport,
 } from '../core/ig-contract/contract.ts';
 import { type ComposerRoute, isComposerPath } from '../core/ig-contract/urls.ts';
-import { at, clock, whyText } from './copy.ts';
+import { at, clock, clockSeconds, whyText } from './copy.ts';
+import { t } from './i18n.ts';
 
 const size = (x: Size): string => `${Math.round(x.w)}×${Math.round(x.h)}`;
 
@@ -37,58 +39,55 @@ const size = (x: Size): string => `${Math.round(x.w)}×${Math.round(x.h)}`;
 function shimWords(shim: OrientationShimState): string {
   switch (shim) {
     case 'installed':
-      return 'portrait shim installed; the screen itself is landscape';
+      return t('details.shim.installed');
     case 'present':
-      return 'portrait shim in place';
+      return t('details.shim.present');
     case 'portrait':
-      return 'the screen is portrait; no shim needed';
+      return t('details.shim.portrait');
     case 'absent':
-      return 'the page reports no screen orientation';
+      return t('details.shim.absent');
     case 'failed':
-      return 'the portrait shim could not be installed';
+      return t('details.shim.failed');
     case 'off':
-      return 'portrait shim switched off by a test flag';
+      return t('details.shim.off');
   }
 }
 
 /** AM37: the Screen row. */
 export function screenText(o: PageOrientation): string {
-  const words = o.afterComposerMount
-    ? 'portrait shim installed only after the composer had read the landscape screen'
-    : shimWords(o.shim);
-  return `${o.type ?? 'unknown'} (${words})`;
+  const words = o.afterComposerMount ? t('details.shim.late') : shimWords(o.shim);
+  return `${o.type ?? t('details.unknown')} (${words})`;
 }
 
 /** U1: the Story input row. */
 export function storyInputText(probe: ProbeReport, c4: CheckResult | undefined, drift: boolean): string {
   const seen = probe.acceptSeen ?? [];
-  const lists = (xs: string[]): string => xs.map((a) => a || '(no accept list)').join('; ');
+  const lists = (xs: string[]): string => xs.map((a) => a || t('details.input.noAccept')).join('; ');
   let text: string;
   if (probe.storyInput === 'absent') {
-    text = seen.length === 0 ? 'none (no file input on the page)' : `none image-only (file inputs: ${lists(seen)})`;
+    text = seen.length === 0 ? t('details.input.none') : t('details.input.noneImageOnly', { lists: lists(seen) });
   } else if (probe.acceptOk) {
-    text = 'present';
+    text = t('details.input.present');
   } else {
     const candidates = seen.filter(isStoryCandidateAccept);
-    text = `present, ${drift ? 'accept list changed' : 'accept list differs'}: ${lists(candidates.length ? candidates : seen)}`;
+    const shown = lists(candidates.length ? candidates : seen);
+    text = drift ? t('details.input.changed', { lists: shown }) : t('details.input.differs', { lists: shown });
   }
-  return c4 === 'unknown' ? `${text} (not checked: stopped before this step)` : text;
+  return c4 === 'unknown' ? t('details.input.notChecked', { text }) : text;
 }
-
-const HOME_NOTE = "(home: Instagram's usual landing; instapost taps + → Story there)";
 
 /** U1/AF-9: the Page row. */
 export function pageText(route: ComposerRoute | undefined, path: string | undefined): string {
   if (path === undefined) {
-    if (route === 'homeOnly') return `/ ${HOME_NOTE}`;
-    if (route === 'direct') return '/create/story/ (the story composer directly)';
-    return 'unknown';
+    if (route === 'homeOnly') return `/ ${t('details.page.home')}`;
+    if (route === 'direct') return `/create/story/ ${t('details.page.direct')}`;
+    return t('details.unknown');
   }
-  if (path === '/') return `/ ${HOME_NOTE}`;
+  if (path === '/') return `/ ${t('details.page.home')}`;
   if (isComposerPath(path)) {
-    if (route === 'direct') return `${path} (the story composer directly)`;
-    if (route === 'homeOnly') return `${path} (the story composer, opened from home)`;
-    return `${path} (the story composer)`;
+    if (route === 'direct') return `${path} ${t('details.page.direct')}`;
+    if (route === 'homeOnly') return `${path} ${t('details.page.fromHome')}`;
+    return `${path} ${t('details.page.composer')}`;
   }
   return path;
 }
@@ -96,27 +95,43 @@ export function pageText(route: ComposerRoute | undefined, path: string | undefi
 /** W5/§4.13: the Window row. */
 export function windowText(w: WindowDiagnostics, raised = false): string {
   const fit = w.updates.find((u) => u.step === 'fit');
-  const asked = fit ? size(fit.target) : `${w.requested.width}×${w.requested.height} outer`;
-  const got = w.finalTab ? size(w.finalTab) : w.createdTab ? size(w.createdTab) : 'unknown';
-  const attempts = `${w.attempts} ${w.attempts === 1 ? 'attempt' : 'attempts'}`;
+  const asked = fit ? size(fit.target) : t('details.window.outer', { w: w.requested.width, h: w.requested.height });
+  const got = w.finalTab ? size(w.finalTab) : w.createdTab ? size(w.createdTab) : t('details.unknown');
+  const attempts =
+    w.attempts === 1 ? t('details.window.attempt', { n: w.attempts }) : t('details.window.attempts', { n: w.attempts });
   const calls = w.updates.filter((u) => u.step !== 'refit').reduce((n, u) => n + (u.applied ?? 1), 0);
-  const reapplied = calls > w.attempts ? `, size re-applied: ${calls} updates` : '';
+  const reapplied = calls > w.attempts ? t('details.window.reapplied', { n: calls }) : '';
   const created =
     w.created && (w.created.width !== w.requested.width || w.created.height !== w.requested.height)
-      ? `; opened at ${w.created.width}×${w.created.height} instead of ${w.requested.width}×${w.requested.height}`
+      ? t('details.window.created', {
+          w: w.created.width,
+          h: w.created.height,
+          rw: w.requested.width,
+          rh: w.requested.height,
+        })
       : '';
-  const manual = w.manualResize ? '; resized by you' : '';
+  const manual = w.manualResize ? t('details.window.manual') : '';
   const r = w.updates.find((u) => u.step === 'refit');
-  const refit = r ? (r.fitted ? '; refitted once' : '; refit not honoured') : '';
-  const docked = w.docked ? ' · docked right' : '';
-  return `asked ${asked}, got ${got} (${attempts}${reapplied}${manual}${refit}${created})${docked} · raised: ${raised ? 'yes' : 'no'}`;
+  const refit = r ? (r.fitted ? t('details.window.refitted') : t('details.window.refitIgnored')) : '';
+  const docked = w.docked ? t('details.window.docked') : '';
+  return t('details.window', {
+    asked,
+    got,
+    attempts,
+    reapplied,
+    manual,
+    refit,
+    created,
+    docked,
+    raised: raised ? t('details.yes') : t('details.no'),
+  });
 }
 
 /** P6: the Browser row. */
 export function browserText(f: BrowserFlavour): string {
   switch (f) {
     case 'arc':
-      return 'Arc (recognised by its page colours)';
+      return t('details.browser.arc');
     case 'chrome':
       return 'Google Chrome';
     case 'edge':
@@ -124,140 +139,161 @@ export function browserText(f: BrowserFlavour): string {
     case 'chromium':
       return 'Chromium';
     case 'unknown':
-      return 'unknown';
+      return t('details.unknown');
   }
 }
 
 /** P1/P3: the Service worker row. */
 export function serviceWorkerText(probe: ProbeReport, intercepted = false): string {
-  if (intercepted || probe.swIntercepted === true) return 'intercepts requests';
+  if (intercepted || probe.swIntercepted === true) return t('details.sw.intercepts');
   const control =
     probe.swControlled === true
-      ? 'controls the page — normal on Instagram'
+      ? t('details.sw.controls')
       : probe.swControlled === false
-        ? 'not in control'
-        : 'unknown';
-  return probe.swIntercepted === 'unknown' ? `${control}; interception unknown` : control;
+        ? t('details.sw.notInControl')
+        : t('details.unknown');
+  return probe.swIntercepted === 'unknown' ? t('details.sw.interceptionUnknown', { control }) : control;
 }
 
 // ---- the autopilot rows (§4.13) ---------------------------------------------------------------
 
 export function resultRowText(r: RunResult): string {
   switch (r.kind) {
-    case 'posted':
-      if (r.markedBy === 'owner') return 'Marked as posted by you (Instagram didn’t confirm it)';
-      return `Posted (Instagram confirmed it)${r.late ? ', late' : ''}${r.killed ? `; then ${r.killed}` : ''}`;
+    case 'posted': {
+      if (r.markedBy === 'owner') return t('details.result.markedPosted');
+      const text = r.late ? t('details.result.postedLate') : t('details.result.posted');
+      return r.killed ? t('details.result.thenKilled', { text, code: r.killed }) : text;
+    }
     case 'notPosted':
-      if (r.markedBy === 'owner') return 'Marked as not posted by you';
-      return `Not posted (${r.code ?? 'UPLOAD_FAILED'})`;
+      if (r.markedBy === 'owner') return t('details.result.markedNotPosted');
+      return t('details.result.notPosted', { code: r.code ?? 'UPLOAD_FAILED' });
     case 'unknown':
       return r.code === 'TEST_LEAK'
-        ? 'Test leak (publishing went through)'
-        : `Couldn’t confirm: ${whyText(r.why, r.detail)}`;
+        ? t('details.result.testLeak')
+        : t('details.result.unknown', { why: whyText(r.why, r.detail) });
     case 'tested':
-      return 'Test passed (Share not pressed)';
+      return t('details.result.tested');
     case 'shareTested':
-      return 'Share test passed (upload blocked)';
+      return t('details.result.shareTested');
     case 'checked':
       return r.lockedTo && r.account
-        ? `Connection checked: logged in as @${r.account}, posts locked to @${r.lockedTo}`
-        : 'Connection checked';
+        ? t('details.result.checkedLocked', { account: at(r.account), locked: at(r.lockedTo) })
+        : t('details.result.checked');
     case 'stopped':
-      return r.stoppedBy === 'window' ? 'Stopped (the Instagram window was closed)' : 'Stopped';
+      return r.stoppedBy === 'window' ? t('details.result.stoppedWindow') : t('details.result.stopped');
   }
 }
 
-const hostName = (h: NetEntry['host']): string => (h === 'www' ? '' : h === 'i' ? 'i.' : 'other ');
+const hostName = (h: NetEntry['host']): string => (h === 'www' ? '' : h === 'i' ? 'i.' : t('details.request.other'));
 
 /** One request after Share: `POST? i./rupload… 200 application/json`, digits already `<n>`. */
 export function requestText(e: NetEntry): string {
   const type = e.type ? ` ${e.type.split(';')[0]}` : '';
-  return `${hostName(e.host)}${e.path} ${e.status}${type}${e.redirected ? ' redirected' : ''} +${(e.end / 1000).toFixed(1)} s`;
+  const redirected = e.redirected ? t('details.request.redirected') : '';
+  return `${hostName(e.host)}${e.path} ${e.status}${type}${redirected} +${(e.end / 1000).toFixed(1)} s`;
 }
 
 /** The Evidence row: the share, the requests that decided, and the corroboration. */
 export function evidenceText(ev: Evidence): string {
   const parts: string[] = [];
-  if (ev.sharedAt !== null)
-    parts.push(`Share ${ev.sharedBy === 'owner' ? 'tapped by you' : 'pressed'} ${clockSeconds(ev.sharedAt)}`);
+  if (ev.sharedAt !== null) {
+    const time = clockSeconds(ev.sharedAt);
+    parts.push(ev.sharedBy === 'owner' ? t('details.ev.shareByYou', { time }) : t('details.ev.share', { time }));
+  }
   const upload = ev.net.find((e) => e.host === 'i' && e.path.startsWith('/rupload'));
   const publish = ev.net.find((e) => e.host === 'www' && e.path.includes('/media/configure'));
-  if (upload) parts.push(`upload ${upload.status}`);
+  if (upload) parts.push(t('details.ev.upload', { status: upload.status }));
   if (publish) {
     parts.push(
-      `publish ${publish.status}${publish.type ? ` ${publish.type.split(';')[0]}` : ''}${publish.redirected ? ', redirected' : ', no redirect'}`,
+      t('details.ev.publish', {
+        status: publish.status,
+        type: publish.type ? ` ${publish.type.split(';')[0]}` : '',
+        redirect: publish.redirected ? t('details.ev.redirected') : t('details.ev.noRedirect'),
+      }),
     );
   }
-  if (!upload && !publish) parts.push('no upload or publish request seen');
+  if (!upload && !publish) parts.push(t('details.ev.none'));
   if (ev.ui.wentHomeAt !== null && ev.sharedAt !== null) {
-    parts.push(`went home +${((ev.ui.wentHomeAt - ev.sharedAt) / 1000).toFixed(1)} s`);
+    parts.push(t('details.ev.wentHome', { s: ((ev.ui.wentHomeAt - ev.sharedAt) / 1000).toFixed(1) }));
   }
-  if (ev.ui.progressSeen) parts.push('progress seen');
-  if (ev.ui.toast !== 'none') parts.push(ev.ui.toast === 'action' ? 'a toast with an action' : 'a toast');
+  if (ev.ui.progressSeen) parts.push(t('details.ev.progress'));
+  if (ev.ui.toast !== 'none')
+    parts.push(ev.ui.toast === 'action' ? t('details.ev.toastAction') : t('details.ev.toast'));
   return parts.join(' · ');
-}
-
-function clockSeconds(t: number): string {
-  return new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 export function accountText(a: AccountFacts): string {
   const detected = a.detected
-    ? `${at(a.detected)} (from Instagram’s navigation)`
-    : `unreadable (${a.candidates} candidates)`;
-  const expected = a.expected ? ` · expected ${at(a.expected)}` : ' · none expected';
+    ? t('details.account.detected', { handle: at(a.detected) })
+    : t('details.account.unreadable', { n: a.candidates });
+  const expected = a.expected
+    ? t('details.account.expected', { handle: at(a.expected) })
+    : t('details.account.noneExpected');
   const by =
     a.confirmedBy === 'owner'
-      ? ' · confirmed by you'
+      ? t('details.account.byYou')
       : a.confirmedBy === 'learned'
-        ? ' · remembered'
+        ? t('details.account.remembered')
         : a.confirmedBy === 'unlocked'
-          ? ' · “Only post as” off'
+          ? t('details.account.unlocked')
           : '';
   return `${detected}${expected}${by}`;
 }
 
 export function entryText(e: EntryFacts): string {
-  const menu = e.menuCount === null ? 'no menu' : `menu ${e.menuCount} items`;
+  const menu =
+    e.menuCount === null
+      ? t('details.entry.noMenu')
+      : e.menuCount === 1
+        ? t('details.entry.menuOne')
+        : t('details.entry.menu', { n: e.menuCount });
   const story =
-    e.storyIndex === null ? '' : `, Story is item ${e.storyIndex + 1}${e.fpUsed ? ' (known)' : ' (found by trial)'}`;
-  const armed = e.armedMs === null ? '' : ` · armed after ${(e.armedMs / 1000).toFixed(1)} s`;
-  return `+ → Story · ${menu}${story}${armed} · ${e.trials} trials · + tapped ${e.plusTaps}× · ${e.result}`;
+    e.storyIndex === null
+      ? ''
+      : e.fpUsed
+        ? t('details.entry.storyKnown', { n: e.storyIndex + 1 })
+        : t('details.entry.storyTrial', { n: e.storyIndex + 1 });
+  const armed = e.armedMs === null ? '' : t('details.entry.armed', { s: (e.armedMs / 1000).toFixed(1) });
+  return t('details.entry', { menu, story, armed, trials: e.trials, plus: e.plusTaps, result: e.result });
 }
 
 export function shareControlText(c: ComposeFacts): string {
-  if (c.landscape) return 'rotate snackbar shown (no Share)';
-  if (c.controls !== 1) return `${c.controls} Share controls`;
-  return `footer ${c.variant ?? '?'}${c.fbAuto ? ' (Facebook badge)' : ''}${c.settled ? '' : ' (not settled)'}`;
+  if (c.landscape) return t('details.share.landscape');
+  if (c.controls !== 1) return t('details.share.controls', { n: c.controls });
+  return t('details.share.footer', {
+    variant: c.variant ?? '?',
+    badge: c.fbAuto ? t('details.share.badge') : '',
+    settled: c.settled ? '' : t('details.share.notSettled'),
+  });
 }
 
 export function imageCheckText(c: ComposeFacts): string | null {
   if (c.imageScore === null) return null;
-  return `photo in composer matches the export (${c.imageScore.toFixed(2)})`;
+  return t('details.imageCheck', { score: c.imageScore.toFixed(2) });
 }
 
 /** §4.13 Steps: `opened 0.0 · Instagram 3.5 · account 3.7 · armed 5.1 · photo in composer 7.4 · Share 9.6 · confirmed 11.4 s`. */
 export function stepsText(s: StepTimes): string {
-  const t = (x: number | undefined): string | null => (x === undefined ? null : ((x - s.opened) / 1000).toFixed(1));
+  const since = (x: number | undefined): string | null => (x === undefined ? null : ((x - s.opened) / 1000).toFixed(1));
   const parts: [string, number | undefined][] = [
-    ['Instagram', s.instagram],
-    ['account', s.account],
-    ['armed', s.armed],
-    ['photo in composer', s.composer],
-    ['Share', s.share],
-    ['confirmed', s.confirmed],
+    [t('details.steps.instagram'), s.instagram],
+    [t('details.steps.account'), s.account],
+    [t('details.steps.armed'), s.armed],
+    [t('details.steps.composer'), s.composer],
+    [t('details.steps.share'), s.share],
+    [t('details.steps.confirmed'), s.confirmed],
   ];
   const shown = parts.flatMap(([label, x]) => {
-    const v = t(x);
+    const v = since(x);
     return v === null ? [] : [`${label} ${v}`];
   });
-  return `${['opened 0.0', ...shown].join(' · ')} s`;
+  return t('details.steps.unit', { steps: [`${t('details.steps.opened')} 0.0`, ...shown].join(' · ') });
 }
 
 /** §4.13 Quality (C8): how large Instagram redrew the photo. */
 export function qualityText(canvas: Size | null): string | null {
   if (!canvas || canvas.h <= 0) return null;
-  return `Instagram redrew the photo at ${canvas.w}×${canvas.h} (${Math.round((canvas.h / 1920) * 100)}% of 1920)`;
+  return t('details.quality', { w: canvas.w, h: canvas.h, pct: Math.round((canvas.h / 1920) * 100) });
 }
 
 export interface DetailRow {
@@ -294,43 +330,62 @@ export function detailRows(d: DetailInput): DetailRow[] {
   const add = (key: string, label: string, value: string | null | undefined) => {
     if (value) rows.push({ key, label, value });
   };
-  if (d.result) add('result', 'Result', resultRowText(d.result));
-  if (d.evidence) add('evidence', 'Evidence', evidenceText(d.evidence));
-  if (d.account && d.account.decision !== null) add('account', 'Account', accountText(d.account));
-  if (d.entry) add('story-entry', 'Story entry', entryText(d.entry));
+  if (d.result) add('result', t('details.row.result'), resultRowText(d.result));
+  if (d.evidence) add('evidence', t('details.row.evidence'), evidenceText(d.evidence));
+  if (d.account && d.account.decision !== null) add('account', t('details.row.account'), accountText(d.account));
+  if (d.entry) add('story-entry', t('details.row.storyEntry'), entryText(d.entry));
   if (d.compose) {
-    add('share-control', 'Share control', shareControlText(d.compose));
-    add('image-check', 'Image check', imageCheckText(d.compose));
+    add('share-control', t('details.row.shareControl'), shareControlText(d.compose));
+    add('image-check', t('details.row.imageCheck'), imageCheckText(d.compose));
   }
-  if (d.steps) add('steps', 'Steps', stepsText(d.steps));
-  if (d.window) add('window', 'Window', windowText(d.window, d.raised === true));
-  if (d.compose) add('quality', 'Quality', qualityText(d.compose.canvas));
-  if (d.decision) add('page', 'Page', pageText(d.decision.route, d.decision.path));
-  if (d.browser) add('browser', 'Browser', browserText(d.browser));
+  if (d.steps) add('steps', t('details.row.steps'), stepsText(d.steps));
+  if (d.window) add('window', t('details.row.window'), windowText(d.window, d.raised === true));
+  if (d.compose) add('quality', t('details.row.quality'), qualityText(d.compose.canvas));
+  if (d.decision) add('page', t('details.row.page'), pageText(d.decision.route, d.decision.path));
+  if (d.browser) add('browser', t('details.row.browser'), browserText(d.browser));
   const p = d.probe ?? d.decision?.probe ?? null;
   if (p) {
-    const yes = (b: boolean | 'unknown') => (b === 'unknown' ? 'unknown' : b ? 'yes' : 'no');
-    add('mobile', 'Mobile page', yes(p.isMobile));
-    add('viewport', 'Viewport', `${p.inner.w}×${p.inner.h} @${p.dpr}x ${p.portrait ? 'portrait' : 'landscape'}`);
-    if (p.orientation) add('screen', 'Screen', screenText(p.orientation));
+    const yes = (b: boolean | 'unknown') =>
+      b === 'unknown' ? t('details.unknown') : b ? t('details.yes') : t('details.no');
+    add('mobile', t('details.row.mobile'), yes(p.isMobile));
+    add(
+      'viewport',
+      t('details.row.viewport'),
+      t('details.viewport', {
+        w: p.inner.w,
+        h: p.inner.h,
+        dpr: p.dpr,
+        orientation: p.portrait ? t('details.portrait') : t('details.landscape'),
+      }),
+    );
+    if (p.orientation) add('screen', t('details.row.screen'), screenText(p.orientation));
   }
   if (d.decision) {
-    add('story-input', 'Story input', storyInputText(d.decision.probe, d.decision.c4, d.code === 'ACCEPT_DRIFT'));
+    add(
+      'story-input',
+      t('details.row.storyInput'),
+      storyInputText(d.decision.probe, d.decision.c4, d.code === 'ACCEPT_DRIFT'),
+    );
   }
-  if (p) add('service-worker', 'Service worker', serviceWorkerText(p, d.code === 'SW_INTERCEPTS'));
+  if (p) add('service-worker', t('details.row.serviceWorker'), serviceWorkerText(p, d.code === 'SW_INTERCEPTS'));
   if (p?.canvas) {
     add(
       'canvas',
-      'Canvas',
-      `${p.canvas.w}×${p.canvas.h} px in ${Math.round(p.canvas.css.w)}×${Math.round(p.canvas.css.h)} CSS px`,
+      t('details.row.canvas'),
+      t('details.canvas', {
+        w: p.canvas.w,
+        h: p.canvas.h,
+        cw: Math.round(p.canvas.css.w),
+        ch: Math.round(p.canvas.css.h),
+      }),
     );
   }
   if (d.evidence && d.evidence.net.length > 0) {
-    add('requests', 'Requests after Share', d.evidence.net.map(requestText).join('; '));
+    add('requests', t('details.row.requests'), d.evidence.net.map(requestText).join('; '));
   }
-  if (d.result && d.result.alarms.length > 0) add('alarms', 'Alarms', d.result.alarms.join(', '));
-  if (d.code) add('code', 'Code', d.code);
-  if (d.handoffId) add('run', 'Run', `${d.handoffId}${d.result?.at ? ` · ${clock(d.result.at)}` : ''}`);
+  if (d.result && d.result.alarms.length > 0) add('alarms', t('details.row.alarms'), d.result.alarms.join(', '));
+  if (d.code) add('code', t('details.row.code'), d.code);
+  if (d.handoffId) add('run', t('details.row.run'), `${d.handoffId}${d.result?.at ? ` · ${clock(d.result.at)}` : ''}`);
   return rows;
 }
 

@@ -1,6 +1,7 @@
 import { render } from 'preact';
 import '../../src/ui/editor.css';
 import { loadImageFile, setNotice } from '../../src/ui/editor-state.ts';
+import { t } from '../../src/ui/i18n.ts';
 import { isTyping } from '../../src/ui/shortcuts.ts';
 import { dropping } from '../../src/ui/ui-state.ts';
 import { App } from './App.tsx';
@@ -28,8 +29,7 @@ window.addEventListener('drop', (e) => {
   const first = files[0] ?? e.dataTransfer?.files[0];
   if (!first) return;
   void loadImageFile(first).then(() => {
-    if ((e.dataTransfer?.files.length ?? 0) > 1)
-      setNotice({ kind: 'info', text: 'One photo per story: used the first one.' });
+    if ((e.dataTransfer?.files.length ?? 0) > 1) setNotice({ kind: 'info', text: t('notice.onePhoto') });
   });
 });
 

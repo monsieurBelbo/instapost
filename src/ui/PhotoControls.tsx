@@ -18,6 +18,7 @@ import {
   showSafeZones,
   startRotateGesture,
 } from './editor-state.ts';
+import { t } from './i18n.ts';
 import { MAX_ZOOM, minZoom } from './interaction.ts';
 import { choosePhotoRequest } from './result-actions.ts';
 
@@ -46,9 +47,9 @@ export function PhotoControls() {
 
   return (
     <section class="rail-section" aria-labelledby="sec-photo">
-      <h2 id="sec-photo">Photo</h2>
+      <h2 id="sec-photo">{t('photo.title')}</h2>
       <label class={`button file-button${working === 'import' ? ' is-busy' : ''}`}>
-        {working === 'import' ? 'Opening…' : il ? 'Replace photo…' : 'Choose photo…'}
+        {working === 'import' ? t('photo.opening') : il ? t('photo.replace') : t('photo.choose')}
         <input
           ref={input}
           type="file"
@@ -60,7 +61,7 @@ export function PhotoControls() {
         />
       </label>
       <label class="field">
-        <span>Zoom</span>
+        <span>{t('photo.zoom')}</span>
         <input
           type="range"
           data-testid="editor-zoom"
@@ -74,7 +75,7 @@ export function PhotoControls() {
         <output>{(il?.xf.scale ?? 1).toFixed(2)}×</output>
       </label>
       <label class="field">
-        <span>Rotate</span>
+        <span>{t('photo.rotate')}</span>
         <input
           type="range"
           data-testid="editor-rotate"
@@ -92,7 +93,7 @@ export function PhotoControls() {
       </label>
       <div class="row">
         <button type="button" class="button ghost" disabled={!il} onClick={refitImage}>
-          Reset <kbd>0</kbd>
+          {t('photo.reset')} <kbd>0</kbd>
         </button>
         <label class="check">
           <input
@@ -103,7 +104,7 @@ export function PhotoControls() {
               showSafeZones.value = (e.currentTarget as HTMLInputElement).checked;
             }}
           />
-          Safe zones
+          {t('photo.safeZones')}
         </label>
       </div>
     </section>

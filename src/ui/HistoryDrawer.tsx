@@ -11,28 +11,21 @@ import { useSignal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
 import { getExport } from '../platform/idb.ts';
 import { downloadBlob, storyFilename } from '../publish/download.ts';
-import { at, clock } from './copy.ts';
+import { ACTION_LABEL, at, clock } from './copy.ts';
 import { Details } from './Details.tsx';
 import { loadImageFile } from './editor-state.ts';
 import { dayLabel, type HistoryRow, historyRows, refreshHistory, thumbs } from './history.ts';
+import { type MsgKey, t, tk } from './i18n.ts';
 import { lane, markOutcome, openInstagram } from './run-state.ts';
 import { now, openOverlay } from './ui-state.ts';
 
-const KIND_TEXT: Record<HistoryRow['kind'], string> = {
-  posted: '✓ Posted',
-  notPosted: '✕ Not posted',
-  unknown: '? Couldn’t confirm',
-  tested: '✓ Test passed',
-  shareTested: '✓ Share test passed',
-  checked: '✓ Connection checked',
-  stopped: '■ Stopped',
-};
+const kindText = (kind: HistoryRow['kind']): string => tk(`history.kind.${kind}` as MsgKey);
 
 function Row({ row }: { row: HistoryRow }) {
   const more = useSignal(false);
-  const t = now.value;
+  const time = now.value;
   const thumb = row.exportId ? thumbs.value[row.exportId] : null;
-  const recentPost = row.kind === 'posted' && t - row.at < 24 * 60 * 60 * 1000;
+  const recentPost = row.kind === 'posted' && time - row.at < 24 * 60 * 60 * 1000;
   const save = async () => {
     if (!row.exportId) return;
     const e = await getExport(row.exportId);
@@ -52,13 +45,15 @@ function Row({ row }: { row: HistoryRow }) {
         {thumb ? <img class="history-img" src={thumb} alt="" /> : <span class="thumb-empty" />}
       </span>
       <span class="history-main">
-        <span class="history-time">{clock(row.at)}</span> {KIND_TEXT[row.kind]}
+        <span class="history-time">{clock(row.at)}</span> {kindText(row.kind)}
         {row.mode !== 'post' && row.mode !== 'check' && row.kind !== 'tested' && row.kind !== 'shareTested'
-          ? ' (test)'
+          ? t('history.test')
           : ''}
         {row.account ? ` · ${at(row.account)}` : ''}
-        {row.durationMs !== null && row.kind === 'posted' ? ` · ${Math.round(row.durationMs / 1000)} s` : ''}
-        {row.marked ? ' · marked by you' : ''}
+        {row.durationMs !== null && row.kind === 'posted'
+          ? t('history.seconds', { s: Math.round(row.durationMs / 1000) })
+          : ''}
+        {row.marked ? t('history.marked') : ''}
       </span>
       <span class="history-actions">
         {recentPost && row.account && (
@@ -68,7 +63,7 @@ function Row({ row }: { row: HistoryRow }) {
             data-testid="history-view-story"
             onClick={() => openInstagram('story', row.account)}
           >
-            View story ↗
+            {t('history.viewStory')}
           </button>
         )}
         {row.kind === 'unknown' && (
@@ -78,7 +73,7 @@ function Row({ row }: { row: HistoryRow }) {
             data-testid="history-check"
             onClick={() => openInstagram(row.account ? 'story' : 'home', row.account)}
           >
-            Check ↗
+            {t('history.check')}
           </button>
         )}
         <button
@@ -98,10 +93,10 @@ function Row({ row }: { row: HistoryRow }) {
           {row.exportId && (
             <>
               <button type="button" class="link" onClick={() => void open()}>
-                Open in editor
+                {t('history.open')}
               </button>
               <button type="button" class="link" onClick={() => void save()}>
-                Save copy
+                {ACTION_LABEL.saveCopy}
               </button>
             </>
           )}
@@ -116,7 +111,7 @@ function Row({ row }: { row: HistoryRow }) {
                   setTimeout(() => void refreshHistory(), 300);
                 }}
               >
-                It posted
+                {ACTION_LABEL.markPosted}
               </button>
               <button
                 type="button"
@@ -127,7 +122,7 @@ function Row({ row }: { row: HistoryRow }) {
                   setTimeout(() => void refreshHistory(), 300);
                 }}
               >
-                It didn’t post
+                {ACTION_LABEL.markNotPosted}
               </button>
             </>
           )}
@@ -151,36 +146,42 @@ export function HistoryDrawer() {
   }, []);
   const rows = historyRows.value;
   const l = lane.value;
-  const t = now.value;
+  const time = now.value;
   const groups: { label: string; rows: HistoryRow[] }[] = [];
   for (const r of rows) {
-    const label = dayLabel(r.at, t);
+    const label = dayLabel(r.at, time);
     const g = groups.at(-1);
     if (g && g.label === label) g.rows.push(r);
     else groups.push({ label, rows: [r] });
   }
   return (
     <div class="overlay">
-      <button type="button" class="sheet-backdrop" aria-label="Close" tabIndex={-1} onClick={() => openOverlay(null)} />
+      <button
+        type="button"
+        class="sheet-backdrop"
+        aria-label={t('common.close')}
+        tabIndex={-1}
+        onClick={() => openOverlay(null)}
+      />
       <aside class="drawer" data-testid="history-drawer" aria-labelledby="history-title" role="dialog">
         <header class="sheet-head">
-          <h1 id="history-title">History</h1>
+          <h1 id="history-title">{t('history.title')}</h1>
           {l && (
             <span class="hint" data-testid="history-pace">
-              Posts today {l.today} / {l.caps.day} · this hour {l.hour} / {l.caps.hour}
+              {t('history.pace', { today: l.today, day: l.caps.day, hour: l.hour, hourCap: l.caps.hour })}
             </span>
           )}
           <button
             type="button"
             class="link"
             data-testid="history-close"
-            aria-label="Close"
+            aria-label={t('common.close')}
             onClick={() => openOverlay(null)}
           >
             ✕
           </button>
         </header>
-        {rows.length === 0 && <p class="hint">No runs yet.</p>}
+        {rows.length === 0 && <p class="hint">{t('history.empty')}</p>}
         {groups.map((g) => (
           <section key={g.label}>
             <h2>{g.label}</h2>

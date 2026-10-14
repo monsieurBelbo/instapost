@@ -224,15 +224,34 @@ export function parseComposerView(v: unknown): FakeComposerView | null {
 const isControl = (x: unknown): x is FakeControl => (FAKE_CONTROLS as readonly unknown[]).includes(x);
 const DOC_RE = /^[0-9a-z]{1,32}$/;
 
-/** IF9: a control report from the fake's page; null unless well formed. A missing isTrusted counts as untrusted. */
-export function parseControlReport(
-  v: unknown,
-): { control: FakeControl; isTrusted: boolean; repeat: boolean; doc: string } | null {
+const LANG_RE = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/;
+
+/**
+ * IF9: a control report from the fake's page; null unless well formed. A missing isTrusted counts as untrusted.
+ * AM45: the control's visible label (≤ 80 characters) and the page's language, when the page sent them.
+ */
+export function parseControlReport(v: unknown): {
+  control: FakeControl;
+  isTrusted: boolean;
+  repeat: boolean;
+  doc: string;
+  label?: string;
+  lang?: string;
+} | null {
   if (typeof v !== 'object' || v === null) return null;
   const o = v as Record<string, unknown>;
   if (!isControl(o.control)) return null;
   const doc = typeof o.doc === 'string' && DOC_RE.test(o.doc) ? o.doc : '-';
-  return { control: o.control, isTrusted: o.isTrusted === true, repeat: o.repeat === true, doc };
+  const label = typeof o.label === 'string' && o.label !== '' ? o.label.slice(0, 80) : undefined;
+  const lang = typeof o.lang === 'string' && LANG_RE.test(o.lang) ? o.lang : undefined;
+  return {
+    control: o.control,
+    isTrusted: o.isTrusted === true,
+    repeat: o.repeat === true,
+    doc,
+    ...(label !== undefined ? { label } : {}),
+    ...(lang !== undefined ? { lang } : {}),
+  };
 }
 
 const STEP_RE = /^[a-z][a-z0-9_:]{0,63}$/;
@@ -574,7 +593,16 @@ export function createCore(opts: CoreOptions): FakeCore {
       const report = parseControlReport(body);
       if (!report) return json(400, { error: 'invalid control report' });
       const { control, isTrusted, repeat } = report;
-      store.addLog({ step: `tap:${control}`, doc: report.doc, fields: { isTrusted, repeat: repeat === true } });
+      store.addLog({
+        step: `tap:${control}`,
+        doc: report.doc,
+        fields: {
+          isTrusted,
+          repeat: repeat === true,
+          ...(report.label !== undefined ? { label: report.label } : {}),
+          ...(report.lang !== undefined ? { lang: report.lang } : {}),
+        },
+      });
       const violate = (kind: ViolationRecord['kind'], detail: string) => {
         const violation = store.addViolation({ kind, storyId: null, detail });
         emit({ kind: 'violation', violation });

@@ -412,7 +412,7 @@ export function StoryComposer(props: StoryComposerProps) {
           action: {
             label: t.retry,
             onAction: (e) => {
-              reportControl('retry', e.nativeEvent.isTrusted);
+              reportControl('retry', e.nativeEvent.isTrusted, false, e.currentTarget);
               void upload(e.nativeEvent.isTrusted);
             },
           },
@@ -426,7 +426,7 @@ export function StoryComposer(props: StoryComposerProps) {
     const isTrusted = e.nativeEvent.isTrusted;
     if (phase.kind !== 'ready') return;
     // No in-flight guard, as on Instagram: a second click is a second upload (DOUBLE_SHARE).
-    reportControl('share', isTrusted, shares.current > 0);
+    reportControl('share', isTrusted, shares.current > 0, e.currentTarget);
     shares.current += 1;
     void upload(isTrusted);
   };
@@ -443,7 +443,7 @@ export function StoryComposer(props: StoryComposerProps) {
   };
 
   const tap = (control: FakeControl, then?: () => void) => (e: MouseEvent) => {
-    reportControl(control, e.nativeEvent.isTrusted);
+    reportControl(control, e.nativeEvent.isTrusted, false, e.currentTarget);
     then?.();
   };
 

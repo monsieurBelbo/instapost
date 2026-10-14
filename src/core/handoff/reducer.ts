@@ -1974,7 +1974,8 @@ function entryCode(r: EntryFact['result']): ErrorCode {
   }
 }
 
-function entryDetail(f: EntryFact): string {
+/** The detail an entry failure carries (exported for U30: copy must word every one of them). */
+export function entryDetail(f: Pick<EntryFact, 'result' | 'menuCount'>): string {
   switch (f.result) {
     case 'ENTRY_MISSING':
       return 'no + entry beside the story input';

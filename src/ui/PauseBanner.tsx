@@ -7,8 +7,9 @@
  */
 import { useSignal } from '@preact/signals';
 import { sendToPhone } from './actions.ts';
-import { dateTime, pauseReasonText } from './copy.ts';
+import { ACTION_LABEL, clock, dateTime, pauseReasonText, shortDate } from './copy.ts';
 import { image } from './editor-state.ts';
+import { t } from './i18n.ts';
 import { resumeOpen } from './result-actions.ts';
 import { isMsiteLocked, msiteLockReasons, resumeMsite, settings } from './settings-state.ts';
 import { now } from './ui-state.ts';
@@ -21,15 +22,17 @@ export function PauseBanner() {
   const since = until - 7 * 24 * 60 * 60 * 1000;
   return (
     <div class="pause-banner" data-testid="pause-banner" role="status">
-      <p class="pause-title">⏸ Desktop posting is paused until {dateTime(until)}</p>
+      <p class="pause-title">{t('pause.title', { until: dateTime(until) })}</p>
       <p class="pause-text">
-        On {new Date(since).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} at{' '}
-        {new Date(since).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}:{' '}
-        {pauseReasonText(msiteLockReasons.value)}
+        {t('pause.since', {
+          date: shortDate(since),
+          time: clock(since),
+          reason: pauseReasonText(msiteLockReasons.value),
+        })}
       </p>
       <p class="row-actions">
         <button type="button" class="button" disabled={image.value === null} onClick={() => void sendToPhone()}>
-          Send to phone…
+          {ACTION_LABEL.sendToPhone}
         </button>
         <button
           type="button"
@@ -40,15 +43,12 @@ export function PauseBanner() {
             resumeOpen.value = !resumeOpen.value;
           }}
         >
-          Resume…
+          {ACTION_LABEL.resume}
         </button>
       </p>
       {resumeOpen.value && (
         <div class="resume">
-          <p class="pause-text">
-            Resume desktop posting? Only resume once you’ve opened Instagram on your phone and the account works
-            normally there.
-          </p>
+          <p class="pause-text">{t('pause.confirm')}</p>
           <label class="check">
             <input
               type="checkbox"
@@ -58,7 +58,7 @@ export function PauseBanner() {
                 checked.value = (e.currentTarget as HTMLInputElement).checked;
               }}
             />
-            The account works normally on my phone
+            {t('pause.check')}
           </label>
           <button
             type="button"
@@ -72,7 +72,7 @@ export function PauseBanner() {
               }
             }}
           >
-            Resume
+            {t('pause.resume')}
           </button>
         </div>
       )}

@@ -14,7 +14,8 @@
  * - **Seeded by default** (ux.md §4.2, OD10, OD11): before the test body, storage.local says the setup
  *   test passed, the expected account is the fake's (`fake_owner`), the onboarding card was dismissed and,
  *   in guarded builds, the human-pace dwell is off (`__e2eDwellScale: 0`; live builds compile the hook
- *   out and keep their real dwell). A test that needs a fresh install uses `test.use({ seeded: false })`
+ *   out and keep their real dwell), and the editor's language is English (AM44: the copy checks do not
+ *   depend on the machine's language). A test that needs a fresh install uses `test.use({ seeded: false })`
  *   or calls `seed()` itself.
  * - **`clearRateLog()`** empties the rate guard's open log in storage.local. Only the specs that
  *   need a second composer open within 60 s in one test call it (E9, E12 d/l/m, E15); E14 proves
@@ -87,6 +88,11 @@ export interface SeedOptions {
   fingerprint?: MenuFingerprint | null;
   /** `settings.accountLock` (OD11); undefined leaves it alone. */
   accountLock?: boolean;
+  /**
+   * AM44: `settings.lang`, the editor's language. Default `en`, so the suite's copy checks hold whatever the
+   * machine's language (Auto would follow the browser's UI language); `auto` tests Auto itself (E44 a).
+   */
+  lang?: 'auto' | 'en' | 'es';
 }
 
 export const IG_ORIGIN = 'https://www.instagram.com';
@@ -567,6 +573,7 @@ export const test = base.extend<
               ...settings,
               onboardedAt: o.onboarded === false ? null : now,
               ...(o.accountLock === undefined ? {} : { accountLock: o.accountLock }),
+              lang: o.lang ?? 'en',
             },
           });
         },

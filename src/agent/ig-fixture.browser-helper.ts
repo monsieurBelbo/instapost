@@ -81,6 +81,32 @@ export const GLYPHS = {
 
 export type MenuItem = 'story' | 'post' | 'extra';
 
+/**
+ * AM45 (L21): the visible words and ARIA labels of the fixture, as Instagram's English or Spanish UI would
+ * show them (es: unverified renderings, see tools/fake-ig/client/i18n.ts). Unset: the fixture's neutral
+ * labels (the item keys), as before. The locators never read any of them (U31).
+ */
+export type FixtureLabels = 'en' | 'es';
+
+const WORDS: Readonly<
+  Record<FixtureLabels, { items: Record<MenuItem, string>; home: string; share: string; close: string; rotate: string }>
+> = {
+  en: {
+    items: { story: 'Story', post: 'Post', extra: 'Reel' },
+    home: 'Home',
+    share: 'Your story',
+    close: 'Close',
+    rotate: 'Rotate your device to add to your story.',
+  },
+  es: {
+    items: { story: 'Historia', post: 'Publicación', extra: 'Reel' },
+    home: 'Inicio',
+    share: 'Tu historia',
+    close: 'Cerrar',
+    rotate: 'Gira tu dispositivo para añadir contenido a tu historia.',
+  },
+};
+
 export interface HomeOpts {
   /** The menu's items in order (Instagram's order is not known logged out, L18). */
   menu?: MenuItem[];
@@ -98,6 +124,8 @@ export interface HomeOpts {
   composer?: ComposerOpts;
   /** The composer's SPA navigation happens this long after the file (ms). */
   openAfterMs?: number;
+  /** AM45: Instagram's UI language (words and ARIA labels); also passed to the composer. */
+  labels?: FixtureLabels;
 }
 
 export interface ComposerOpts {
@@ -109,6 +137,8 @@ export interface ComposerOpts {
   landscape?: boolean;
   /** v1 → v2 switch delay. */
   switchAfterMs?: number;
+  /** AM45: Instagram's UI language (words and ARIA labels). */
+  labels?: FixtureLabels;
 }
 
 export interface Mounted {
@@ -192,8 +222,11 @@ export function mountHome(opts: HomeOpts = {}): Mounted {
   // The entry: a 48 px box holding the + and, in the next box, the story form and the post form (C10).
   const entry = box('div', 'display:flex;height:48px;align-items:center');
   const plusBox = box('div');
+  const words = opts.labels ? WORDS[opts.labels] : null;
   if (opts.plus !== 'none') {
     const plus = pressable('link', GLYPHS.plus, '');
+    // Instagram's + carries its Home string as aria-label (a bug of theirs); never read (C10).
+    if (words) plus.querySelector('svg')?.setAttribute('aria-label', words.home);
     plusBox.append(plus);
     m.plus = plus;
     if (opts.plus === 'two') plusBox.append(pressable('link', GLYPHS.extra, ''));
@@ -234,14 +267,14 @@ export function mountHome(opts: HomeOpts = {}): Mounted {
     dialog = box('div', 'position:fixed;left:8px;top:60px;display:flex;flex-direction:column;background:#eee');
     dialog.setAttribute('role', 'dialog');
     for (const item of menu) {
-      const el = pressable('button', GLYPHS[item], item);
+      const el = pressable('button', GLYPHS[item], words ? words.items[item] : item);
       el.addEventListener('click', (ev) => {
         m.clicks.push([`item:${item}`, ev.isTrusted]);
         if (item === 'story') {
           if (opts.refuseStory) {
             const toast = box('div');
             toast.setAttribute('role', 'alert');
-            toast.textContent = 'rotate';
+            toast.textContent = words ? words.rotate : 'rotate';
             root.append(toast);
           } else {
             m.storyInput.click();
@@ -264,7 +297,10 @@ export function mountHome(opts: HomeOpts = {}): Mounted {
     setTimeout(() => {
       location.pathname = '/create/story/';
       entry.style.display = 'none';
-      m.composer = mountComposer(root, location, opts.composer);
+      m.composer = mountComposer(root, location, {
+        ...(opts.labels ? { labels: opts.labels } : {}),
+        ...opts.composer,
+      });
     }, opts.openAfterMs ?? 20);
   });
 
@@ -282,15 +318,18 @@ export function mountComposer(parent: HTMLElement, location: FakeLocation, opts:
   canvas.height = 0;
   canvas.setAttribute('style', 'flex:1;width:100%;min-height:200px');
 
+  const words = opts.labels ? WORDS[opts.labels] : null;
   if (opts.landscape) {
     const snack = box('div', 'position:absolute;bottom:0;left:0;right:0;height:40px;background:#333');
     snack.className = '_aa3b';
+    if (words) snack.textContent = words.rotate;
     root.append(canvas, snack);
   } else {
     const header = box('header', 'height:44px');
     header.className = '_aa3d';
     const close = document.createElement('button');
     close.textContent = '×';
+    if (words) close.setAttribute('aria-label', words.close);
     header.append(close);
     const trash = box('footer', 'height:10px');
     trash.className = '_aa3k';
@@ -311,7 +350,7 @@ export function mountComposer(parent: HTMLElement, location: FakeLocation, opts:
       } else {
         control.setAttribute('style', 'width:120px;height:44px');
       }
-      control.append(document.createTextNode('Share'));
+      control.append(document.createTextNode(words ? words.share : 'Share'));
       control.addEventListener('click', (e) => {
         parts.shareClicks.push(e.isTrusted);
         // Instagram's upload progress, then home.

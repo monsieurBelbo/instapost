@@ -1,6 +1,6 @@
 /**
  * U28 (ux.md §4.12, IU8): the settings store. Defaults per build, serialised editor writes of the editor's
- * own keys only (the account lock, Keep copies, onboarding), and the background-owned keys (the kill-switch
+ * own keys only (the account lock, Keep copies, onboarding, the language), and the background-owned keys (the kill-switch
  * lock, AM25; the detected account; the setup test's pass; the last result), which the editor shows and
  * never writes: no editor write can erase them whatever the interleaving, and Resume is a request to the
  * background, sent only with its confirmation checked.
@@ -8,8 +8,9 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { defaultSettings, type Settings } from '../core/handoff/state.ts';
-import { localState } from '../handoff/local-state.ts';
+import { editorSettings, localState } from '../handoff/local-state.ts';
 import { local } from '../platform/storage.ts';
+import { lang, langSetting } from './i18n.ts';
 import {
   type EditorPatch,
   initSettings,
@@ -179,5 +180,26 @@ describe('U28 settings store', () => {
     expect(lastRunNotLoggedIn(last('notPosted', 'TIMEOUT', 1000), null)).toBe(false);
     expect(lastRunNotLoggedIn(last('tested', undefined, 1000), null)).toBe(false);
     expect(lastRunNotLoggedIn(null, null)).toBe(false);
+  });
+});
+
+describe('AM44 the language setting', () => {
+  test('editorSettings keeps auto, en and es; anything else is Auto', () => {
+    for (const l of ['auto', 'en', 'es'] as const) expect(editorSettings({ lang: l }, true).lang).toBe(l);
+    expect(editorSettings({ lang: 'fr' }, true).lang).toBe('auto');
+    expect(editorSettings({ lang: 3 }, false).lang).toBe('auto');
+    expect(editorSettings(undefined, false).lang).toBe('auto');
+  });
+
+  test('a choice is stored as the editor’s own key and the copy follows it at once', async () => {
+    const write = updateSettings({ lang: 'es' });
+    expect(settings.value.lang).toBe('es');
+    expect(langSetting.value).toBe('es');
+    expect(lang.value).toBe('es');
+    await write;
+    expect(await stored()).toMatchObject({ lang: 'es' });
+    await updateSettings({ lang: 'auto' });
+    expect(langSetting.value).toBe('auto');
+    expect(await stored()).toMatchObject({ lang: 'auto' });
   });
 });

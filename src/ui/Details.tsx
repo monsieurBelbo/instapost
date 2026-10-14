@@ -4,8 +4,9 @@
  */
 import { useSignal } from '@preact/signals';
 import { type DetailInput, detailRows, diagnosticsJson } from './details.ts';
+import { t } from './i18n.ts';
 
-export function Details({ input, label = 'Details' }: { input: DetailInput; label?: string }) {
+export function Details({ input, label }: { input: DetailInput; label?: string }) {
   const open = useSignal(false);
   const copied = useSignal(false);
   const rows = detailRows(input);
@@ -31,7 +32,7 @@ export function Details({ input, label = 'Details' }: { input: DetailInput; labe
           open.value = !open.value;
         }}
       >
-        {label} {open.value ? '▾' : '▸'}
+        {label ?? t('details.toggle')} {open.value ? '▾' : '▸'}
       </button>
       {open.value && (
         <>
@@ -44,7 +45,7 @@ export function Details({ input, label = 'Details' }: { input: DetailInput; labe
             ))}
           </dl>
           <button type="button" class="link" data-testid="details-copy" onClick={copy}>
-            {copied.value ? 'Copied' : 'Copy diagnostics'}
+            {copied.value ? t('common.copied') : t('details.copy')}
           </button>
         </>
       )}

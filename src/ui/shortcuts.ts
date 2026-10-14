@@ -3,20 +3,30 @@
  * while a text field has focus; ⌘↵ and Esc work everywhere. Slice-2 keys (undo, Fill/Fit, rotate 90°, the
  * Instagram view, peek) are not wired yet.
  */
-export const SHORTCUTS: readonly { keys: string; action: string }[] = [
-  { keys: '⌥⇧S', action: 'Open or focus instapost (from anywhere)' },
-  { keys: '⌘↵', action: 'The Post card’s primary button' },
-  { keys: '⌥⌘↵', action: 'Test run' },
-  { keys: 'Esc', action: 'Stop (before Share); else close a sheet or text editing' },
-  { keys: '⌘O · ⌘V', action: 'Choose photo · paste photo' },
-  { keys: 'T', action: 'Edit text' },
-  { keys: '0', action: 'Reset placement' },
-  { keys: '= · −', action: 'Zoom in · out about the centre' },
-  { keys: 'Arrows (⇧: 10 px)', action: 'Nudge (with the photo focused)' },
-  { keys: 'N', action: 'New story (after a result)' },
-  { keys: 'H · ,', action: 'History · Settings' },
-  { keys: '?', action: 'This sheet' },
+import { type MsgKey, tk } from './i18n.ts';
+
+const ROWS: readonly { keys: string | MsgKey; action: MsgKey }[] = [
+  { keys: '⌥⇧S', action: 'keys.open' },
+  { keys: '⌘↵', action: 'keys.primary' },
+  { keys: '⌥⌘↵', action: 'keys.testRun' },
+  { keys: 'Esc', action: 'keys.escape' },
+  { keys: '⌘O · ⌘V', action: 'keys.photo' },
+  { keys: 'T', action: 'keys.text' },
+  { keys: '0', action: 'keys.reset' },
+  { keys: '= · −', action: 'keys.zoom' },
+  { keys: 'keys.arrows', action: 'keys.nudge' },
+  { keys: 'N', action: 'keys.newStory' },
+  { keys: 'H · ,', action: 'keys.panels' },
+  { keys: '?', action: 'keys.help' },
 ];
+
+/** The `?` sheet's rows, in the current language. */
+export function shortcuts(): { keys: string; action: string }[] {
+  return ROWS.map((r) => ({
+    keys: r.keys.startsWith('keys.') ? tk(r.keys as MsgKey) : r.keys,
+    action: tk(r.action),
+  }));
+}
 
 export interface ShortcutHandlers {
   primary(): void;

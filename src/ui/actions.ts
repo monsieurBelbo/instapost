@@ -14,13 +14,15 @@ import { newId } from '../core/model/ids.ts';
 import { downloads } from '../platform/downloads.ts';
 import { type ExportRecord, getExport, putExport } from '../platform/idb.ts';
 import { baseName, downloadBlob, storyFilename } from '../publish/download.ts';
-import { LANE_REASON_TEXT, laneFor } from '../publish/lane.ts';
+import { laneFor } from '../publish/lane.ts';
 import { canShareStory, shareFiles } from '../publish/share.ts';
 import { calibrationCanvas, cornerMarkers } from '../raster/calibration.ts';
 import { exportFrame } from '../raster/export.ts';
+import { folder, laneReasonText, POST_NOTES } from './copy.ts';
 import { assetSize, busy, doc, errorNotice, frame, image, measurer, setNotice } from './editor-state.ts';
 import { freshExport, storeExport } from './export-cache.ts';
 import { sha256Hex } from './hash.ts';
+import { t } from './i18n.ts';
 import { lane, onResult, setResultCopy, startRun, stopRun } from './run-state.ts';
 import { settings } from './settings-state.ts';
 
@@ -30,7 +32,7 @@ export const shareSupported = signal<boolean>(canShareStory());
 /** Why the desktop lane is unavailable for the current frame (K3), or null. */
 export function desktopLaneBlock(): string | null {
   const l = laneFor(frame.value);
-  return l.desktop ? null : l.reasons.map((r) => LANE_REASON_TEXT[r]).join(' ');
+  return l.desktop ? null : l.reasons.map(laneReasonText).join(' ');
 }
 
 async function guard<T>(what: 'post' | 'share' | 'download', fn: () => Promise<T>): Promise<T | undefined> {
@@ -74,7 +76,7 @@ async function run(mode: Exclude<HandoffMode, 'check'>, queue: boolean): Promise
   await guard('post', async () => {
     const block = desktopLaneBlock();
     if (block && mode === 'post') {
-      setNotice({ kind: 'error', text: `${block} Use Send to phone… instead.`, code: 'LANE_PHONE' });
+      setNotice({ kind: 'error', text: t('notice.lanePhone', { reasons: block }), code: 'LANE_PHONE' });
       return;
     }
     let record: ExportRecord;
@@ -82,7 +84,7 @@ async function run(mode: Exclude<HandoffMode, 'check'>, queue: boolean): Promise
     let thumb: string | null = null;
     if (image.value) {
       const fresh = await freshExport();
-      if (!fresh) throw new Error('The story could not be rendered; try again.');
+      if (!fresh) throw new Error(t('notice.renderFailed'));
       record = await storeExport(fresh);
       sample = fresh.sample;
       thumb = URL.createObjectURL(fresh.blob);
@@ -90,7 +92,7 @@ async function run(mode: Exclude<HandoffMode, 'check'>, queue: boolean): Promise
       record = await calibrationExport();
       thumb = URL.createObjectURL(record.blob);
     } else {
-      setNotice({ kind: 'error', text: 'Add a photo to post.' });
+      setNotice({ kind: 'error', text: POST_NOTES.K1 });
       return;
     }
     startRun(
@@ -146,7 +148,7 @@ async function saveToDownloads(blob: Blob, ext: 'jpg' | 'png'): Promise<{ file: 
 /** The phone JPEG of the current doc. */
 async function phoneJpeg(): Promise<File> {
   const img = image.value;
-  if (!img) throw new Error('Add a photo first.');
+  if (!img) throw new Error(t('notice.addPhoto'));
   const rendered = await exportFrame(doc.value, frame.value.id, 'phone', {
     sources: { image: (id) => (id === img.assetId ? img.full : undefined) },
     assetSize,
@@ -164,17 +166,17 @@ export function sendToPhone(): Promise<void> {
     if (!shareSupported.value) {
       const file = await phoneJpeg();
       const saved = await saveToDownloads(file, 'jpg');
-      setNotice({ kind: 'info', text: `Saved Downloads/instapost/${saved.file}. AirDrop it from Finder.` });
+      setNotice({ kind: 'info', text: t('notice.savedAirDrop', { path: `${folder()}/${saved.file}` }) });
       return;
     }
     const file = await phoneJpeg();
-    const outcome = await shareFiles([file], { title: 'instapost story' });
+    const outcome = await shareFiles([file], { title: t('share.title') });
     if (outcome === 'not-allowed') {
-      setNotice({ kind: 'info', text: 'The story is ready: click Send to phone… again to open the share sheet.' });
+      setNotice({ kind: 'info', text: t('notice.shareReady') });
     } else if (outcome === 'unsupported') {
       shareSupported.value = false;
       const saved = await saveToDownloads(file, 'jpg');
-      setNotice({ kind: 'info', text: `Saved Downloads/instapost/${saved.file}. AirDrop it from Finder.` });
+      setNotice({ kind: 'info', text: t('notice.savedAirDrop', { path: `${folder()}/${saved.file}` }) });
     }
   }).then(() => undefined);
 }
@@ -183,9 +185,9 @@ export function sendToPhone(): Promise<void> {
 export function saveCopy(): Promise<void> {
   return guard('download', async () => {
     const fresh = await freshExport();
-    if (!fresh) throw new Error('Add a photo first.');
+    if (!fresh) throw new Error(t('notice.addPhoto'));
     const saved = await saveToDownloads(fresh.blob, 'png');
-    setNotice({ kind: 'info', text: `Saved Downloads/instapost/${saved.file}.` });
+    setNotice({ kind: 'info', text: t('notice.saved', { path: `${folder()}/${saved.file}` }) });
   }).then(() => undefined);
 }
 

@@ -29,6 +29,8 @@ import {
   MSITE_LOCK_REASONS,
   type MsiteLockReason,
   type Settings,
+  UI_LANG_SETTINGS,
+  type UiLangSetting,
 } from '../core/handoff/state.ts';
 import { isValidHandle } from '../core/ig-contract/account.ts';
 import { type Area, type ComposerWindowRecord, type LocalSchema, local } from '../platform/storage.ts';
@@ -116,6 +118,7 @@ export function editorSettings(stored: Partial<Record<string, unknown>> | undefi
     accountLock: typeof s.accountLock === 'boolean' ? s.accountLock : d.accountLock,
     keepCopies: typeof s.keepCopies === 'boolean' ? s.keepCopies : d.keepCopies,
     onboardedAt: timeOf(s.onboardedAt),
+    lang: UI_LANG_SETTINGS.includes(s.lang as UiLangSetting) ? (s.lang as UiLangSetting) : d.lang,
   };
 }
 

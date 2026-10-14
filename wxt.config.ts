@@ -53,7 +53,11 @@ export default defineConfig({
     const icons = Object.fromEntries([16, 32, 48, 128].map((s) => [s, `icons/${icon}/${s}.png`]));
     return {
       name,
-      description: 'Prepare Instagram stories on desktop.',
+      // AM44: the description follows the browser's UI language (public/_locales: en, es). The name stays
+      // literal: "instapost" in both languages, and the E2E fixtures read it from getManifest(), which
+      // does not resolve __MSG_…__ placeholders.
+      default_locale: 'en',
+      description: '__MSG_extDescription__',
       key: readFileSync(`keys/${key}.pub.b64`, 'utf8').trim(),
       minimum_chrome_version: '155',
       permissions: [

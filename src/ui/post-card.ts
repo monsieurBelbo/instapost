@@ -8,7 +8,8 @@
  * 60 s spacing), so the duplicate guard holds in the minute right after a post (its button then queues).
  */
 import type { HandoffMode, Lane } from '../core/handoff/state.ts';
-import { clock, mmss, POST_NOTES } from './copy.ts';
+import { clock, mmss, POST_NOTES, shortDate } from './copy.ts';
+import { t } from './i18n.ts';
 
 export type PostCardStateId =
   | 'K1'
@@ -31,7 +32,7 @@ export type PostAction = 'post' | 'queuePost' | 'setupTest' | 'sendToPhone' | 'c
 export interface PostCardInput {
   hasPhoto: boolean;
   fontsReady: boolean;
-  /** K3: why this frame can only go from the phone (LANE_REASON_TEXT), or null. */
+  /** K3: why this frame can only go from the phone (copy.ts laneReasonText), or null. */
   phoneOnly: string | null;
   /** K4: the kill-switch lock (epoch ms) when active. */
   pausedUntil: number | null;
@@ -64,63 +65,77 @@ export interface PostCardState {
 }
 
 export function postCardState(i: PostCardInput): PostCardState {
-  if (!i.hasPhoto) return { id: 'K1', label: 'Post story', action: null, disabled: true, note: POST_NOTES.K1 };
-  if (!i.fontsReady) return { id: 'K2', label: 'Post story', action: null, disabled: true, note: POST_NOTES.K2 };
+  const post = t('post.label.post');
+  if (!i.hasPhoto) return { id: 'K1', label: post, action: null, disabled: true, note: POST_NOTES.K1 };
+  if (!i.fontsReady) return { id: 'K2', label: post, action: null, disabled: true, note: POST_NOTES.K2 };
   if (i.phoneOnly)
-    return { id: 'K3', label: 'Send to phone…', action: 'sendToPhone', disabled: false, note: i.phoneOnly };
+    return { id: 'K3', label: t('action.sendToPhone'), action: 'sendToPhone', disabled: false, note: i.phoneOnly };
   if (i.pausedUntil !== null && i.pausedUntil > i.now) {
     return {
       id: 'K4',
-      label: `Paused until ${new Date(i.pausedUntil).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`,
+      label: t('post.label.paused', { date: shortDate(i.pausedUntil) }),
       action: null,
       disabled: true,
-      note: 'Desktop posting is paused. See the banner above.',
+      note: t('post.pausedNote'),
     };
   }
   if (i.brandedTestBuild) {
-    return { id: 'K5', label: 'Post story', action: null, disabled: true, note: POST_NOTES.K5(i.brandedTestBuild) };
+    return { id: 'K5', label: post, action: null, disabled: true, note: POST_NOTES.K5(i.brandedTestBuild) };
   }
   const lane = i.lane;
   if (lane?.kind === 'busy') {
     const b = i.busy ?? null;
     const label = b?.held
-      ? 'Instagram window open'
+      ? t('post.label.windowOpen')
       : b?.mode === 'test' || b?.mode === 'shareTest'
-        ? 'Testing…'
+        ? t('post.label.testing')
         : b?.mode === 'check'
-          ? 'Checking…'
-          : 'Posting…';
+          ? t('post.label.checking')
+          : t('post.label.posting');
     const note = b?.held
       ? b.held === 'upload'
-        ? POST_NOTES.K7upload(b.closeAt ? clock(b.closeAt) : 'a later time')
+        ? POST_NOTES.K7upload(b.closeAt ? clock(b.closeAt) : null)
         : POST_NOTES.K7held
       : b?.mode === 'test' || b?.mode === 'shareTest'
         ? POST_NOTES.K7test
         : b?.mode === 'check'
           ? POST_NOTES.K7check
           : POST_NOTES.K7;
-    return { id: 'K7', label, action: null, disabled: true, note, link: { label: 'Show it', action: 'showRun' } };
+    return {
+      id: 'K7',
+      label,
+      action: null,
+      disabled: true,
+      note,
+      link: { label: t('action.showRun'), action: 'showRun' },
+    };
   }
   if (lane?.kind === 'queued') {
     const left = (lane.freeAt ?? i.now) - i.now;
-    return { id: 'K11', label: 'Cancel', action: 'cancelQueue', disabled: false, note: POST_NOTES.K11(mmss(left)) };
+    return {
+      id: 'K11',
+      label: t('common.cancel'),
+      action: 'cancelQueue',
+      disabled: false,
+      note: POST_NOTES.K11(mmss(left)),
+    };
   }
   if (!i.testPassed)
-    return { id: 'K6', label: 'Run setup test', action: 'setupTest', disabled: false, note: POST_NOTES.K6 };
+    return { id: 'K6', label: t('post.label.setupTest'), action: 'setupTest', disabled: false, note: POST_NOTES.K6 };
   if (i.story?.kind === 'unknown') {
     return {
       id: 'K8',
-      label: 'Check my story ↗',
+      label: t('action.checkStory'),
       action: 'checkStory',
       disabled: false,
       note: POST_NOTES.K8(clock(i.story.at)),
-      link: { label: 'It didn’t post — post again', action: 'post' },
+      link: { label: t('post.link.postAgainAnyway'), action: 'post' },
     };
   }
   if (lane?.kind === 'hourly' || lane?.kind === 'daily') {
     return {
       id: 'K9',
-      label: `Available at ${lane.freeAt ? clock(lane.freeAt) : 'later'}`,
+      label: lane.freeAt ? t('post.label.availableAt', { time: clock(lane.freeAt) }) : t('post.label.availableLater'),
       action: null,
       disabled: true,
       note: lane.kind === 'daily' ? POST_NOTES.K9day : POST_NOTES.K9hour,
@@ -133,7 +148,7 @@ export function postCardState(i: PostCardInput): PostCardState {
     const left = spacing && lane?.freeAt !== undefined ? lane.freeAt - i.now : null;
     return {
       id: 'K12',
-      label: left !== null ? `Post again · in ${mmss(left)}` : 'Post again',
+      label: left !== null ? t('post.label.postAgainIn', { left: mmss(left) }) : t('post.label.postAgain'),
       action: left !== null ? 'queuePost' : 'post',
       disabled: false,
       note: POST_NOTES.K12(clock(i.story.at)),
@@ -143,11 +158,11 @@ export function postCardState(i: PostCardInput): PostCardState {
   if (spacing && lane?.freeAt !== undefined) {
     return {
       id: 'K10',
-      label: `Post story · in ${mmss(lane.freeAt - i.now)}`,
+      label: t('post.label.postIn', { left: mmss(lane.freeAt - i.now) }),
       action: 'queuePost',
       disabled: false,
       note: POST_NOTES.K10,
     };
   }
-  return { id: 'K13', label: 'Post story', action: 'post', disabled: false, note: POST_NOTES.K13 };
+  return { id: 'K13', label: post, action: 'post', disabled: false, note: POST_NOTES.K13 };
 }

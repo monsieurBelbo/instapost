@@ -5,8 +5,9 @@
  */
 import { useEffect } from 'preact/hooks';
 import { showDownload } from './actions.ts';
-import { ACTION_LABEL, type ActionId, at, HELD_TEXT, mmss, resultActions, resultText } from './copy.ts';
+import { ACTION_LABEL, type ActionId, at, folder, heldText, mmss, resultActions, resultText } from './copy.ts';
 import { newStory } from './editor-state.ts';
+import { t } from './i18n.ts';
 import { runAction } from './result-actions.ts';
 import { adoptCheckedAccount, dismissResult, lane, openInstagram, resultSeen, type ShownResult } from './run-state.ts';
 import { now } from './ui-state.ts';
@@ -26,7 +27,7 @@ function ActionButton({
   const l = lane.value;
   // §5: Try again is a new click, paced by the rate guard (`Try again · 0:41`).
   if (id === 'tryAgain' && l?.kind === 'spacing' && l.freeAt !== undefined && l.freeAt > now.value) {
-    label = `${label} · ${mmss(l.freeAt - now.value)}`;
+    label = t('action.tryAgainIn', { label, left: mmss(l.freeAt - now.value) });
   }
   return (
     <button
@@ -79,7 +80,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
 
   const done = (
     <button type="button" class="link" data-testid="result-done" onClick={dismissResult}>
-      Done
+      {t('common.done')}
     </button>
   );
 
@@ -101,25 +102,25 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
       <p class="result-body">{text.body}</p>
       {shown.copy && (
         <p class="result-copy" data-testid="result-copy">
-          Saved a copy: Downloads/instapost/{shown.copy.file}{' '}
+          {t('result.savedCopy', { path: `${folder()}/${shown.copy.file}` })}{' '}
           <button
             type="button"
             class="link"
             data-testid="result-show"
             onClick={() => showDownload(shown.copy?.downloadId ?? 0)}
           >
-            Show
+            {t('result.show')}
           </button>
         </p>
       )}
       {shown.held === 'upload' && (
         <p class="hint" data-testid="result-held">
-          {HELD_TEXT}
+          {heldText()}
         </p>
       )}
       {shown.held === 'offerManual' && shown.closeAt !== null && (
         <p class="hint" data-testid="result-offer-manual">
-          The Instagram window stays open {mmss(shown.closeAt - now.value)} in case you want to finish by hand.
+          {t('result.offerManual', { left: mmss(shown.closeAt - now.value) })}
         </p>
       )}
       <div class="row-actions">
@@ -134,7 +135,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
                 newStory();
               }}
             >
-              New story <kbd>N</kbd>
+              {t('result.newStory')} <kbd>N</kbd>
             </button>
             <button
               type="button"
@@ -142,7 +143,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
               data-testid="result-view-story"
               onClick={() => openInstagram(handle ? 'story' : 'home', handle)}
             >
-              View story ↗
+              {t('result.viewStory')}
             </button>
             {done}
           </>
@@ -155,7 +156,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
               data-testid="result-post"
               onClick={() => runAction('tryAgain', { mode: 'post', handoffId: null, handle })}
             >
-              Post story <kbd>⌘↵</kbd>
+              {t('result.postStory')} <kbd>⌘↵</kbd>
             </button>
             {done}
           </>
@@ -170,7 +171,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
               dismissResult();
             }}
           >
-            Use {at(r.account)}
+            {t('result.useAccount', { handle: at(r.account) })}
           </button>
         )}
         {(r.kind === 'shareTested' || r.kind === 'checked') && done}
@@ -182,7 +183,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
               data-testid="result-post"
               onClick={() => runAction('tryAgain', { mode: shown.mode, handoffId: null, handle })}
             >
-              {shown.mode === 'post' ? 'Post story' : 'Run again'}
+              {shown.mode === 'post' ? t('result.postStory') : t('result.runAgain')}
             </button>
             {done}
           </>
@@ -195,7 +196,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
               data-testid="result-check-story"
               onClick={() => runAction('checkStory', { mode: shown.mode, handoffId: shown.handoffId, handle })}
             >
-              Check my story ↗
+              {ACTION_LABEL.checkStory}
             </button>
             {r.code === 'TEST_LEAK' ? (
               <ActionButton id="resume" primary={false} shown={shown} diagnostics={diagnostics} />
@@ -207,7 +208,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
                   data-testid="result-mark-posted"
                   onClick={() => runAction('markPosted', { mode: shown.mode, handoffId: shown.handoffId, handle })}
                 >
-                  It posted
+                  {ACTION_LABEL.markPosted}
                 </button>
                 {' · '}
                 <button
@@ -216,7 +217,7 @@ export function ResultCard({ shown, diagnostics }: { shown: ShownResult; diagnos
                   data-testid="result-mark-not-posted"
                   onClick={() => runAction('markNotPosted', { mode: shown.mode, handoffId: shown.handoffId, handle })}
                 >
-                  It didn’t post
+                  {ACTION_LABEL.markNotPosted}
                 </button>
               </span>
             )}

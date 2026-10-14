@@ -12,6 +12,7 @@
  */
 import { createContext, type MouseEvent, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { TOAST_MS } from '../protocol.ts';
+import { logStep, pageLang } from './control.ts';
 import { useCx } from './styles.ts';
 
 export interface ToastSpec {
@@ -49,6 +50,8 @@ export function useToastState(): [Shown[], Toasts] {
   }, []);
   const show = useCallback(
     (t: ToastSpec) => {
+      // AM45: what the toast said, in the page's language (E45; diagnostics only, the agent never reads it).
+      logStep('toast', { text: t.text, action: t.action?.label ?? null, kind: t.kind ?? 'plain', lang: pageLang() });
       const id = ++next.current;
       setShown((all) => [...all.filter((x) => x.kind !== t.kind || x.text !== t.text), { ...t, id }]);
       timers.current.set(
@@ -113,6 +116,10 @@ export function ToastList({ toasts }: { toasts: Shown[] }) {
 
 export function Snackbar({ text }: { text: string }) {
   const c = useCx();
+  // AM45: logged once per showing, like the toasts (E45 reads the text; the agent never does).
+  useEffect(() => {
+    logStep('snackbar', { text, lang: pageLang() });
+  }, [text]);
   return (
     <div role="status" data-testid="fake-landscape-snackbar" className={`${c('_aa3b')} ${c('toast')}`}>
       {text}

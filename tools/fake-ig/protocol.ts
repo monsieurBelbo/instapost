@@ -106,6 +106,10 @@ export interface FakeControlReport {
   isTrusted: boolean;
   /** Share only: a Share in a composer session that already shared (Instagram has no in-flight guard). */
   repeat?: boolean;
+  /** AM45: what a person reads on the control (its text or aria-label), ≤ 80 characters. Diagnostics only. */
+  label?: string;
+  /** AM45: the page's `<html lang>`. */
+  lang?: string;
 }
 
 /** `challenge=…`: how long after ready or after the Share flow settled the challenge comes. */
@@ -253,4 +257,7 @@ export const LOG_STEPS = [
   'compose',
   'compose_failure',
   'tray_refresh',
+  /** AM45: a toast (its text, its action's label) or the rotate snackbar, in the page's language. */
+  'toast',
+  'snackbar',
 ] as const;

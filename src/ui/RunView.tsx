@@ -10,24 +10,25 @@
 import type { HandoffStatus } from '../core/handoff/state.ts';
 import { AccountPrompt } from './AccountPrompt.tsx';
 import {
-  CANT_STOP_TEXT,
-  FAKE_BAR_TEXT,
+  cantStopText,
+  fakeBarText,
   finishByHandText,
   mmss,
   modeChip,
-  RECONNECTING_TEXT,
-  RUN_HINT,
+  reconnectingText,
   resizeText,
   runHeader,
+  runHint,
+  stepName,
 } from './copy.ts';
 import { Details } from './Details.tsx';
 import { type DetailInput, diagnosticsJson } from './details.ts';
+import { t } from './i18n.ts';
 import { ResultCard } from './ResultCard.tsx';
 import { connected, diag, ownRun, safetyCopy, shown, starting, status, stopRun } from './run-state.ts';
 import { type StepSource, stepsFrom } from './run-steps.ts';
 import { now } from './ui-state.ts';
 
-const STEP_LABEL = { instagram: 'Instagram', account: 'Account', story: 'Story', share: 'Share', confirm: 'Confirm' };
 const MARK = { pending: '○', active: '◐', waiting: '◐', done: '●', failed: '✕', unknown: '?', skipped: '–' } as const;
 
 /** The overlap of the docked Instagram window with this editor window, in CSS px (0 when apart). */
@@ -45,7 +46,7 @@ export function RunView() {
   const r = shown.value;
   const st = starting.value;
   const d = diag.value;
-  const t = now.value;
+  const time = now.value;
   const mode = r?.mode ?? s?.mode ?? st?.mode ?? 'post';
   const account = r?.account ?? s?.account ?? null;
   const handle = account?.detected ?? null;
@@ -74,11 +75,11 @@ export function RunView() {
           window: d.window,
           shareSent: s.shareSent,
         }
-      : { phase: 'opening', mode, startedAt: st?.at ?? t, result: null };
-  const steps = stepsFrom(src, t);
+      : { phase: 'opening', mode, startedAt: st?.at ?? time, result: null };
+  const steps = stepsFrom(src, time);
   const running = r === null;
-  const started = src.steps?.opened ?? src.startedAt ?? t;
-  const queued = s?.phase === 'queued' ? (s.queuedUntil ?? t) : null;
+  const started = src.steps?.opened ?? src.startedAt ?? time;
+  const queued = s?.phase === 'queued' ? (s.queuedUntil ?? time) : null;
   const chip = modeChip(mode);
 
   const details: DetailInput = {
@@ -112,13 +113,13 @@ export function RunView() {
     >
       {d.fake && (
         <p class="fake-bar" data-testid="run-fake-bar" role="alert">
-          {FAKE_BAR_TEXT}
+          {fakeBarText()}
         </p>
       )}
       <header class="run-header">
         <h1>{runHeader(mode, handle)}</h1>
         {chip && <span class="chip amber">{chip}</span>}
-        {running && queued === null && <span class="run-clock">{mmss(t - started)}</span>}
+        {running && queued === null && <span class="run-clock">{mmss(time - started)}</span>}
       </header>
       <div class="run-body">
         {ownRun.value?.thumb && <RunThumb url={ownRun.value.thumb} />}
@@ -135,9 +136,11 @@ export function RunView() {
                 {v.status === 'active' ? <span class="spinner" /> : MARK[v.status]}
               </span>
               <span class="run-text">
-                <span class="run-label">{STEP_LABEL[v.step]}</span> {v.text}
+                <span class="run-label">{stepName(v.step)}</span> {v.text}
                 {v.status === 'active' && v.since !== undefined && (
-                  <span class="run-seconds">{Math.max(0, Math.floor((t - v.since) / 1000))} s</span>
+                  <span class="run-seconds">
+                    {t('step.seconds', { n: Math.max(0, Math.floor((time - v.since) / 1000)) })}
+                  </span>
                 )}
                 {v.note && <span class="run-note">{v.note}</span>}
               </span>
@@ -148,7 +151,7 @@ export function RunView() {
 
       {queued !== null && (
         <p class="instruction" data-testid="run-queued">
-          Posts are at least a minute apart. Starting in {mmss(queued - t)}…
+          {t('run.queued', { left: mmss(queued - time) })}
         </p>
       )}
       {resize && (
@@ -159,7 +162,7 @@ export function RunView() {
           data-w={String(Math.round(resize.tab.w))}
           data-h={String(Math.round(resize.tab.h))}
         >
-          {resizeText(resize.tab, resize.ok, resize.until - t)}
+          {resizeText(resize.tab, resize.ok, resize.until - time)}
         </p>
       )}
       {s?.phase === 'awaitingAccount' && s.accountPrompt && (
@@ -182,17 +185,17 @@ export function RunView() {
 
       {running ? (
         <footer class="run-footer">
-          {!connected.value && s !== null && <p class="hint">{RECONNECTING_TEXT}</p>}
-          {s?.phase !== 'manual' && queued === null && <p class="hint">{RUN_HINT}</p>}
+          {!connected.value && s !== null && <p class="hint">{reconnectingText()}</p>}
+          {s?.phase !== 'manual' && queued === null && <p class="hint">{runHint()}</p>}
           <div class="row-actions">
             {(s?.canStop ?? true) && (
               <button type="button" class="button" data-testid="run-stop" onClick={stopRun}>
-                {queued !== null ? 'Cancel' : 'Stop'} <kbd>Esc</kbd>
+                {queued !== null ? t('common.cancel') : t('run.stop')} <kbd>Esc</kbd>
               </button>
             )}
             {s?.shareSent && s.canStop === false && (
               <p class="hint" data-testid="run-cant-stop">
-                {CANT_STOP_TEXT}
+                {cantStopText()}
               </p>
             )}
           </div>
@@ -212,5 +215,5 @@ export function RunView() {
 
 /** What gets posted: the export this run uploads. */
 function RunThumb({ url }: { url: string }) {
-  return <img class="run-thumb" src={url} alt="The story being posted" width={108} height={192} />;
+  return <img class="run-thumb" src={url} alt={t('run.thumbAlt')} width={108} height={192} />;
 }

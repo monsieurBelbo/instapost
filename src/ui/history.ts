@@ -8,6 +8,7 @@ import { signal } from '@preact/signals';
 import type { HandoffMode, HandoffRecord, RunResult } from '../core/handoff/state.ts';
 import { recentHandoffs } from '../handoff/records.ts';
 import { getExport } from '../platform/idb.ts';
+import { intlLocale, t } from './i18n.ts';
 
 export const HISTORY_LIMIT = 50;
 export const DUPLICATE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -118,11 +119,11 @@ export async function refreshHistory(): Promise<void> {
 }
 
 /** Groups rows by local day: Today, Yesterday, or a date. */
-export function dayLabel(t: number, now: number): string {
+export function dayLabel(time: number, now: number): string {
   const day = (x: number) => new Date(x).setHours(0, 0, 0, 0);
-  const d = day(t);
+  const d = day(time);
   const today = day(now);
-  if (d === today) return 'Today';
-  if (d === day(today - 12 * 60 * 60 * 1000)) return 'Yesterday';
-  return new Date(t).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  if (d === today) return t('date.today');
+  if (d === day(today - 12 * 60 * 60 * 1000)) return t('date.yesterday');
+  return new Date(time).toLocaleDateString(intlLocale(), { weekday: 'short', day: 'numeric', month: 'short' });
 }

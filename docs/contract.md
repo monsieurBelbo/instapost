@@ -15,7 +15,7 @@ This file has two parts:
 
 **Rules that apply to every probe:**
 
-- No probe matches visible text or ARIA labels. The owner may use a Spanish UI, and the fake runs `en` and `es` (E12 l) with randomised class names and ids (E12 m).
+- No probe matches visible text or ARIA labels. The owner may use a Spanish UI, and the fake runs `en` and `es` (E12 l, E45) with randomised class names and ids (E12 m). Since AM45 (2026-10-14) U31 enforces it on the agent's and the background's sources, and § "Instagram in Spanish" below lists every finder and why it is language-free.
 - The agent reads the DOM of the composer tab from the isolated world and nothing else: no page scripts, no network, no extension storage, no clicks (T3). The one script in the page's own world is the background's portrait shim (AM37, C3b), which changes two values and reports what the page then reads; it is not a probe of the DOM.
 - C1–C5 (C3b too, since AM37) and the service-worker state are judged from the probe that decided the flow. C8 is taken from a second probe once the composer is ready (§11 AM13). All of them are stored on every Handoff record as `preflight`. The settings list of the last 20 preflights (§3.9 item 1) is not built yet; the records are in IndexedDB `handoffs`.
 
@@ -137,7 +137,7 @@ Stored as `C3` on the preflight (the id predates the split).
 - **Probe (agent, `findEntry`, `pressables`, `newDialogs`, `glyphHash`).** From the story input up to 4 ancestors: the previous sibling box holding exactly one pressable (`button, [role=button], a[href], [role=link], [role=menuitem]`) that contains an svg. After the tap of +: a new visible `[role=dialog]` within 6 s (one re-tap of + if none appeared), with exactly two outermost pressables. The Story item is the stored fingerprint's index when the count and the glyph hash (fnv1a over the svg's viewBox and shapes) match, else item 0 by trial; a wrong item only clicks the post input (no chooser without activation), then + again and the other item, once.
 - **Decision.** No entry, no menu, a third item (never tapped), neither item arming the story input, or a tap the helper refused: `STORY_ENTRY_MISSING` with that detail (`no + entry beside the story input`, `no menu after +`, `menu 3 items`, `neither menu item started a story`, `tap refused`). The tap helper taps + and Story only on `/`. The fingerprint is stored (`menuFingerprint`) when an armed run learned it.
 - **Verified on the fake by:** U29, B11; E29 (both orders), E30, E33 (`trusted=require`, `menuItems=3`, the trial and the fingerprint), E12 i (`route=direct`: + is not tapped off home).
-- **Live:** L18 (count, order, Story index, glyph hash, tag and role of the items), L21 (Spanish).
+- **Live:** L18 (count, order, Story index, glyph hash, tag and role of the items), L21 (Spanish: the same facts, the same glyph hash; § "Instagram in Spanish").
 
 ### C11: Story armed (AM39)
 
@@ -172,6 +172,28 @@ Stored as `C3` on the preflight (the id predates the split).
 - **Decision.** Compared with `expectedAccount` before any tap: a mismatch, an unreadable account or no expected account asks (§4.8 of `docs/ux.md`), unless "Only post as" is off; a Test run or a check learns it.
 - **Verified on the fake by:** U25, U29; E4 (learned by a check), E30 (learned by the setup test), E36 (mismatch, unreadable, timeout), E7, E15, E16, E19 (the prompt holds a run on home).
 - **Live:** L18 (exactly one candidate), L22 (another account logged in).
+
+### Instagram in Spanish (AM45, live checklist L21)
+
+**Audit, 2026-10-14.** Every finder the autopilot and the background use to decide, with what it reads. None reads Instagram's visible text, an ARIA label, an alt text, a title or the page's language, so none needed an English+Spanish fallback and none was added. U31 (`src/agent/no-text.test.ts`) scans `src/agent`, `src/core/handoff`, `src/core/ig-contract` and `src/handoff` for those reads and fails on a new one; B15 runs the whole chain against the msite fixture with English and Spanish words and labels; E12 (l) and E45 run it against the fake in `es`.
+
+| What | Code | Reads | Language |
+|---|---|---|---|
+| C1 `is_mobile` | `probes.ts` `readIsMobile` | the JSON text of `script[type="application/json"]` holding `InstagramUserAgent` | a data blob; its keys and booleans are not localised (one of U31's two allowed text reads) |
+| C2 login, the kill switch, `UNEXPECTED_PAGE` | `urls.ts` `classifyComposerUrl` (background) | the tab's URL path | paths are not localised (`/accounts/login/`, `/challenge/`, …) |
+| C3a/C3b | `probes.ts`, the portrait shim | `innerWidth/innerHeight`, `screen.orientation.type` | none |
+| C4 story input | `probes.ts` `findStoryInput` | `input[type=file]` and its `accept` list | MIME types |
+| C6/C8 canvas | `probes.ts` `largestCanvas`, `readyCanvases` | `<canvas>` geometry and backing size | none |
+| C10 the + entry | `locators.ts` `findEntry`, `pressables` | from the story input's `form`, the previous sibling box's one pressable (`button, [role=button], a[href], [role=link], [role=menuitem]`) holding an svg | roles and tags; the +'s aria-label (Instagram's Home string: "Home", "Inicio") is never read |
+| C10 the menu | `locators.ts` `newDialogs`, `pressables`, `glyphHash` | a new visible `[role=dialog]`, its outermost pressables (exactly two), each item's svg shape data (fnv1a) | the items' labels ("Story"/"Historia", "Post"/"Publicación") are never read; the glyph hash and the stored fingerprint are the same in every language (B15) |
+| C11 armed | `tap.ts` `observeClick` | a capture `click` on the story input (or the post input) | none |
+| C12 composer and Share | `locators.ts` `composerState` | `canvas._aa3c` (else the largest canvas), `header._aa3d` (else a visible header), the snackbar `._aa3b`, visible `footer`s but `_aa3k`, their `button`/`[role=button]` controls, an svg badge | class names and roles; the footer's text ("Your story"/"Tu historia") and the snackbar's ("Rotate your device…") are never read |
+| C13 outcome | `net.ts` (agent), `outcome.ts` `decide()` (background) | resource timing: host class, pathname, `responseStatus`, `contentType`, redirected | none |
+| C7 corroboration | `locators.ts` `newToast`, `progressShown` | a new visible `[role=alert]` and whether it holds a button; `[role=progressbar]` | roles only; the toast's text ("Upload failed."/"Error al subir.") is never read |
+| C14 account | `locators.ts` `readAccount`, `profileHandle`; `account.ts` | links to `/<handle>/` holding an img or svg, outside `article`, inside a navigation landmark preferred | the path; Instagram's routes (`explore`, `accounts`, …) are not localised |
+| Diagnostics | `probes.ts` `probeComposer` | `<html lang>` (≤ 64 characters) | recorded on the probe (`probe.lang`: `en`, `es`) and in Details; nothing decides on it (U31's other allowed read) |
+
+**Unverified until L21.** The fake's Spanish strings are plausible renderings, not Instagram's (no Spanish Instagram page has been loaded: the saved bundles are logged-out English). What L21 can still find is a structural difference in Instagram's Spanish build (a third menu item, another footer), which would fail closed with the same codes as in English (`STORY_ENTRY_MISSING`, `SHARE_MISSING`).
 
 ### Also probed on every hand-off
 

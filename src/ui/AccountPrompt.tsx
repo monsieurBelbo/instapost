@@ -4,7 +4,8 @@
  * home before any tap and cancels itself after 60 s (ACCOUNT_UNCONFIRMED).
  */
 import type { HandoffMode } from '../core/handoff/state.ts';
-import { ACCOUNT_PROMPT_FOOT, accountPromptText, mmss } from './copy.ts';
+import { accountPromptFoot, accountPromptText, mmss } from './copy.ts';
+import { t } from './i18n.ts';
 import { chooseAccount } from './run-state.ts';
 import { now } from './ui-state.ts';
 
@@ -21,24 +22,24 @@ export function AccountPrompt({
   until: number;
   mode?: HandoffMode;
 }) {
-  const t = accountPromptText(kind, detected, expected, mode);
+  const text = accountPromptText(kind, detected, expected, mode);
   return (
     <div class="account-prompt" data-testid="account-prompt" data-kind={kind} role="alertdialog" aria-live="assertive">
-      {t.lines.map((l) => (
+      {text.lines.map((l) => (
         <p class="prompt-line" key={l}>
           {l}
         </p>
       ))}
       <div class="row-actions">
         <button type="button" class="button primary" data-testid="account-proceed" onClick={() => chooseAccount(true)}>
-          {t.proceed}
+          {text.proceed}
         </button>
         <button type="button" class="button ghost" data-testid="account-cancel" onClick={() => chooseAccount(false)}>
-          Cancel
+          {t('common.cancel')}
         </button>
-        <span class="hint countdown">Cancels itself in {mmss(until - now.value)}</span>
+        <span class="hint countdown">{t('prompt.countdown', { left: mmss(until - now.value) })}</span>
       </div>
-      <p class="hint">{ACCOUNT_PROMPT_FOOT}</p>
+      <p class="hint">{accountPromptFoot()}</p>
     </div>
   );
 }

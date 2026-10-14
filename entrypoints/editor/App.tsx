@@ -26,6 +26,7 @@ import { scheduleExport } from '../../src/ui/export-cache.ts';
 import { HistoryDrawer } from '../../src/ui/HistoryDrawer.tsx';
 import { refreshHistory } from '../../src/ui/history.ts';
 import { ImportSurface } from '../../src/ui/ImportSurface.tsx';
+import { lang, t } from '../../src/ui/i18n.ts';
 import { Onboarding } from '../../src/ui/Onboarding.tsx';
 import { PauseBanner } from '../../src/ui/PauseBanner.tsx';
 import { PhotoControls } from '../../src/ui/PhotoControls.tsx';
@@ -78,7 +79,11 @@ function setup(): () => void {
       scheduleExport();
       scheduleAutosave();
     }),
-    // §4.1: the tab title says what the run does.
+    // AM44: the page's language follows the setting (screen readers, hyphenation, spell check).
+    effect(() => {
+      document.documentElement.lang = lang.value;
+    }),
+    // §4.1: the tab title says what the run does (in the current language).
     effect(() => {
       const s = status.value;
       const r = shown.value;
@@ -160,7 +165,7 @@ export function App() {
         {running || result !== null ? (
           <RunView />
         ) : (
-          <section class={`editor-view${onboarding ? ' has-onboarding' : ''}`} aria-label="Story">
+          <section class={`editor-view${onboarding ? ' has-onboarding' : ''}`} aria-label={t('editor.story')}>
             {hasPhoto ? <Stage /> : <ImportSurface />}
             {onboarding && <Onboarding />}
           </section>

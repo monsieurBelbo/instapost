@@ -15,25 +15,25 @@ import {
   UNKNOWN_WHYS,
 } from '../core/handoff/state.ts';
 import {
-  ACCOUNT_PROMPT_FOOT,
   ACTION_LABEL,
   type ActionId,
+  accountPromptFoot,
   accountPromptText,
   type CopyCtx,
   ERROR_COPY,
-  FAKE_BAR_TEXT,
+  fakeBarText,
   finishByHandText,
-  HELD_TEXT,
-  HOW_IT_WORKS,
+  heldText,
+  howItWorks,
   mmss,
   modeChip,
   POST_NOTES,
   pauseReasonText,
-  RUN_HINT,
   resizeText,
   resultActions,
   resultText,
   runHeader,
+  runHint,
   STEP_COPY,
   tabTitle,
   whyText,
@@ -79,11 +79,11 @@ function allResults(): RunResult[] {
 function everyText(): string[] {
   const texts: string[] = [
     ...Object.values(ACTION_LABEL),
-    HOW_IT_WORKS,
-    HELD_TEXT,
-    RUN_HINT,
-    FAKE_BAR_TEXT,
-    ACCOUNT_PROMPT_FOOT,
+    howItWorks(),
+    heldText(),
+    runHint(),
+    fakeBarText(),
+    accountPromptFoot(),
     resizeText({ w: 600, h: 900 }, false, 60_000),
     finishByHandText('pick', null),
     finishByHandText('share', null),
@@ -98,6 +98,7 @@ function everyText(): string[] {
     if (s.shareTest) texts.push(s.shareTest);
   }
   for (const n of Object.values(POST_NOTES)) texts.push(typeof n === 'function' ? n('14:05') : n);
+  texts.push(POST_NOTES.K7upload(null));
   for (const r of allResults()) {
     for (const ctx of contexts) {
       const t = resultText(r, { ...ctx, durationMs: 18_000 });

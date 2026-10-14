@@ -26,6 +26,7 @@ import {
   textLayer,
   zoomImageAt,
 } from './editor-state.ts';
+import { t, tParts } from './i18n.ts';
 import { clientToStory, fitStage, hitTextBlock, storyPerClientPx, wheelZoomFactor } from './interaction.ts';
 
 type DragKind = 'image' | 'text';
@@ -200,7 +201,7 @@ export function Stage() {
         data-testid="editor-stage"
         tabIndex={0}
         role="img"
-        aria-label="Story preview, 1080 by 1920"
+        aria-label={t('stage.aria')}
         style={{ width: `${size.w}px`, height: `${size.h}px`, cursor }}
         data-asset-id={image.value?.assetId ?? ''}
         data-xf={
@@ -223,7 +224,7 @@ export function Stage() {
       />
       {!image.value && size.w > 0 && (
         <p class="stage-hint" style={{ width: `${size.w}px` }}>
-          Drop a photo here, or use <strong>Open image…</strong>
+          {tParts('stage.hint', { open: <strong key="open">{t('stage.open')}</strong> })}
         </p>
       )}
       {renderError.value && (

@@ -264,7 +264,13 @@ export interface Settings {
   onboardedAt: number | null;
   /** OD10: background-owned key `lastTestPassAt` (merged in); the one-time setup test gate. */
   lastTestPassAt: number | null;
+  /** AM44: the editor's language: Auto (the browser's UI language: es-* → Spanish, else English), English or Spanish. */
+  lang: UiLangSetting;
 }
+
+/** AM44: the Settings choice for the extension's own UI language. */
+export type UiLangSetting = 'auto' | 'en' | 'es';
+export const UI_LANG_SETTINGS: readonly UiLangSetting[] = ['auto', 'en', 'es'];
 
 export function defaultSettings(_guarded: boolean): Settings {
   return {
@@ -277,6 +283,7 @@ export function defaultSettings(_guarded: boolean): Settings {
     keepCopies: false,
     onboardedAt: null,
     lastTestPassAt: null,
+    lang: 'auto',
   };
 }
 

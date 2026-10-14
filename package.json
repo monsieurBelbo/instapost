@@ -24,6 +24,7 @@
     "test:smoke155": "pnpm run build:all && playwright test --project=cft155-mock --project=cft155-live",
     "check:bundle": "node scripts/check-bundle.ts",
     "contract:check": "node tools/contract/check-ua.ts",
+    "arc:use": "node scripts/arc-use.ts",
     "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:browser && pnpm run build:all && pnpm run check:bundle && playwright test"
   },
   "dependencies": {

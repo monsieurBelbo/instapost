@@ -19,7 +19,7 @@ export function DesktopShell({ t }: { boot: FakeBoot; t: Strings }) {
   const showToast = (text: string) => api.show({ text });
   const postInput = useRef<HTMLInputElement>(null);
   const pick = (e: MouseEvent) => {
-    reportControl('post', e.nativeEvent.isTrusted);
+    reportControl('post', e.nativeEvent.isTrusted, false, e.currentTarget);
     setMenuOpen(false);
     postInput.current?.click();
   };
@@ -44,7 +44,7 @@ export function DesktopShell({ t }: { boot: FakeBoot; t: Strings }) {
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               onClick={(e) => {
-                reportControl('create', e.nativeEvent.isTrusted);
+                reportControl('create', e.nativeEvent.isTrusted, false, e.currentTarget);
                 setMenuOpen((open) => !open);
               }}
             >
@@ -72,7 +72,7 @@ export function DesktopShell({ t }: { boot: FakeBoot; t: Strings }) {
                   data-testid="fake-create-reel"
                   className={c('menuItem')}
                   onClick={(e) => {
-                    reportControl('menuExtra', e.nativeEvent.isTrusted);
+                    reportControl('menuExtra', e.nativeEvent.isTrusted, false, e.currentTarget);
                     setMenuOpen(false);
                     postInput.current?.click();
                   }}

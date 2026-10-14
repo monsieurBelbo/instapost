@@ -234,7 +234,7 @@ function Shell({ boot, t }: { boot: FakeBoot; t: Strings }) {
 
   const onPlus = (e: MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault();
-    reportControl('create', e.nativeEvent.isTrusted);
+    reportControl('create', e.nativeEvent.isTrusted, false, e.currentTarget);
     if (ignored(e)) return;
     window.clearTimeout(menuTimer.current);
     if (menuOpen) {
@@ -250,7 +250,7 @@ function Shell({ boot, t }: { boot: FakeBoot; t: Strings }) {
 
   /** PolarisStoryCreationActions.startStoryCreationSession, then the file form's selectFile. */
   const tapStory = (e: MouseEvent) => {
-    reportControl('story', e.nativeEvent.isTrusted);
+    reportControl('story', e.nativeEvent.isTrusted, false, e.currentTarget);
     if (ignored(e)) return;
     setMenuOpen(false);
     if (sessionStartRejected()) {
@@ -268,7 +268,7 @@ function Shell({ boot, t }: { boot: FakeBoot; t: Strings }) {
   };
 
   const tapPost = (e: MouseEvent) => {
-    reportControl('post', e.nativeEvent.isTrusted);
+    reportControl('post', e.nativeEvent.isTrusted, false, e.currentTarget);
     if (ignored(e)) return;
     setMenuOpen(false);
     postInput.current?.click();
@@ -276,7 +276,7 @@ function Shell({ boot, t }: { boot: FakeBoot; t: Strings }) {
   };
 
   const tapReel = (e: MouseEvent) => {
-    reportControl('menuExtra', e.nativeEvent.isTrusted);
+    reportControl('menuExtra', e.nativeEvent.isTrusted, false, e.currentTarget);
     if (ignored(e)) return;
     setMenuOpen(false);
   };
@@ -339,7 +339,7 @@ function Shell({ boot, t }: { boot: FakeBoot; t: Strings }) {
   );
 
   const control = (name: FakeControl, then?: () => void) => (e: MouseEvent) => {
-    reportControl(name, e.nativeEvent.isTrusted);
+    reportControl(name, e.nativeEvent.isTrusted, false, e.currentTarget);
     then?.();
   };
 
@@ -400,7 +400,7 @@ function Shell({ boot, t }: { boot: FakeBoot; t: Strings }) {
       data-testid="fake-profile-link"
       onClick={(e) => {
         e.preventDefault();
-        reportControl('profile', e.nativeEvent.isTrusted);
+        reportControl('profile', e.nativeEvent.isTrusted, false, e.currentTarget);
       }}
     >
       <img src={AVATAR_SRC} alt="" width={24} height={24} />

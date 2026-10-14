@@ -16,6 +16,7 @@ import { ACTION_LABEL, at, ERROR_COPY, POST_NOTES } from './copy.ts';
 import { busy, fontsReady, image, notice } from './editor-state.ts';
 import { exportCache, exportStale } from './export-cache.ts';
 import { historyRows, storyStatus } from './history.ts';
+import { t } from './i18n.ts';
 import { type PostAction, postCardState } from './post-card.ts';
 import { runAction } from './result-actions.ts';
 import { lane, openInstagram, refusal, status, stopRun } from './run-state.ts';
@@ -40,9 +41,9 @@ export function pressPrimary(): void {
 export function PostCard() {
   const st = settings.value;
   const c = exportCache.value;
-  const t = now.value;
+  const time = now.value;
   const flavour = useSignal(GUARDED ? detectBrowserFlavour() : 'unknown');
-  const story = storyStatus(c?.sha256 ?? null, c?.docHash ?? null, t, historyRows.value);
+  const story = storyStatus(c?.sha256 ?? null, c?.docHash ?? null, time, historyRows.value);
   const state = postCardState({
     hasPhoto: image.value !== null,
     fontsReady: fontsReady.value,
@@ -59,12 +60,12 @@ export function PostCard() {
       if (s.phase !== 'finished') return { mode: s.mode, held: false };
       return { mode: s.mode, held: s.held ?? 'close', closeAt: s.closeAt ?? null };
     })(),
-    now: t,
+    now: time,
   });
   const handle = st.expectedAccount?.handle ?? null;
   const working = busy.value !== null;
   const lastPost = historyRows.value.find((r) => r.mode === 'post' && r.kind === 'posted');
-  const suggestTest = state.id === 'K13' && lastPost !== undefined && t - lastPost.at > STALE_POST_MS;
+  const suggestTest = state.id === 'K13' && lastPost !== undefined && time - lastPost.at > STALE_POST_MS;
   const refused = refusal.value;
   const n = notice.value;
 
@@ -105,19 +106,16 @@ export function PostCard() {
           data-stale={exportStale.value ? 'true' : 'false'}
         >
           {c ? (
-            <img
-              src={c.url}
-              alt="Your story, exactly as instapost will upload it"
-              title="This is the exact image instapost will upload."
-            />
+            <img src={c.url} alt={t('post.thumbAlt')} title={t('post.thumbTitle')} />
           ) : (
             <span class="thumb-empty" aria-hidden="true" />
           )}
-          {c && exportStale.value && image.value && <span class="thumb-note">Updating preview…</span>}
+          {c && exportStale.value && image.value && <span class="thumb-note">{t('post.updating')}</span>}
         </div>
         <div class="post-meta">
           <h2 id="post-title" class="post-title">
-            Your story{handle ? ` · ${at(handle)}` : ''}
+            {t('post.title')}
+            {handle ? ` · ${at(handle)}` : ''}
           </h2>
           {c && (
             <p class="hint">
@@ -143,7 +141,7 @@ export function PostCard() {
         disabled={state.disabled || working}
         onClick={() => act(state.action)}
       >
-        {busy.value === 'post' ? 'Preparing…' : state.label}
+        {busy.value === 'post' ? t('post.label.preparing') : state.label}
         {state.id === 'K13' && <kbd>⌘↵</kbd>}
       </button>
       <p class="post-links">
@@ -156,7 +154,7 @@ export function PostCard() {
               disabled={working || !fontsReady.value}
               onClick={() => void testRun()}
             >
-              Test run
+              {t('post.testRun')}
             </button>
             {' · '}
           </>
@@ -166,10 +164,10 @@ export function PostCard() {
           class="link"
           data-testid="post-phone"
           disabled={working || image.value === null}
-          title={shareSupported.value ? 'The share sheet (AirDrop)' : 'Saves the JPEG; AirDrop it from Finder'}
+          title={shareSupported.value ? t('post.phoneShareSheet') : t('post.phoneSaves')}
           onClick={() => void sendToPhone()}
         >
-          Send to phone…
+          {ACTION_LABEL.sendToPhone}
         </button>
         {' · '}
         <button
@@ -179,7 +177,7 @@ export function PostCard() {
           disabled={working || image.value === null}
           onClick={() => void saveCopy()}
         >
-          Save copy
+          {ACTION_LABEL.saveCopy}
         </button>
       </p>
       {refused && (

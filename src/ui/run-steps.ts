@@ -19,16 +19,17 @@ import type {
 } from '../core/handoff/state.ts';
 import {
   ERROR_COPY,
-  MARKED_NOT_POSTED,
-  MARKED_POSTED,
+  markedNotPosted,
+  markedPosted,
   pendingStepText,
-  SLOW_20_TEXT,
-  SLOW_60_TEXT,
   STEP_COPY,
   STEP_ORDER,
   type StepFacts,
-  UPLOADING_TEXT,
+  slow20Text,
+  slow60Text,
+  uploadingText,
 } from './copy.ts';
+import { t } from './i18n.ts';
 
 export type StepStatus = 'pending' | 'active' | 'waiting' | 'done' | 'failed' | 'unknown' | 'skipped';
 
@@ -81,7 +82,7 @@ function doneText(step: RunStep, src: StepSource): string {
   // AP-9: a run that ended as a Share test (a guarded build's post too) reads as one.
   const mode = src.result?.kind === 'shareTested' ? 'shareTest' : src.mode;
   // AP-3: the owner's mark is not Instagram's confirmation.
-  if (step === 'confirm' && src.result?.markedBy === 'owner' && src.result.kind === 'posted') return MARKED_POSTED;
+  if (step === 'confirm' && src.result?.markedBy === 'owner' && src.result.kind === 'posted') return markedPosted();
   if (mode === 'test' && copy.test) return copy.test;
   if (mode === 'shareTest' && copy.shareTest) return copy.shareTest;
   return copy.done(facts(src));
@@ -104,13 +105,13 @@ function activeView(step: RunStep, src: StepSource, order: readonly RunStep[], n
   let note: string | undefined;
   if (step === 'share' && src.phase === 'sharing') text = STEP_COPY.share.active;
   if (step === 'confirm') {
-    text = src.mode === 'shareTest' ? 'Waiting for Instagram’s upload…' : UPLOADING_TEXT;
+    text = src.mode === 'shareTest' ? t('step.waitingUpload') : uploadingText();
     const shared = src.steps?.share;
     const elapsed = shared !== undefined ? now - shared : 0;
-    if (elapsed >= 60_000) note = SLOW_60_TEXT;
-    else if (elapsed >= 20_000) note = SLOW_20_TEXT;
+    if (elapsed >= 60_000) note = slow60Text();
+    else if (elapsed >= 20_000) note = slow20Text();
   }
-  if (waiting) text = src.phase === 'manual' ? 'Your turn in the Instagram window…' : 'Waiting for your answer…';
+  if (waiting) text = src.phase === 'manual' ? t('step.yourTurn') : t('step.waitingAnswer');
   return {
     step,
     status: waiting ? 'waiting' : 'active',
@@ -127,16 +128,16 @@ function endView(step: RunStep, r: RunResult, src: StepSource): StepView {
       return {
         step,
         status: 'failed',
-        text: r.markedBy === 'owner' ? MARKED_NOT_POSTED : ERROR_COPY[r.code ?? 'UPLOAD_FAILED'].title,
+        text: r.markedBy === 'owner' ? markedNotPosted() : ERROR_COPY[r.code ?? 'UPLOAD_FAILED'].title,
       };
     case 'unknown':
       return {
         step,
         status: 'unknown',
-        text: r.code === 'TEST_LEAK' ? ERROR_COPY.TEST_LEAK.title : 'Couldn’t confirm',
+        text: r.code === 'TEST_LEAK' ? ERROR_COPY.TEST_LEAK.title : t('step.couldntConfirm'),
       };
     case 'stopped':
-      return { step, status: 'skipped', text: 'Stopped' };
+      return { step, status: 'skipped', text: t('step.stopped') };
     case 'tested':
       return { step, status: step === 'share' ? 'done' : 'skipped', text: doneText(step, src) };
     default:

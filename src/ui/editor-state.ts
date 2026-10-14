@@ -12,6 +12,8 @@ import type { TextMeasurer } from '../core/text/layout.ts';
 import { DEFAULT_FONT_ID } from '../raster/fonts.ts';
 import { canvasMeasurer } from '../raster/measurer-canvas.ts';
 import { importImage, type LoadedImage, releaseImage } from './assets.ts';
+import { ERROR_COPY } from './copy.ts';
+import { t } from './i18n.ts';
 import {
   moveTextXf,
   panImageXf,
@@ -116,9 +118,22 @@ export function setNotice(n: Notice | null): void {
   notice.value = n;
 }
 
-/** The message for a thrown error, with its code when it has one. */
+/** The editor's own error codes (strategy §3.10) have their copy; other errors show their message. */
+const EDITOR_CODES = ['FONT_NOT_LOADED', 'DECODE_FAILED', 'EXPORT_TOO_LARGE'] as const;
+const isEditorCode = (c: unknown): c is (typeof EDITOR_CODES)[number] =>
+  (EDITOR_CODES as readonly unknown[]).includes(c);
+
+/** The message for a thrown error, with its code when it has one (codes stay out of the text, ux.md §5). */
 export function errorNotice(err: unknown): Notice {
   const code = (err as { code?: unknown } | null)?.code;
+  if (isEditorCode(code)) {
+    const c = ERROR_COPY[code];
+    return {
+      kind: 'error',
+      text: t('notice.errorCopy', { title: c.title, body: c.body({ nothingPosted: true }) }),
+      code,
+    };
+  }
   const text = err instanceof Error ? err.message : String(err);
   return typeof code === 'string' ? { kind: 'error', text, code } : { kind: 'error', text };
 }
@@ -178,9 +193,8 @@ export async function loadImageFile(file: Blob): Promise<void> {
     });
     if (previous) releaseImage(previous);
     const hasText = (textLayer.value?.text.trim() ?? '') !== '';
-    if (!loaded.stored)
-      setNotice({ kind: 'info', text: 'The original could not be saved locally; editing still works.' });
-    else if (previous && hasText) setNotice({ kind: 'info', text: 'Photo replaced; your text is kept.' });
+    if (!loaded.stored) setNotice({ kind: 'info', text: t('notice.notStored') });
+    else if (previous && hasText) setNotice({ kind: 'info', text: t('notice.replaced') });
   } catch (err) {
     setNotice(errorNotice(err));
   } finally {

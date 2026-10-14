@@ -4,6 +4,7 @@
  */
 import { DEFAULT_FONT_ID, FONTS } from '../raster/fonts.ts';
 import { setText, setTextColor, setTextSize, setTextStyle, TEXT_SIZE_RANGE, textLayer } from './editor-state.ts';
+import { t } from './i18n.ts';
 import { textFocus } from './ui-state.ts';
 
 const num = (e: Event): number => Number((e.currentTarget as HTMLInputElement).value);
@@ -12,13 +13,13 @@ export function TextControls() {
   const tl = textLayer.value;
   return (
     <section class="rail-section" aria-labelledby="sec-text">
-      <h2 id="sec-text">Text</h2>
+      <h2 id="sec-text">{t('text.title')}</h2>
       <textarea
         data-testid="editor-text"
         id="editor-text"
         rows={2}
-        placeholder="Add text"
-        aria-label="Story text"
+        placeholder={t('text.placeholder')}
+        aria-label={t('text.aria')}
         value={tl?.text ?? ''}
         onFocus={() => {
           textFocus.value = true;
@@ -30,7 +31,7 @@ export function TextControls() {
       />
       <div class="row">
         <label class="field compact">
-          <span>Style</span>
+          <span>{t('text.style')}</span>
           <select
             data-testid="editor-text-style"
             value={tl?.style ?? 'plain'}
@@ -38,12 +39,12 @@ export function TextControls() {
               setTextStyle((e.currentTarget as HTMLSelectElement).value === 'highlight' ? 'highlight' : 'plain')
             }
           >
-            <option value="plain">Plain</option>
-            <option value="highlight">Highlight</option>
+            <option value="plain">{t('text.plain')}</option>
+            <option value="highlight">{t('text.highlight')}</option>
           </select>
         </label>
         <label class="field compact">
-          <span>Colour</span>
+          <span>{t('text.colour')}</span>
           <input
             type="color"
             value={tl?.color ?? '#ffffff'}
@@ -52,7 +53,7 @@ export function TextControls() {
         </label>
       </div>
       <label class="field">
-        <span>Size</span>
+        <span>{t('text.size')}</span>
         <input
           type="range"
           min={TEXT_SIZE_RANGE.min}
@@ -63,9 +64,7 @@ export function TextControls() {
         />
         <output>{tl?.sizePx ?? 72} px</output>
       </label>
-      <p class="hint">
-        {FONTS[DEFAULT_FONT_ID]?.label}, centred. Drag the text on the photo to place it. It becomes part of the image.
-      </p>
+      <p class="hint">{t('text.hint', { font: FONTS[DEFAULT_FONT_ID]?.label ?? '' })}</p>
     </section>
   );
 }
