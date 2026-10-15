@@ -136,3 +136,12 @@ Arc (Chromium 155) is the owner's browser; the first live run happened there on 
    - **Service worker**: `controls the page — normal on Instagram` is expected (Instagram's worker takes over every page within about a second, without touching its requests). `intercepts requests` means the worker handled the page's own requests, which could then leave without the mobile profile: the window is closed (`SW_INTERCEPTS`) and the mobile route needs a re-check.
    - **Screen** (strategy AM37): the screen orientation Instagram's composer reads after the portrait shim, and what the shim did, e.g. `portrait-primary (portrait shim installed; the screen itself is landscape)`, then `… (portrait shim in place)` on the composer. On the composer, `landscape-…`, `unknown (the portrait shim could not be installed)` or `… (portrait shim installed only after the composer had read the landscape screen)` mean the composer asks to rotate the device and hides Share: the run ends with `SCREEN_LANDSCAPE` (record it and stop). The row shows `screen.orientation.type` only; the autopilot also looks for Instagram's own rotate snackbar, so a composer that asks to rotate while the row says portrait still ends the run (`SCREEN_LANDSCAPE`, "rotate snackbar shown"): record it, Instagram reads the screen another way.
    - **Canvas**: the composer's canvas size once a photo is in it (C8).
+
+## Sharing a build with someone
+
+`pnpm run package [inpage|live|<dir>] [--build] [--to <shared folder>]` packages a live-key build (default: the in-page build) for use outside the Chrome Web Store:
+
+- It always writes `dist/instapost-<version>-<stamp>.zip` (gitignored), containing the extension, `INSTALL.txt` (install steps and the account-risk note) and `BUILD.txt`.
+- `--to <folder>`, e.g. a shared iCloud Drive or Dropbox folder, also syncs the unpacked extension there. The recipient loads that folder once with **Load unpacked** (Developer mode). After each new `pnpm run package -- --to <folder>`, they click ↻.
+- The manifest gets a `version_name` with the build stamp, so the extensions page shows which build is loaded. The key is unchanged, so the extension ID and the recipient's stored settings survive updates.
+- Guarded (dev/mock) builds are refused. A folder that is not empty and was not created by the script is never wiped.

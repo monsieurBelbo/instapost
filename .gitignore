@@ -14,3 +14,4 @@ captures/
 .vitest-attachments
 __screenshots__/
 .claude/worktrees/
+dist/

@@ -25,6 +25,7 @@
     "check:bundle": "node scripts/check-bundle.ts",
     "contract:check": "node tools/contract/check-ua.ts",
     "arc:use": "node scripts/arc-use.ts",
+    "package": "node scripts/package.ts",
     "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:browser && pnpm run build:all && pnpm run check:bundle && playwright test"
   },
   "dependencies": {
