@@ -85,6 +85,33 @@ export function checkRate(opens: readonly number[], now: number, caps: RateCaps,
 }
 
 /**
+ * Test runs (check, setup test, Share test) are exempt from the hourly and daily caps (owner,
+ * 2026-10-14): only the spacing applies, measured from the latest Instagram load of either kind.
+ * Real posts keep every cap, plus the same spacing after a test run.
+ */
+export function checkRateFor(
+  kind: 'post' | 'test',
+  opens: readonly number[],
+  lastTestOpen: number | null,
+  now: number,
+  caps: RateCaps,
+  day: LocalDay,
+): RateDecision {
+  const spacingFree = lastTestOpen === null ? null : lastTestOpen + caps.minSpacingMs;
+  if (kind === 'test') {
+    const latest = Math.max(lastTestOpen ?? Number.NEGATIVE_INFINITY, ...opens);
+    const freeAt = latest + caps.minSpacingMs;
+    return Number.isFinite(latest) && freeAt > now
+      ? { ok: false, code: 'RATE_LIMITED', rule: 'spacing', freeAt }
+      : { ok: true };
+  }
+  const d = checkRate(opens, now, caps, day);
+  if (spacingFree === null || spacingFree <= now) return d;
+  if (d.ok) return { ok: false, code: 'RATE_LIMITED', rule: 'spacing', freeAt: spacingFree };
+  return spacingFree > d.freeAt ? { ...d, rule: 'spacing', freeAt: spacingFree } : d;
+}
+
+/**
  * Drops entries that can no longer affect any cap (older than both the hour window and the
  * local day). The most recent open is always kept, so a stricter user spacing longer than an
  * hour still sees it. Returned in ascending order.

@@ -22,7 +22,7 @@ const ANDROID_155 =
 function ops(chMode: 'full' | 'uaOnly'): HeaderOperation[] {
   const rule = uaRule(42, 155, chMode);
   if (rule.action.type !== 'modifyHeaders') throw new Error('expected modifyHeaders');
-  return rule.action.requestHeaders;
+  return rule.action.requestHeaders ?? [];
 }
 
 describe('U7 device profile: rule 1001', () => {

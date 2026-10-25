@@ -1,5 +1,5 @@
 /**
- * Shared by arc:use and package: resolving a built extension folder, refusing anything that must not
+ * Shared by unpacked and package: resolving a built extension folder, refusing anything that must not
  * leave the sealed environment, and syncing a build into a folder this tooling owns.
  *
  * Only builds signed with keys/live.pub.b64 are accepted (guarded dev/mock builds never go into a real
@@ -11,18 +11,24 @@ import { keyPath } from '../../tools/chrome/ext-id.ts';
 
 export const REPO = resolve(import.meta.dirname, '..', '..');
 
-/** Named builds; anything else is taken as a folder path. */
+/**
+ * Named builds; anything else is taken as a folder path. The live build is the product (the in-page lane with
+ * the window lane as its fallback); `inpage`, the name of the former separate in-page build, is the same one.
+ */
 export const SOURCES: Record<string, string> = {
   live: '.output/chrome-mv3-live',
-  inpage: '.spikes/inpage-build/chrome-mv3-live-spike',
-  spike: '.spikes/inpage-build/chrome-mv3-live-spike',
+  inpage: '.output/chrome-mv3-live',
 };
+
+/** Whether `which` names the live build (so `--build` can rebuild it with pnpm run build:live). */
+export const isLiveSource = (which: string): boolean => SOURCES[which] === SOURCES.live;
 
 export interface Manifest {
   name?: string;
   version?: string;
   version_name?: string;
   key?: string;
+  minimum_chrome_version?: string;
 }
 
 export function fail(tool: string, message: string): never {

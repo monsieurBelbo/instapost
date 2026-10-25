@@ -34,8 +34,32 @@ export default defineConfig<InstapostE2eOptions>({
     reuseExistingServer: true,
   },
   projects: [
-    { name: 'mock', use: { artifact: '.output/chrome-mv3-mock' } },
-    { name: 'live', use: { artifact: '.output/chrome-mv3-live' } },
+    { name: 'mock', use: { artifact: '.output/chrome-mv3-mock' }, testIgnore: /inpage\.spec\.ts/ },
+    { name: 'live', use: { artifact: '.output/chrome-mv3-live' }, testIgnore: /inpage\.spec\.ts/ },
+    // The in-page lane (strategy §11 AM46–AM52, tests/e2e/inpage.spec.ts). On the mock artifact: its Developer
+    // toggles (rule 1020 or 1021 left out, the covered view, the U1 variant) exist in guarded builds only.
+    // No trace: its DOM snapshots evaluate in every frame and would give the engine frame user activation.
+    {
+      name: 'inpage',
+      use: { artifact: '.output/chrome-mv3-mock', actionTimeout: 15_000 },
+      testMatch: /inpage\.spec\.ts/,
+      grepInvert: /@live/,
+    },
+    // The same on Chrome for Testing 155, the Chromium Arc 155 is built on.
+    {
+      name: 'inpage-cft155',
+      testMatch: /inpage\.spec\.ts/,
+      grepInvert: /@live/,
+      use: { artifact: '.output/chrome-mv3-mock', executablePath: cftExecutable(), actionTimeout: 15_000 },
+    },
+    // A real post from the composer reaches the fake only on the live artifact (mock's static ruleset blocks it).
+    { name: 'inpage-live', use: { artifact: '.output/chrome-mv3-live' }, testMatch: /inpage\.spec\.ts/, grep: /@live/ },
+    {
+      name: 'inpage-live-cft155',
+      testMatch: /inpage\.spec\.ts/,
+      grep: /@live/,
+      use: { artifact: '.output/chrome-mv3-live', executablePath: cftExecutable() },
+    },
     {
       name: 'cft155-mock',
       grep: /@smoke/,

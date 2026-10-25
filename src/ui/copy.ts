@@ -10,7 +10,8 @@
  */
 import type { ErrorCode, HandoffMode, MsiteLockReason, RunResult, RunStep, UnknownWhy } from '../core/handoff/state.ts';
 import { MSITE_MAX_CSS_WIDTH } from '../core/ig-contract/contract.ts';
-import { intlLocale, type Lang, lang, liveTexts, type MsgKey, t, tk } from './i18n.ts';
+import { intlLocale, lang, liveTexts, type MsgKey, t, tk } from './i18n.ts';
+import { dayOf } from './i18n-core.ts';
 
 /** What a result or error button does (ResultCard maps them to actions). */
 export type ActionId =
@@ -92,26 +93,9 @@ export function shortDate(time: number): string {
   return new Date(time).toLocaleDateString(intlLocale(), { day: 'numeric', month: 'short' });
 }
 
-/**
- * How a language names the day inside "until …" / "detected …" (every caller of `dateTime` is such a
- * sentence): English `Tue 20 Oct`; Spanish `martes 20 de octubre` (after "hasta el" / "detectada el", an
- * abbreviated weekday is ungrammatical and `el mar` reads "the sea", ES-1).
- */
-const DAY_STYLE: Readonly<Record<Lang, 'short' | 'long'>> = { en: 'short', es: 'long' };
-
-/** The day for `dateTime`: Intl's own words and order, without the comma Intl puts after a long weekday. */
+/** The day for `dateTime` (i18n-core.ts `dayOf`: `Tue 20 Oct` / `martes 20 de octubre`, ES-1). */
 function dayText(time: number): string {
-  const d = new Date(time);
-  if (DAY_STYLE[lang.value] === 'short') {
-    return d.toLocaleDateString(intlLocale(), { weekday: 'short', day: 'numeric', month: 'short' });
-  }
-  const parts = new Intl.DateTimeFormat(intlLocale(), { weekday: 'long', day: 'numeric', month: 'long' }).formatToParts(
-    d,
-  );
-  return parts
-    .map((p, i) => (p.type === 'literal' && parts[i - 1]?.type === 'weekday' ? ' ' : p.value))
-    .join('')
-    .trim();
+  return dayOf(time, lang.value, intlLocale());
 }
 
 /** A date and time inside a sentence: `Tue 20 Oct, 14:05` / `martes 20 de octubre a las 14:05`. */

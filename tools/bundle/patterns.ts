@@ -85,6 +85,35 @@ export const AGENT_ONLY: readonly Pattern[] = [
   { label: 'createElement("script")', re: /createElement\(\s*["'`]script["'`]/i },
 ];
 
+/**
+ * docs/inpage.md §8.7, in the in-page content script (instagram-page.js, every build): the agent's bans, plus no
+ * click of any kind, no dispatched event, no network API, no HTML parsing into Instagram's document, none of
+ * the page's storage or cookies, and no message to the page. It reads Instagram's DOM to place its pill,
+ * appends its own host, and frames; nothing else (Meta-host URLs: contentScriptMetaUrls). It talks to the
+ * background only (runtime messages and ports), never to the page.
+ */
+export const CONTENT_SCRIPT_ONLY: readonly Pattern[] = [
+  ...AGENT_ONLY,
+  { label: '.click', re: /\.click\b/ },
+  { label: 'dispatchEvent', re: /dispatchEvent/ },
+  { label: 'innerHTML', re: /innerHTML/ },
+  { label: 'outerHTML', re: /outerHTML/ },
+  { label: 'insertAdjacentHTML', re: /insertAdjacentHTML/ },
+  { label: 'document.write', re: /document\.write/ },
+  { label: 'localStorage', re: /localStorage/ },
+  { label: 'sessionStorage', re: /sessionStorage/ },
+  { label: 'postMessage', re: /postMessage/ },
+];
+
+/** Every Meta-host URL in a content-script bundle other than https://www.instagram.com (with or without `/`). */
+export function contentScriptMetaUrls(text: string): string[] {
+  const re =
+    /https?:\/\/(?:[a-z0-9-]+\.)*(?:instagram\.com|facebook\.com|fbcdn\.net|cdninstagram\.com|threads\.net|meta\.com)[^\s"'`)]*/gi;
+  return [...text.matchAll(re)]
+    .map((m) => m[0])
+    .filter((u) => u !== 'https://www.instagram.com' && u !== 'https://www.instagram.com/');
+}
+
 /** Banned in background.js (SG11, ux.md IT2): no network requests of its own, and no clicks. */
 export const BACKGROUND_ONLY: readonly Pattern[] = [
   { label: '.click(', re: /\.click\(/ },
@@ -118,8 +147,8 @@ export const WRITE_STRINGS: readonly Pattern[] = [
 
 /**
  * F2 (2026-10-12): the guarded-only E2E hooks (src/platform/e2e-hooks.ts): the storage.local flags
- * `__e2eWindowQuirk` / `__e2eResizeTimeoutMs` / `__e2ePortraitShimOff` (AM37) and the window-quirk
- * names. Banned in every live bundle
+ * `__e2eWindowQuirk` / `__e2eResizeTimeoutMs` / `__e2ePortraitShimOff` (AM37), the in-page lane's Developer
+ * toggles `__e2eInpageToggles` (inpage-ui-spec.md FS14) and the window-quirk names. Banned in every live bundle
  * file; the mock background must carry E2E_HOOK_MARKERS, which proves the scan would find the shim.
  */
 export const E2E_HOOKS: readonly Pattern[] = [
@@ -134,6 +163,7 @@ export const E2E_HOOK_MARKERS: readonly string[] = [
   '__e2ePortraitShimOff',
   '__e2eDwellScale',
   '__e2eBudgetScale',
+  '__e2eInpageToggles',
 ];
 
 /** The fake's test hooks (`fake-…` test ids) in extension source. */
@@ -169,7 +199,8 @@ function callText(text: string, open: number): string | null {
 /** The shape of the one allowed MAIN-world call: the portrait shim's executeScript (scripting.ts). */
 const SHIM_CALL_REQUIRES: readonly Pattern[] = [
   { label: 'target:{tabId,…}', re: /target["']?\s*:\s*\{\s*["']?tabId/ },
-  { label: 'frameIds:[0]', re: /frameIds["']?\s*:\s*\[\s*0\s*\]/ },
+  // docs/inpage.md §3.11, §8.7: one frame, the top one (0) or one id the caller passes (the engine frame).
+  { label: 'frameIds:[<one frame>]', re: /frameIds["']?\s*:\s*\[\s*(?:0|[A-Za-z_$][\w$]*)\s*\]/ },
   { label: 'injectImmediately:true', re: /injectImmediately["']?\s*:\s*(?:!0|true)/ },
   { label: 'func:', re: /func["']?\s*:/ },
 ];
@@ -183,8 +214,9 @@ const SHIM_CALL_FORBIDS: readonly Pattern[] = [
  * AM37, background.js only: problems with its MAIN-world injections. Exactly one non-ISOLATED `world`
  * key is allowed (SH-4: however it is spelled; the ExecutionWorld enum's MAIN never), and it must be
  * the quoted literal `world:"MAIN"`, as an argument of an `executeScript(…)` call next to the shim's
- * known marker `injectImmediately` (no other call has it), targeting one tab's top frame
- * (`frameIds:[0]`), with a `func` and no `files`, `allFrames` or `documentIds`; and the shim's body
+ * known marker `injectImmediately` (no other call has it), targeting one frame of one tab (`frameIds:[0]`,
+ * or `frameIds:[<identifier>]`: the frame the caller passes, docs/inpage.md §8.7), with a `func` and no
+ * `files`, `allFrames` or `documentIds`; and the shim's body
  * (PORTRAIT_SHIM_MARKER) is in the file exactly once. An empty list means it is the portrait shim's
  * call and nothing else.
  */

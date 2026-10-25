@@ -89,8 +89,11 @@ export interface Knobs {
    * A security challenge in the middle of a session (FID-6): once the composer drew the photo
    * (`afterReady…`), or once the Share flow settled (`afterShare…`: after Instagram went home, or after
    * its "Upload failed." toast), by a full navigation to /challenge/ or (`…Spa`) an in-page pushState.
+   * `afterReadyTop` (F8, docs/inpage.md): 0.8 s after the photo was drawn, a background POST of the page
+   * answers with a `checkpoint_url` and msite's instajax error path sets `window.top.location.href` to it, so
+   * in a frame the challenge takes over the top-level (desktop) page, as Instagram's would.
    */
-  challenge: 'none' | 'afterReady' | 'afterReadySpa' | 'afterShare' | 'afterShareSpa';
+  challenge: 'none' | 'afterReady' | 'afterReadySpa' | 'afterReadyTop' | 'afterShare' | 'afterShareSpa';
   /**
    * What a desktop UA gets for /create/story/ (unverified, L4): a 302 to `/` (desktop has no story
    * entry), or the desktop shell rendered at that URL.
@@ -150,6 +153,47 @@ export interface Knobs {
   tray: 'ok' | 'fail' | 'throw';
   /** IF7: `on` (default): the page calls performance.clearResourceTimings() every 2 s and on image loads. */
   rtClear: 'on' | 'off';
+  /**
+   * docs/inpage.md F4, §9.1: the `X-Frame-Options` header on every www and i HTML document. `deny`
+   * (Instagram's, logged-out header check 2026-10-14): Chromium refuses to render the page in any frame;
+   * `sameorigin`: only www frames of www pages; `none`: no header.
+   */
+  xfo: 'deny' | 'sameorigin' | 'none';
+  /**
+   * F5: the HTML documents' CSP (`frame-src` and `child-src https://*.instagram.com`) has no
+   * `frame-ancestors` (`absent`, Instagram's). `none` / `self` add `frame-ancestors 'none'` / `'self'`
+   * (R27: a day Instagram adds one; dNR's XFO removal does not touch CSP).
+   */
+  frameAncestors: 'absent' | 'none' | 'self';
+  /**
+   * How a document request the server sees as framed (`sec-fetch-dest: iframe`, the browser's own value for
+   * the in-page engine frame, §3.7) is answered. `unavailable` (production; live, Arc, 2026-10-14, C15): the
+   * shell with Instagram's "Sorry, this page isn't available" and nothing else (no header, no +, no story
+   * input, no navigation, so no account link), HTTP 200 (the live status is unverified); `serve` (as any other
+   * document); `refuse` (a 403 page); `desktop` (the desktop shell whatever the UA); `login` (a 302 to
+   * /accounts/login/); `offhost` (a 302 off Instagram). With rule 1021 the engine frame's request says
+   * `sec-fetch-dest: document` and gets the normal shell, as on Instagram (live 2026-10-14/15), so these apply
+   * in-page only when a test leaves 1021 out (the guarded `fetchDest: iframe` toggle).
+   */
+  framed: 'unavailable' | 'serve' | 'refuse' | 'desktop' | 'login' | 'offhost';
+  /**
+   * The desktop shell's navigation (docs/inpage.md §3.2, §9.1; contract.md "Desktop Instagram's page").
+   * `auto` (production): Instagram's responsive left navigation, wide with labels (244 px) from 1264 CSS px,
+   * collapsed to icons (72 px) from 768 px, a bottom bar below; the collapsed one **widens to 244 px while
+   * hovered**, over the page, and collapses when the pointer leaves it (live, Arc, 2026-10-14/15; the
+   * breakpoints are approximate). `hover`: that collapsed, hover-expanding navigation at any width. `wide`
+   * (labels), `collapsed` (icons only, never expands), `bottomBar` (a bar along the bottom), `absent` (no
+   * navigation) or `renamed` (the wide navigation with randomised classes): fixed shapes for the entry's
+   * placement cases.
+   */
+  desktopNav: 'auto' | 'wide' | 'collapsed' | 'hover' | 'bottomBar' | 'absent' | 'renamed';
+  /**
+   * The desktop shell's appearance (inpage-ui-spec.md FT1, FX13), as Instagram signals it: `__fb-light-mode` /
+   * `__fb-dark-mode` on `<html>`, its `--ig-*` colour variables (bare `r, g, b` triplets) and the page's
+   * background. `auto` (production, Instagram's "Automatic" appearance; unverified): follows
+   * `prefers-color-scheme` and switches live when it changes; `light`; `dark`.
+   */
+  theme: 'auto' | 'light' | 'dark';
 }
 
 export type KnobName = keyof Knobs;
@@ -172,7 +216,7 @@ export const KNOB_CHOICES: { readonly [K in EnumKnob]: readonly Knobs[K][] } = {
   sw: ['claimOnRegister', 'none', 'desktopShell', 'claimLate'],
   auth: ['in', 'out', 'challenge', 'codeentry'],
   offhost: ['none', 'afterReady', 'firstLoad'],
-  challenge: ['none', 'afterReady', 'afterReadySpa', 'afterShare', 'afterShareSpa'],
+  challenge: ['none', 'afterReady', 'afterReadySpa', 'afterReadyTop', 'afterShare', 'afterShareSpa'],
   desktopComposer: ['302', 'desktopShell'],
   reload: ['none', 'afterReady'],
   locale: ['en', 'es'],
@@ -184,6 +228,11 @@ export const KNOB_CHOICES: { readonly [K in EnumKnob]: readonly Knobs[K][] } = {
   shareControl: ['v1', 'v2', 'missing', 'two'],
   tray: ['ok', 'fail', 'throw'],
   rtClear: ['on', 'off'],
+  xfo: ['deny', 'sameorigin', 'none'],
+  frameAncestors: ['absent', 'none', 'self'],
+  framed: ['unavailable', 'serve', 'refuse', 'desktop', 'login', 'offhost'],
+  desktopNav: ['auto', 'wide', 'collapsed', 'hover', 'bottomBar', 'absent', 'renamed'],
+  theme: ['auto', 'light', 'dark'],
 };
 
 /** The fixed answers of `rupload` and `configure` (besides `slow:<ms>`), for validation and the dashboard. */
@@ -235,6 +284,11 @@ export const KNOB_NAMES: readonly KnobName[] = [
   'marker',
   'slowMs',
   'hydrateMs',
+  'xfo',
+  'frameAncestors',
+  'framed',
+  'desktopNav',
+  'theme',
 ];
 
 /** Story input accept lists. `changed` adds HEIC (still images only), so C4 reports ACCEPT_DRIFT. */
@@ -289,6 +343,11 @@ export const DEFAULT_KNOBS: Readonly<Knobs> = Object.freeze<Knobs>({
   configure: 'ok',
   tray: 'ok',
   rtClear: 'on',
+  xfo: 'deny',
+  frameAncestors: 'absent',
+  framed: 'unavailable',
+  desktopNav: 'auto',
+  theme: 'auto',
 });
 
 /** baseline.json as committed (structural facts only, strategy §7.7). */
@@ -304,7 +363,9 @@ export const BASELINE: Baseline = baselineJson as unknown as Baseline;
  * the story input in the header (`input=present`), `sw=claimOnRegister`. AM37: `composerLandscapeCheck:
  * screen` makes the composer read the screen orientation. The autopilot facts (L18–L20): the menu's order
  * and size, the Share footer (`v2` = a linked Facebook destination) and the publish answer's content
- * type. Throws for facts the fake cannot model.
+ * type. The in-page facts (docs/inpage.md F4, F5; live 2026-10-14/15): `xFrameOptions`, `frameAncestors`,
+ * `framedDocument` (`unavailable` → `framed=unavailable`) and `desktopNav` (`hoverExpand` → `desktopNav=auto`).
+ * Throws for facts the fake cannot model.
  */
 export function deriveKnobs(b: Baseline): Knobs {
   const unmodelled = (fact: string): never => {
@@ -327,6 +388,14 @@ export function deriveKnobs(b: Baseline): Knobs {
   if (count !== 'unknown' && count !== 2 && count !== 3) unmodelled(`menuItemCount=${String(count)}`);
   const type = b.configureContentType ?? 'unknown';
   if (type !== 'unknown' && !/^application\/json\b/i.test(type)) unmodelled(`configureContentType=${type}`);
+  const xfo = xfoKnob(b.xFrameOptions);
+  if (xfo === null) unmodelled(`xFrameOptions=${String(b.xFrameOptions)}`);
+  const frameAncestors = frameAncestorsKnob(b.frameAncestors);
+  if (frameAncestors === null) unmodelled(`frameAncestors=${String(b.frameAncestors)}`);
+  const framed = b.framedDocument ?? 'unknown';
+  if (framed !== 'unavailable' && framed !== 'msite' && framed !== 'unknown') unmodelled(`framedDocument=${framed}`);
+  const nav = b.desktopNav ?? 'unknown';
+  if (nav !== 'hoverExpand' && nav !== 'static' && nav !== 'unknown') unmodelled(`desktopNav=${nav}`);
   return {
     classifier: 'ua',
     route: b.route === 'direct' ? 'direct' : 'homeOnly',
@@ -360,7 +429,31 @@ export function deriveKnobs(b: Baseline): Knobs {
     configure: 'ok',
     tray: 'ok',
     rtClear: 'on',
+    xfo: xfo as Knobs['xfo'],
+    frameAncestors: frameAncestors as Knobs['frameAncestors'],
+    // C15 (live 2026-10-14): a framed document gets "page isn't available"; unknown keeps the S12 assumption.
+    framed: framed === 'unavailable' ? 'unavailable' : 'serve',
+    // The hover-expanding responsive navigation (live 2026-10-14/15); unknown or static: the wide one.
+    desktopNav: nav === 'hoverExpand' ? 'auto' : 'wide',
+    theme: 'auto',
   };
+}
+
+/** F4: the baseline's `X-Frame-Options` (absent or `unknown`: no header, the fake's earlier shape). */
+function xfoKnob(v: Baseline['xFrameOptions']): Knobs['xfo'] | null {
+  if (v === undefined || v === null || v === 'unknown') return 'none';
+  if (v.toUpperCase() === 'DENY') return 'deny';
+  if (v.toUpperCase() === 'SAMEORIGIN') return 'sameorigin';
+  return null;
+}
+
+/** F5: the baseline's CSP `frame-ancestors` source list, null when the CSP has none. */
+function frameAncestorsKnob(v: Baseline['frameAncestors']): Knobs['frameAncestors'] | null {
+  if (v === undefined || v === null || v === 'unknown') return 'absent';
+  const t = v.trim().toLowerCase();
+  if (t === "'none'") return 'none';
+  if (t === "'self'") return 'self';
+  return null;
 }
 
 /**

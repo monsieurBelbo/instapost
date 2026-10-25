@@ -23,12 +23,19 @@ export interface SessionSchema {
   editorTabId: number;
   /** Pending hand-off timers as epoch-ms deadlines, so a restarted service worker re-arms them. */
   timers: Partial<Record<HandoffTimer, number>>;
+  /**
+   * FX14 (RL-2): a one-off notice for the editor tab the toolbar opens: the Instagram tab it was pressed on has
+   * no content script (the extension was updated and re-injecting failed). The editor shows it and removes it.
+   */
+  editorNotice: 'reloadInstagram';
 }
 
 export interface LocalSchema {
   settings: Settings;
   /** Epoch ms of composer opens (rate guard). */
   rateLog: number[];
+  /** Epoch ms of the latest test-run open (check, setup test, Share test): spacing only, no caps. */
+  lastTestOpen: number;
   /**
    * AM25: the kill-switch lock (epoch ms, null = none). Written only by the background, so no
    * editor settings write can race it away; settings() merges it into Settings.msiteLockedUntil.

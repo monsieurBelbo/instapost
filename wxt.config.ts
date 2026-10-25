@@ -10,10 +10,23 @@
  * - The final web-ext config is merged by WXT from several sources (web-ext.config.*,
  *   .webextrc, ~/.webextrc, …) with this file's `webExt` as the lowest-priority defaults.
  *   `config:resolved` therefore re-checks the merged result before any browser can start.
+ *
+ * The in-page lane (docs/inpage.md §13, inpage-ui-spec.md) is in every build: the window lane (the editor
+ * tab and its docked composer window) stays as the fallback. Its manifest footprint, checked by check-bundle
+ * T1 (each allowance documented there):
+ * - `content_scripts`: `instagram-page.js` on `https://www.instagram.com/*`, top frame only, at document_idle
+ *   (an unlisted script, not a WXT `*.content.ts`: see entrypoints/instagram-page.ts);
+ * - `web_accessible_resources`: the composer page (`composer.html`) and the chunks, assets and fonts it loads,
+ *   for www only, with `use_dynamic_url`;
+ * - the permissions `declarativeNetRequest` and `webRequest` (the observational frame watch).
+ * Guarded builds keep the static write-block ruleset; live ships none, and every test run (either lane) blocks
+ * writes with the per-run session rules. Every build ships `licenses/` (RL-3: libheif's LGPL-3.0 and GPL-3.0
+ * texts and a third-party notice; tools/bundle/licenses.ts), outside web_accessible_resources.
  */
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'wxt';
 import { blockRuleset, STATIC_RULESET_ID, STATIC_RULESET_PATH } from './src/core/ig-contract/rules.ts';
+import { LIBHEIF_LICENSE_SOURCE, LICENSE_FILES, thirdPartyNotice } from './tools/bundle/licenses.ts';
 import { assertDevRunnerSealed } from './tools/chrome/dev-seal.ts';
 import { assertSealed, DEV_PROFILE_DIR, readSpki, sealedWebExtArgs } from './tools/chrome/flags.ts';
 import { cftExecutable } from './tools/chrome/versions.ts';
@@ -32,6 +45,11 @@ const assertLiveAllowed = (m: Mode, command: string) => {
   if (m === 'live' && command === 'serve') throw new Error('live never runs under wxt dev');
   if (m === 'live' && process.env.INSTAPOST_LIVE !== '1') throw new Error('build live with INSTAPOST_LIVE=1');
 };
+
+/** The in-page content script's file name (an unlisted script; check-bundle names it too). */
+const CONTENT_SCRIPT = 'instagram-page.js';
+/** The composer page the content script frames (entrypoints/composer/index.html). */
+const COMPOSER_PAGE = 'composer.html';
 
 const spki = readSpki(); // null when .fake-ig/spki.txt is missing, mismatched or the cert expires within 3 days
 // HEADLESS=1 (chrome-launcher adds --headless): emulate the owner's screen too, or every popup
@@ -66,7 +84,9 @@ export default defineConfig({
         'scripting',
         'downloads',
         'declarativeNetRequestWithHostAccess',
-        ...(guarded ? ['declarativeNetRequest', 'declarativeNetRequestFeedback'] : []),
+        'declarativeNetRequest',
+        ...(guarded ? ['declarativeNetRequestFeedback'] : []),
+        'webRequest',
       ],
       host_permissions: ['https://www.instagram.com/*', 'https://i.instagram.com/*'],
       content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" },
@@ -81,6 +101,16 @@ export default defineConfig({
             },
           }
         : {}),
+      content_scripts: [
+        { matches: ['https://www.instagram.com/*'], js: [CONTENT_SCRIPT], run_at: 'document_idle', all_frames: false },
+      ],
+      web_accessible_resources: [
+        {
+          resources: [COMPOSER_PAGE, 'chunks/*', 'assets/*', 'fonts/*'],
+          matches: ['https://www.instagram.com/*'],
+          use_dynamic_url: true,
+        },
+      ],
     };
   },
   hooks: {
@@ -107,6 +137,11 @@ export default defineConfig({
         if (dest.startsWith('icons/') && !dest.startsWith(`icons/${icon}/`)) files.splice(i, 1);
       }
       if (guarded) files.push({ relativeDest: STATIC_RULESET_PATH, contents: JSON.stringify(blockRuleset(), null, 2) });
+      // RL-3: the HEIC worker's libheif (LGPL-3.0) ships with its licence texts and a notice (not web-accessible).
+      files.push(
+        { relativeDest: LICENSE_FILES.libheif, contents: readFileSync(LIBHEIF_LICENSE_SOURCE, 'utf8') },
+        { relativeDest: LICENSE_FILES.notice, contents: thirdPartyNotice() },
+      );
     },
   },
   // Fail closed: without the fake's certificate, `wxt` dev opens no browser at all.

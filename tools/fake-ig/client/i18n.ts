@@ -58,6 +58,10 @@ export interface Strings {
   challengeBody: string;
   noticeTitle: string;
   noticeBody: string;
+  /** C15: what Instagram serves a framed document request (`framed=unavailable`). */
+  unavailableTitle: string;
+  unavailableBody: string;
+  unavailableBack: string;
 }
 
 export const STRINGS: { readonly [L in Locale]: Strings } = {
@@ -103,6 +107,9 @@ export const STRINGS: { readonly [L in Locale]: Strings } = {
     challengeBody: 'Placeholder challenge page of the fake. It has no form.',
     noticeTitle: 'Before you continue',
     noticeBody: 'Placeholder interstitial page of the fake. It has no form.',
+    unavailableTitle: 'Sorry, this page isn’t available.',
+    unavailableBody: 'Placeholder of the fake: the page Instagram serves to a framed document request.',
+    unavailableBack: 'Back to Instagram',
   },
   es: {
     brand: 'instagram falso',
@@ -146,6 +153,9 @@ export const STRINGS: { readonly [L in Locale]: Strings } = {
     challengeBody: 'Página de verificación de ejemplo. No tiene formulario.',
     noticeTitle: 'Antes de continuar',
     noticeBody: 'Página intermedia de ejemplo. No tiene formulario.',
+    unavailableTitle: 'Lo sentimos, esta página no está disponible.',
+    unavailableBody: 'Página de ejemplo del falso: la que Instagram sirve a una solicitud de documento enmarcada.',
+    unavailableBack: 'Volver a Instagram',
   },
 };
 

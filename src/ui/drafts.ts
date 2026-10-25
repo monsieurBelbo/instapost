@@ -70,7 +70,7 @@ export async function loadDrafts(): Promise<void> {
 /** Recent photos: loads one as the story's photo. */
 export async function pickRecent(id: string): Promise<void> {
   const a = await getAsset(id);
-  if (a) await loadImageFile(a.blob);
+  if (a) await loadImageFile(a.blob, { assetId: a.id });
 }
 
 /** Continue draft: the saved doc with its original. */

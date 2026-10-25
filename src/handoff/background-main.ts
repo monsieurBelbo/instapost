@@ -3,18 +3,27 @@
  * platform wrappers and registers every listener synchronously, in the worker's first turn,
  * so Chrome can wake a stopped worker for any of them.
  *
- * - action click (and its shortcut, `commands._execute_action`, ⌥⇧S): open or focus the editor tab (its
- *   id lives in storage.session, so no `tabs` permission is needed);
+ * - action click (and its shortcut, `commands._execute_action`, ⌥⇧S): on an Instagram tab, toggle the in-page
+ *   composer there; anywhere else (or when that tab has no composer), open or focus the editor tab (its id
+ *   lives in storage.session, so no `tabs` permission is needed);
  * - the toolbar badge shows the run (`…`) and its result (✓ ! ?) until the editor has shown it;
  * - runtime.onConnect `handoff`: the editor port (our own extension pages only);
  * - runtime.onMessage: composer-agent messages (`agent/*`), each answered (protocol AgentReply);
  * - tabs.onUpdated: the composer tab's updates (hard reload, kill switch, AM2 re-probes);
  * - windows.onBoundsChanged: the composer window being resized by hand (W3, guided resize);
  * - windows.onRemoved, tabs.onRemoved, runtime.onStartup, runtime.onInstalled: cleanup, which
- *   removes session rules 1001–1019 idempotently. A popup left open by a reload, update or
- *   disable/enable of the extension is closed first, when the runner starts (runner.ts, AM22).
+ *   removes session rules 1001–1029 idempotently, except while an in-page run holds them (RS-1). A popup
+ *   left open by a reload, update or disable/enable of the extension is closed first, when the runner
+ *   starts (runner.ts, AM22). onInstalled (install, update) also re-injects the in-page content script into
+ *   Instagram tabs that were already open (FX14).
+ *
+ * The in-page lane (docs/inpage.md §13, every build): its listeners (src/inpage/background.ts); agent messages
+ * from an engine frame go to the in-page driver; the editor's `handoff/start` is refused while an in-page run
+ * is in progress (one run at a time across both lanes). The window lane (the editor tab and its docked
+ * composer window) is unchanged and stays as the fallback.
  */
 import { browser } from 'wxt/browser';
+import { type InpageLane, startInpageLane } from '../inpage/background.ts';
 import { badge } from '../platform/action.ts';
 import { dnr } from '../platform/dnr.ts';
 import { e2eRunnerHooks } from '../platform/e2e-hooks.ts';
@@ -108,10 +117,36 @@ export function createBackgroundRunner(log: Logger = consoleLogger): Runner {
   );
 }
 
+/** One run at a time across both lanes: the window lane does not start while an in-page run is in progress. */
+function inpageRefusesEditorMessage(msg: unknown, inpage: InpageLane): boolean {
+  const m = msg as { type?: unknown } | null;
+  return m?.type === 'handoff/start' && inpage.driver.busy();
+}
+
+/** Starts the in-page lane over the window lane's runner; unit tests of the window lane may pass none. */
+export type InpageStarter = (runner: Runner, log: Logger) => InpageLane | null;
+const startInpage: InpageStarter = (runner, log) => startInpageLane(runner, localState(GUARDED), log);
+
 /** Registers every listener; call synchronously from defineBackground's main. */
-export function startBackground(runner: Runner = createBackgroundRunner(), log: Logger = consoleLogger): Runner {
-  browser.action.onClicked.addListener(() => {
-    openOrFocusEditor().catch((err: unknown) => log.error('cannot open the editor', err));
+export function startBackground(
+  runner: Runner = createBackgroundRunner(),
+  log: Logger = consoleLogger,
+  inpageLane: InpageStarter = startInpage,
+): Runner {
+  const inpage = inpageLane(runner, log);
+
+  browser.action.onClicked.addListener((tab) => {
+    const open = () => openOrFocusEditor().catch((err: unknown) => log.error('cannot open the editor', err));
+    if (!inpage) {
+      void open();
+      return;
+    }
+    void inpage.actionClicked(tab).then((how) => {
+      if (how === 'toggled') return;
+      // FX14: an Instagram tab without the content script, even after re-injecting it: say to reload it.
+      if (how === 'reload') void session.set('editorNotice', 'reloadInstagram').catch(() => undefined);
+      void open();
+    });
   });
 
   browser.runtime.onConnect.addListener((port) => {
@@ -122,26 +157,45 @@ export function startBackground(runner: Runner = createBackgroundRunner(), log: 
       return;
     }
     const detach = runner.connectEditor((msg) => port.postMessage(msg));
-    port.onMessage.addListener((msg: unknown) => void runner.editorMessage(msg));
+    port.onMessage.addListener((msg: unknown) => {
+      if (inpage && inpageRefusesEditorMessage(msg, inpage)) {
+        log.warn('hand-off start refused: an in-page run is in progress');
+        return;
+      }
+      void runner.editorMessage(msg);
+    });
     port.onDisconnect.addListener(detach);
   });
 
   browser.runtime.onMessage.addListener((msg: unknown, sender, sendResponse: (reply: AgentReply) => void) => {
     if (!isAgentShaped(msg)) return false;
-    runner.agentMessage(msg, sender).then(sendResponse, () => sendResponse({ ok: false }));
+    const viaInpage = inpage ? inpage.agentMessage(msg, sender) : null;
+    (viaInpage ?? runner.agentMessage(msg, sender)).then(sendResponse, () => sendResponse({ ok: false }));
     return true;
   });
 
   tabs.onUpdated((tabId, update) => void runner.tabUpdated(tabId, update));
   windows.onBoundsChanged((windowId) => void runner.windowBoundsChanged(windowId));
-  tabs.onRemoved((tabId) => void runner.dispatch({ type: 'tabRemoved', tabId }));
-  windows.onRemoved((windowId) => void runner.dispatch({ type: 'windowRemoved', windowId }));
+  // RS-1: the window lane's idle cleanup removes the session rules 1001–1029 on every tab or window that closes.
+  // While an in-page run holds them (the window lane is idle then, one run at a time), they are that run's:
+  // its Android profile, its frame rules and a Share test's write block. The run removes them itself.
+  const inpageHoldsRules = () => inpage?.driver.busy() === true && runner.state().phase === 'idle';
+  tabs.onRemoved((tabId) => {
+    if (!inpageHoldsRules()) void runner.dispatch({ type: 'tabRemoved', tabId });
+  });
+  windows.onRemoved((windowId) => {
+    if (!inpageHoldsRules()) void runner.dispatch({ type: 'windowRemoved', windowId });
+  });
   const startup = () => {
-    void runner.dispatch({ type: 'startup' });
+    if (!inpageHoldsRules()) void runner.dispatch({ type: 'startup' });
     // ux.md IB5: exports older than 30 days go (History shows a placeholder for them).
     pruneExports(Date.now()).catch((err: unknown) => log.warn('export pruning failed', err));
   };
   browser.runtime.onStartup.addListener(startup);
-  browser.runtime.onInstalled.addListener(startup);
+  browser.runtime.onInstalled.addListener((details) => {
+    startup();
+    // FX14 (RL-2): Instagram tabs open before an install or update get the content script now.
+    if (inpage && (details.reason === 'install' || details.reason === 'update')) void inpage.reinject();
+  });
   return runner;
 }

@@ -14,12 +14,15 @@ import type { Baseline } from '../../src/core/ig-contract/contract.ts';
 import { androidReducedUa, CH_REMOVE } from '../../src/core/ig-contract/device-profile.ts';
 import { WRITE_URL_FILTERS } from '../../src/core/ig-contract/write-endpoints.ts';
 import { SW_FILES } from './bundle.ts';
+import { NAV_COLLAPSED_W, NAV_WIDE_W, navLayout, THEME_VARS, themeScheme } from './client/desktop-layout.ts';
 import { computeGeometry, coverCrop, fitAspect } from './client/geometry.ts';
 import { claimOnRegisterUrl } from './client/sw.ts';
 import {
   ACCEPT_CH,
   createCore,
+  documentHeaders,
   type FakeResponse,
+  FRAME_CSP,
   matchWriteFilter,
   normalizeHost,
   parseComposerView,
@@ -416,6 +419,126 @@ describe('U16 fake core: routes and shells', () => {
   });
 });
 
+describe('U16 fake core: framing headers and framed documents (docs/inpage.md F4–F6, §9.1)', () => {
+  const IFRAME = { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'same-origin' };
+
+  it('the baseline gives XFO DENY, no frame-ancestors, framed=unavailable, the hover-expanding nav and the auto theme', () => {
+    expect(deriveKnobs(BASELINE)).toMatchObject({
+      xfo: 'deny',
+      frameAncestors: 'absent',
+      framed: 'unavailable',
+      desktopNav: 'auto',
+      theme: 'auto',
+    });
+    expect(deriveKnobs({ ...BASELINE, xFrameOptions: null })).toMatchObject({ xfo: 'none' });
+    expect(deriveKnobs({ ...BASELINE, xFrameOptions: 'SAMEORIGIN' })).toMatchObject({ xfo: 'sameorigin' });
+    expect(deriveKnobs({ ...BASELINE, frameAncestors: "'self'" })).toMatchObject({ frameAncestors: 'self' });
+    expect(() => deriveKnobs({ ...BASELINE, frameAncestors: 'https://x.example' })).toThrow(/not modelled/);
+    // C15: msite served to a framed request, or unknown (the S12 assumption), is `serve`.
+    expect(deriveKnobs({ ...BASELINE, framedDocument: 'msite' }).framed).toBe('serve');
+    expect(deriveKnobs({ ...BASELINE, framedDocument: 'unknown' }).framed).toBe('serve');
+    const { framedDocument: _f, desktopNav: _n, ...older } = BASELINE;
+    expect(deriveKnobs(older as Baseline)).toMatchObject({ framed: 'serve', desktopNav: 'wide' });
+    expect(deriveKnobs({ ...BASELINE, desktopNav: 'static' }).desktopNav).toBe('wide');
+    expect(deriveKnobs({ ...BASELINE, desktopNav: 'unknown' }).desktopNav).toBe('wide');
+    expect(() =>
+      deriveKnobs({ ...BASELINE, framedDocument: 'blank' as unknown as Baseline['framedDocument'] }),
+    ).toThrow(/not modelled/);
+    expect(() => deriveKnobs({ ...BASELINE, desktopNav: 'top' as unknown as Baseline['desktopNav'] })).toThrow(
+      /not modelled/,
+    );
+  });
+
+  it('the in-page facts come from the live runs of 2026-10-14/15', () => {
+    expect(BASELINE).toMatchObject({ xFrameOptions: 'DENY', framedDocument: 'unavailable', desktopNav: 'hoverExpand' });
+    expect(BASELINE.provenance?.framedDocument).toMatch(/^live 2026-10-14\b.*Sorry, this page isn't available/);
+    expect(BASELINE.provenance?.framedDocument).toMatch(/Sec-Fetch-Dest: document/);
+    expect(BASELINE.provenance?.desktopNav).toMatch(/^live 2026-10-14\/15\b.*widens while hovered/);
+    expect(BASELINE.provenance?.xFrameOptions).toMatch(/live 2026-10-14\/15/);
+    expect(BASELINE.provenance?.frameAncestors).toMatch(/live 2026-10-14\/15/);
+  });
+
+  it('every HTML document on www carries XFO DENY, the F5 CSP and COOP; the dashboard and JSON do not', () => {
+    const { get, send } = setup();
+    for (const r of [get('/'), get('/', MAC), get('/accounts/login/'), get('/challenge/')]) {
+      expect(r.headers['x-frame-options']).toBe('DENY');
+      expect(r.headers['content-security-policy']).toBe(FRAME_CSP);
+      expect(r.headers['content-security-policy']).not.toContain('frame-ancestors');
+      expect(r.headers['cross-origin-opener-policy']).toBe('same-origin-allow-popups');
+    }
+    expect(send('GET', WWW, '/__fake__/').headers['x-frame-options']).toBeUndefined();
+    expect(get('/fake-static/beacon').headers['x-frame-options']).toBeUndefined();
+  });
+
+  it('xfo and frameAncestors knobs', () => {
+    const { get, store } = setup();
+    store.setKnobs({ xfo: 'none', frameAncestors: 'none' });
+    let r = get('/');
+    expect(r.headers['x-frame-options']).toBeUndefined();
+    expect(r.headers['content-security-policy']).toBe(`${FRAME_CSP}; frame-ancestors 'none'`);
+    store.setKnobs({ xfo: 'sameorigin', frameAncestors: 'self' });
+    r = get('/');
+    expect(r.headers['x-frame-options']).toBe('SAMEORIGIN');
+    expect(r.headers['content-security-policy']).toBe(`${FRAME_CSP}; frame-ancestors 'self'`);
+    expect(documentHeaders(DEFAULT_KNOBS)['x-frame-options']).toBe('DENY');
+  });
+
+  it('C15 (framed=unavailable, the default): a framed document gets "page isn\'t available"; the forged document the normal shell', () => {
+    const { get, store } = setup();
+    const framed = get('/', ANDROID, IFRAME);
+    expect(framed.status).toBe(200);
+    const boot = bootOf(text(framed));
+    expect(boot.shell).toBe('msite');
+    expect(boot.unavailable).toBe(true);
+    // It is still Instagram's shell (the UA JSON, the framing headers): only its content is the error page.
+    expect(uaOf(text(framed)).is_mobile).toBe(true);
+    expect(framed.headers['x-frame-options']).toBe('DENY');
+    // Rule 1021's `Sec-Fetch-Dest: document` on the same request: msite as for a top-level load (live).
+    const forged = get('/', ANDROID, { ...IFRAME, 'sec-fetch-dest': 'document' });
+    expect(bootOf(text(forged)).unavailable).toBeUndefined();
+    expect(bootOf(text(forged)).shell).toBe('msite');
+    expect(bootOf(text(get('/'))).unavailable).toBeUndefined();
+    // A desktop UA in a frame (another tab's frame, without rule 1001) gets it too.
+    const desk = bootOf(text(get('/', MAC, IFRAME)));
+    expect(desk).toMatchObject({ shell: 'desktop', unavailable: true });
+    // The request log keeps what told the server it was framed.
+    expect(store.requests().filter((r) => r.fetch['sec-fetch-dest'] === 'iframe')).toHaveLength(2);
+  });
+
+  it('framed=serve answers a framed document like any other', () => {
+    const { get, store } = setup();
+    store.setKnobs({ framed: 'serve' });
+    const r = get('/', ANDROID, IFRAME);
+    expect(r.status).toBe(200);
+    expect(bootOf(text(r)).shell).toBe('msite');
+    expect(bootOf(text(r)).unavailable).toBeUndefined();
+  });
+
+  it('framed=refuse, desktop, login and offhost apply to framed document requests only', () => {
+    const { get, store } = setup();
+    store.setKnobs({ framed: 'refuse' });
+    expect(get('/', ANDROID, IFRAME).status).toBe(403);
+    expect(get('/').status).toBe(200);
+    store.setKnobs({ framed: 'desktop' });
+    const desk = text(get('/', ANDROID, IFRAME));
+    expect(bootOf(desk).shell).toBe('desktop');
+    expect(uaOf(desk).is_mobile).toBe(false);
+    expect(bootOf(text(get('/'))).shell).toBe('msite');
+    store.setKnobs({ framed: 'login' });
+    expect(get('/', ANDROID, IFRAME).headers.location).toBe('/accounts/login/?next=%2F');
+    store.setKnobs({ framed: 'offhost' });
+    expect(get('/', ANDROID, IFRAME).headers.location).toMatch(/^https:\/\/accountscenter\.instagram\.com/);
+  });
+
+  it('the request log keeps the Referer (E55)', () => {
+    const { get, store } = setup();
+    get('/', ANDROID, { ...IFRAME, referer: 'https://www.instagram.com/' });
+    const last = store.requests().at(-1);
+    expect(last?.referer).toBe('https://www.instagram.com/');
+    expect(last?.fetch['sec-fetch-dest']).toBe('iframe');
+  });
+});
+
 describe('U16 fake core: knobs in the shell', () => {
   it('marker=on puts the marker meta in the head; marker=off removes it', () => {
     const { get, store } = setup();
@@ -534,6 +657,7 @@ describe('U16 fake core: request log', () => {
         ch: {},
         fetch: {},
         origin: null,
+        referer: null,
         viaSw: false,
       });
     }
@@ -1122,6 +1246,57 @@ describe('U16 fake core: composer views and the story session (AM37)', () => {
       [false, true],
     ]);
     expect(stories[0]?.meta.screenOrientation).toBe('portrait-primary');
+  });
+});
+
+describe('U16 fake desktop shell: the responsive, hover-expanding navigation and the theme', () => {
+  const at = (w: number) => (q: string) => {
+    const min = /min-width: (\d+)px/.exec(q);
+    const max = /max-width: (\d+)px/.exec(q);
+    return min ? w >= Number(min[1]) : max ? w <= Number(max[1]) : false;
+  };
+
+  it('desktopNav=auto: wide from 1264 px, collapsed and hover-expanding from 768, a bottom bar below', () => {
+    expect(navLayout('auto', at(1440))).toBe('wide');
+    expect(navLayout('auto', at(1264))).toBe('wide');
+    expect(navLayout('auto', at(1263))).toBe('hover');
+    expect(navLayout('auto', at(1030))).toBe('hover');
+    expect(navLayout('auto', at(768))).toBe('hover');
+    expect(navLayout('auto', at(767))).toBe('bottomBar');
+    // The fixed shapes ignore the width.
+    expect(navLayout('hover', at(1920))).toBe('hover');
+    expect(navLayout('renamed', at(800))).toBe('wide');
+    for (const k of ['wide', 'collapsed', 'bottomBar', 'absent'] as const) expect(navLayout(k, at(1000))).toBe(k);
+    expect(NAV_WIDE_W).toBe(244);
+    expect(NAV_COLLAPSED_W).toBe(72);
+  });
+
+  it('theme: auto follows prefers-color-scheme; the variables are bare r, g, b triplets as Instagram sets them', () => {
+    expect(themeScheme('auto', true)).toBe('dark');
+    expect(themeScheme('auto', false)).toBe('light');
+    expect(themeScheme('dark', false)).toBe('dark');
+    expect(themeScheme('light', true)).toBe('light');
+    for (const scheme of ['light', 'dark'] as const) {
+      for (const v of Object.values(THEME_VARS[scheme])) expect(v).toMatch(/^\d{1,3}, \d{1,3}, \d{1,3}$/);
+      expect(Object.keys(THEME_VARS[scheme])).toEqual(
+        expect.arrayContaining([
+          '--ig-primary-background',
+          '--ig-secondary-text',
+          '--ig-separator',
+          '--ig-elevated-background',
+        ]),
+      );
+    }
+    expect(THEME_VARS.dark['--ig-primary-background']).toBe('0, 0, 0');
+    expect(parseKnobPatch({ theme: 'dark' })).toEqual({ ok: true, patch: { theme: 'dark' } });
+    expect(parseKnobPatch({ theme: 'sepia' }).ok).toBe(false);
+  });
+
+  it('desktopNav, theme and framed reach the desktop shell unchanged', () => {
+    const { get, store } = setup();
+    const knobs = store.setKnobs({ desktopNav: 'hover', theme: 'dark', framed: 'serve' });
+    expect(bootOf(text(get('/', MAC))).knobs).toEqual(knobs);
+    expect(bootOf(text(get('/', MAC))).shell).toBe('desktop');
   });
 });
 

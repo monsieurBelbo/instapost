@@ -616,7 +616,7 @@ Industry precedent: Sprout Social's "Mobile Publisher" and Buffer's notification
 | mp4-muxer | 5.2.2, 2025-07-02 | — | **Deprecated**; do not use |
 | @remotion/webcodecs | 4.0.534 | — | Being phased out in favour of Mediabunny |
 
-Licences do not matter for an unpublished personal build. Keep ffmpeg.wasm optional so the bundle never becomes GPL by accident.
+Licences matter once a build is shared: every shipped build carries `licenses/THIRD-PARTY.txt` (and libheif's LGPL text, since the HEIC worker bundles libheif-js). Keep ffmpeg.wasm optional so the bundle never becomes GPL by accident.
 
 ---
 

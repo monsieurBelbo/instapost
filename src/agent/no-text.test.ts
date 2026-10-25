@@ -1,9 +1,10 @@
 /**
- * U31 (strategy §11 AM45, live checklist L21; docs/contract.md § "Instagram in Spanish"): the autopilot
+ * U31 (strategy §11 AM45, AM46, live checklist L21; docs/contract.md § "Instagram in Spanish"): the autopilot
  * works whatever language Instagram's UI is in, because nothing that decides reads Instagram's visible text,
  * an ARIA label, an alt text, a title or the page's language. This scans the agent's sources and the
- * background's decision code for the DOM APIs that would read them; the two known reads are listed with why
- * they are language-free. A new text read fails here and needs an entry in contract.md first.
+ * background's decision code (since AM46 the in-page lane's too: its driver, frame watch, entry anchor)
+ * for the DOM APIs that would read them; the known reads are listed with why they are language-free. A new
+ * text read fails here and needs an entry in contract.md first.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,6 +43,11 @@ const ALLOWED: readonly { file: string; line: RegExp; why: string }[] = [
     line: /lang: UI_LANG_SETTINGS\.includes\(s\.lang as UiLangSetting\)/,
     why: 'the extension’s own language setting (storage.local settings.lang, AM44), not Instagram’s page',
   },
+  {
+    file: 'src/inpage/background.ts',
+    line: /lang: resolveLang\(settings\?\.lang \?\? 'auto', browserLanguage\(\)\)/,
+    why: 'the in-page entry’s language: the extension’s own setting for the content script (AM48), not Instagram’s page',
+  },
 ];
 
 /** Source files (no tests, no browser-test helpers) under `dir`. */
@@ -65,6 +71,12 @@ describe('U31 the autopilot reads no text (Instagram in any language, L21)', () 
     ...sources('src/core/handoff'),
     ...sources('src/core/ig-contract'),
     ...sources('src/handoff'),
+    // AM46: the in-page lane decides the same way (its driver, the frame's kill switch, the entry's anchor).
+    ...sources('src/core/inpage'),
+    'src/inpage/driver.ts',
+    'src/inpage/frame-watch.ts',
+    'src/inpage/anchor.ts',
+    'src/inpage/background.ts',
   ];
 
   it('scans the agent and the decision code', () => {
@@ -73,6 +85,7 @@ describe('U31 the autopilot reads no text (Instagram in any language, L21)', () 
     }
     expect(files).toContain('src/core/handoff/reducer.ts');
     expect(files).toContain('src/core/ig-contract/account.ts');
+    expect(files).toContain('src/core/inpage/frame-verdict.ts');
   });
 
   it('no visible text, ARIA label, alt, title or language is read, except the listed language-free reads', () => {

@@ -767,13 +767,21 @@ export interface SenderLike {
   id?: string;
   tab?: { id?: number };
   frameId?: number;
+  /** Chrome 106+: the sending document (docs/inpage.md §8.2). */
+  documentId?: string;
   url?: string;
+  /** Chrome 80+: the sending document's origin. Arc reports an unexpected `url` for subframes. */
+  origin?: string;
 }
 
 /** The active hand-off as the background sees it. */
 export interface ActiveAgentSession {
   runtimeId: string;
   tabId: number;
+  /** The agent's frame: 0 (the window lane's popup, the default) or the in-page engine frame (U34). */
+  frameId?: number;
+  /** Once known (the injection's result), only this document may speak (docs/inpage.md §8.2, U34). */
+  documentId?: string;
   handoffId: HandoffId;
   nonce: Nonce;
   phase: SessionPhase;
@@ -823,12 +831,18 @@ export type AgentRejection =
   | 'sender-id'
   | 'tab'
   | 'frame'
+  | 'document'
   | 'origin'
   | 'handoff'
   | 'nonce'
   | 'phase';
 
 export type AgentAcceptance = { ok: true; msg: AgentToBackground } | { ok: false; reason: AgentRejection };
+
+/** The sending document's origin: the browser's own `origin`, else derived from its `url`. */
+export function senderOrigin(sender: SenderLike): string | null {
+  return sender.origin ?? originOf(sender.url);
+}
 
 function originOf(url: string | undefined): string | null {
   if (url === undefined) return null;
@@ -863,9 +877,10 @@ function normalizeAgentMessage(m: AgentToBackground): AgentToBackground {
 
 /**
  * Accepts an agent message only when all hold: valid shape; an active session; `sender.id === runtimeId`;
- * `sender.tab.id === tabId` and `sender.frameId === 0`; `new URL(sender.url).origin === IG_ORIGIN`;
- * handoffId and nonce match; the phase allows the message type (and, for a fact, its kind). Checks run in
- * that order, so `reason` names the first one that failed. Tested by U12.
+ * `sender.tab.id === tabId` and `sender.frameId` is the session's frame (0 unless the session names the
+ * in-page engine frame); the session's `documentId`, once known, is the sender's; `new URL(sender.url).origin
+ * === IG_ORIGIN`; handoffId and nonce match; the phase allows the message type (and, for a fact, its kind).
+ * Checks run in that order, so `reason` names the first one that failed. Tested by U12 and U34.
  */
 export function acceptAgentMessage(
   raw: unknown,
@@ -876,8 +891,11 @@ export function acceptAgentMessage(
   if (active === null) return { ok: false, reason: 'no-session' };
   if (sender.id === undefined || sender.id !== active.runtimeId) return { ok: false, reason: 'sender-id' };
   if (sender.tab?.id === undefined || sender.tab.id !== active.tabId) return { ok: false, reason: 'tab' };
-  if (sender.frameId !== 0) return { ok: false, reason: 'frame' };
-  if (originOf(sender.url) !== IG_ORIGIN) return { ok: false, reason: 'origin' };
+  if (sender.frameId !== (active.frameId ?? 0)) return { ok: false, reason: 'frame' };
+  if (active.documentId !== undefined && sender.documentId !== active.documentId) {
+    return { ok: false, reason: 'document' };
+  }
+  if (senderOrigin(sender) !== IG_ORIGIN) return { ok: false, reason: 'origin' };
   if (raw.handoffId !== active.handoffId) return { ok: false, reason: 'handoff' };
   if (!sameSecret(raw.nonce, active.nonce)) return { ok: false, reason: 'nonce' };
   if (!AGENT_MESSAGE_PHASES[raw.type].includes(active.phase)) return { ok: false, reason: 'phase' };

@@ -491,6 +491,28 @@ export interface Baseline {
   /** C13 (L20): the content type of the publish request's 2xx answer (`application/json` expected). */
   configureContentType?: string;
   /**
+   * docs/inpage.md F4 (logged-out header check 2026-10-14): the `X-Frame-Options` of www's HTML documents,
+   * for the desktop and the Android UA alike; null when absent.
+   */
+  xFrameOptions?: 'DENY' | 'SAMEORIGIN' | null | 'unknown';
+  /** F5: the CSP's `frame-ancestors` source list, null when the CSP has none (Instagram's has none). */
+  frameAncestors?: string | null | 'unknown';
+  /** F6: `Cross-Origin-Opener-Policy` of www's HTML documents (top-level documents only). */
+  coop?: string | null | 'unknown';
+  /**
+   * C15 (live, Arc, 2026-10-14): what www serves a logged-in document request carrying
+   * `Sec-Fetch-Dest: iframe` (the browser's own value for the engine frame): `unavailable` ("Sorry, this page
+   * isn't available": no header, no story input, no account link) or `msite` (the normal shell). With
+   * `Sec-Fetch-Dest: document` (rule 1021) it served msite.
+   */
+  framedDocument?: 'unavailable' | 'msite' | 'unknown';
+  /**
+   * Desktop's left navigation (contract.md "Desktop Instagram's page", live 2026-10-14/15): `hoverExpand`
+   * (wide with labels on wide windows, collapsed to icons below, and the collapsed one widens while hovered)
+   * or `static` (it never widens under the pointer).
+   */
+  desktopNav?: 'hoverExpand' | 'static' | 'unknown';
+  /**
    * Where each non-default fact comes from (a live run, a code reading, research), e.g.
    * `"route": "live run 2026-10-12 …"`. Documentation only; nothing reads it.
    */

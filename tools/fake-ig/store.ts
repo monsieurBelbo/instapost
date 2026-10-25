@@ -23,6 +23,8 @@ export interface SeenHeaders {
   /** Every `sec-fetch-*` header received. */
   fetch: Record<string, string>;
   origin: string | null;
+  /** docs/inpage.md E55: the Referer (the engine frame's must be the origin only). */
+  referer: string | null;
   /** Answered from the desktopShell service worker's own context. */
   viaSw: boolean;
 }
@@ -261,6 +263,7 @@ export function createStore(opts: StoreOptions = {}): Store {
         ch: upload.ch,
         fetch: upload.fetch,
         origin: upload.origin,
+        referer: upload.referer ?? null,
         viaSw: upload.viaSw,
         id,
         t,

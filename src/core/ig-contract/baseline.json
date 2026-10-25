@@ -24,6 +24,11 @@
   "menuItemCount": "unknown",
   "shareFooter": "unknown",
   "configureContentType": "unknown",
+  "xFrameOptions": "DENY",
+  "frameAncestors": null,
+  "coop": "same-origin-allow-popups",
+  "framedDocument": "unavailable",
+  "desktopNav": "hoverExpand",
   "provenance": {
     "isMobileKeyFound": "live run 2026-10-12 (Arc 155, secondary account, live build): C1 pass, is_mobile true in the InstagramUserAgent JSON",
     "route": "live run 2026-10-12: the composer landed on / after the hard reload (route homeOnly); logged-out code reading 2026-10-12 (F3): /create/story/ without media lands on /, which is the normal outcome, not drift",
@@ -38,6 +43,11 @@
     "menuOrder": "unknown until L18: the + menu module (PolarisMobileCreationMenuPopover) is not readable logged out; the fake models both orders (menuOrder knob) and defaults to Post first",
     "menuItemCount": "logged-out code reading 2026-10-13 (autopilot spike): PolarisMobileCreationNavItem passes the popover exactly two actions (handleCameraIconClick = Story, handlePostIconClick = Post); the rendered count is unverified until L18",
     "shareFooter": "logged-out code reading 2026-10-13: the composer renders ShareFooter (a button) when facebookDestinationId is null, else ShareFooterV2 (a role=button with the avatar, plus a Facebook badge when automatic crossposting is on); which one this account gets is L18",
-    "configureContentType": "autopilot spike 2026-10-13 (sealed CfT 155 and Chromium 156, a local server): resource timing exposes contentType application/json for a JSON answer; Instagram's own answer is L20"
+    "configureContentType": "autopilot spike 2026-10-13 (sealed CfT 155 and Chromium 156, a local server): resource timing exposes contentType application/json for a JSON answer; Instagram's own answer is L20",
+    "xFrameOptions": "logged-out header check 2026-10-14 (docs/inpage.md F4): https://www.instagram.com/ answers X-Frame-Options: DENY for the desktop UA and the Android UA; live 2026-10-14/15 (Arc 155, owner's secondary account, logged in): the engine frame rendered only with rule 1020 removing it",
+    "frameAncestors": "logged-out header check 2026-10-14 (F5): the Content-Security-Policy lists *.instagram.com in frame-src and child-src and has no frame-ancestors; live 2026-10-14/15: removing XFO alone was enough, so no frame-ancestors logged in either",
+    "coop": "logged-out header check 2026-10-14 (F6): Cross-Origin-Opener-Policy same-origin-allow-popups (ignored in a frame)",
+    "framedDocument": "live 2026-10-14 (Arc 155, owner's secondary account, logged in; contract.md C15): with XFO removed and the browser's own Sec-Fetch-Dest: iframe, the frame showed Instagram's 'Sorry, this page isn't available' instead of msite; with rule 1021 (Sec-Fetch-Dest: document) msite, logged in and mobile; checks, test runs, a Share test and posts worked that way 2026-10-14/15. The unavailable page's HTTP status was not recorded (the fake answers 200, the harder case)",
+    "desktopNav": "live 2026-10-14/15 (Arc 155, owner's secondary account; contract.md 'Desktop Instagram's page'): the collapsed left navigation widens while hovered and collapses when the pointer leaves it, which made the first entry flicker and unclickable; wide with labels at the owner's large window. The breakpoints (1264 and 768 CSS px) are approximate, from Instagram's desktop CSS reading, not measured"
   }
 }

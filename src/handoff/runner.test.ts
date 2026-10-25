@@ -46,6 +46,8 @@ import type { ProbeReport } from '../core/ig-contract/contract.ts';
 import { REHEARSAL_FIRST_ID, SESSION_RULE_IDS } from '../core/ig-contract/rules.ts';
 import { COMPOSER_URL } from '../core/ig-contract/urls.ts';
 import { WRITE_URL_FILTERS } from '../core/ig-contract/write-endpoints.ts';
+import type { InpageLane } from '../inpage/background.ts';
+import type { InpageDriver } from '../inpage/driver.ts';
 import { badge } from '../platform/action.ts';
 import { dnr } from '../platform/dnr.ts';
 import { scripting } from '../platform/scripting.ts';
@@ -1331,7 +1333,12 @@ describe('U11 cleanup: onStartup, onInstalled, windows.onRemoved and tabs.onRemo
     const onConnect = stubEvent();
     // fakeBrowser does not implement runtime.onConnect.
     (fakeBrowser.runtime as unknown as { onConnect: unknown }).onConnect = onConnect;
-    const runner = startBackground(production ? createBackgroundRunner(quietLog) : (await boot()).runner, quietLog);
+    // The window lane alone: the in-page lane (src/inpage/background.ts) has its own tests (U36).
+    const runner = startBackground(
+      production ? createBackgroundRunner(quietLog) : (await boot()).runner,
+      quietLog,
+      () => null,
+    );
     await runner.ready();
     await runner.settled();
     since();
@@ -1368,6 +1375,69 @@ describe('U11 cleanup: onStartup, onInstalled, windows.onRemoved and tabs.onRemo
       { removeRuleIds: SESSION_IDS },
       { removeRuleIds: SESSION_IDS },
     ]);
+  });
+
+  /** A stand-in for the in-page lane (src/inpage/background.ts has its own tests): busy or not, and its calls. */
+  function inpageLane(busy: { value: boolean }, how: 'toggled' | 'editor' | 'reload' = 'editor') {
+    const calls: string[] = [];
+    const lane: InpageLane = {
+      driver: { busy: () => busy.value } as unknown as InpageDriver,
+      agentMessage: () => null,
+      actionClicked: async () => {
+        calls.push('actionClicked');
+        return how;
+      },
+      reinject: async () => {
+        calls.push('reinject');
+      },
+    };
+    return { lane, calls };
+  }
+
+  it('RS-1: while an in-page run holds the rules, an unrelated tab or window closing leaves them alone', async () => {
+    const onConnect = stubEvent();
+    (fakeBrowser.runtime as unknown as { onConnect: unknown }).onConnect = onConnect;
+    const busy = { value: true };
+    const { lane } = inpageLane(busy);
+    const runner = startBackground((await boot()).runner, quietLog, () => lane);
+    await runner.ready();
+    await runner.settled();
+    since();
+    for (const l of fx.listeners.tabRemoved) l(456);
+    for (const l of fx.listeners.windowRemoved) l(123);
+    await fakeBrowser.runtime.onStartup.trigger();
+    await runner.settled();
+    expect(removed()).toEqual([]);
+    // The in-page run ended (it removed its rules itself): the window lane's cleanup is back.
+    busy.value = false;
+    for (const l of fx.listeners.tabRemoved) l(456);
+    await runner.settled();
+    expect(removed()).toEqual([{ removeRuleIds: SESSION_IDS }]);
+  });
+
+  it('FX14: onInstalled (install, update) re-injects the in-page content script; other reasons do not', async () => {
+    const onConnect = stubEvent();
+    (fakeBrowser.runtime as unknown as { onConnect: unknown }).onConnect = onConnect;
+    const { lane, calls } = inpageLane({ value: false });
+    const runner = startBackground((await boot()).runner, quietLog, () => lane);
+    await runner.ready();
+    await fakeBrowser.runtime.onInstalled.trigger({ reason: 'chrome_update' } as never);
+    expect(calls).toEqual([]);
+    await fakeBrowser.runtime.onInstalled.trigger({ reason: 'update', previousVersion: '0.1.0' } as never);
+    await fakeBrowser.runtime.onInstalled.trigger({ reason: 'install' } as never);
+    expect(calls).toEqual(['reinject', 'reinject']);
+  });
+
+  it('FX14: the toolbar on an Instagram tab without the content script opens the editor with the reload notice', async () => {
+    const onConnect = stubEvent();
+    (fakeBrowser.runtime as unknown as { onConnect: unknown }).onConnect = onConnect;
+    const { lane } = inpageLane({ value: false }, 'reload');
+    const runner = startBackground((await boot()).runner, quietLog, () => lane);
+    await runner.ready();
+    since();
+    await fakeBrowser.action.onClicked.trigger({ id: 3, url: 'https://www.instagram.com/' } as never);
+    await vi.waitFor(() => expect(names(since())).toContain('tabs.create'));
+    expect(await session.get('editorNotice')).toBe('reloadInstagram');
   });
 
   it('closing the composer window mid-flow removes the rules and returns to idle (E15)', async () => {
@@ -2172,7 +2242,7 @@ describe('U11 W2/W3: the popup is fitted while it is still about:blank (Arc, 202
     const onConnect = { addListener: () => undefined, removeListener: () => undefined, hasListener: () => true };
     (fakeBrowser.runtime as unknown as { onConnect: unknown }).onConnect = onConnect;
     const h = await boot();
-    startBackground(h.runner, { info: () => undefined, warn: () => undefined, error: () => undefined });
+    startBackground(h.runner, { info: () => undefined, warn: () => undefined, error: () => undefined }, () => null);
     await h.runner.editorMessage(ultrawideStart());
     await h.settle();
     await h.advance(FIT_RETRY_DELAY_MS);

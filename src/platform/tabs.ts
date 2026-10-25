@@ -27,8 +27,8 @@ export interface TabsPort {
   activate(tabId: number): Promise<void>;
   navigate(tabId: number, url: string): Promise<void>;
   hardReload(tabId: number): Promise<void>;
-  /** Top frame only. */
-  sendMessage<R = unknown>(tabId: number, message: unknown): Promise<R>;
+  /** One frame: the top frame (0) unless `frameId` names another (the in-page engine frame). */
+  sendMessage<R = unknown>(tabId: number, message: unknown, frameId?: number): Promise<R>;
   onUpdated(listener: (tabId: number, update: TabUpdate) => void): () => void;
   onRemoved(listener: (tabId: number) => void): () => void;
 }
@@ -57,8 +57,8 @@ export const tabs: TabsPort = {
   async hardReload(tabId) {
     await browser.tabs.reload(tabId, { bypassCache: true });
   },
-  async sendMessage<R>(tabId: number, message: unknown) {
-    return (await browser.tabs.sendMessage(tabId, message, { frameId: 0 })) as R;
+  async sendMessage<R>(tabId: number, message: unknown, frameId = 0) {
+    return (await browser.tabs.sendMessage(tabId, message, { frameId })) as R;
   },
   onUpdated(listener) {
     const l = (tabId: number, change: Browser.tabs.OnUpdatedInfo, tab: Browser.tabs.Tab) => {

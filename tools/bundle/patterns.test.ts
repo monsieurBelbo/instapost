@@ -11,6 +11,8 @@ import {
   agentClickProblems,
   BACKGROUND_ONLY,
   backgroundMainWorldProblems,
+  CONTENT_SCRIPT_ONLY,
+  contentScriptMetaUrls,
   E2E_HOOK_MARKERS,
   E2E_HOOKS,
   EDITOR_ONLY,
@@ -285,6 +287,10 @@ describe('T3 patterns: one MAIN-world injection, the portrait shim, in backgroun
     const spelled =
       'executeScript({"target":{"tabId":e,"frameIds":[0]},"world":"MAIN","injectImmediately":true,"func":r,"args":[n]})';
     expect(backgroundMainWorldProblems(`${SHIM_BODY};${spelled}`)).toEqual([]);
+    // docs/inpage.md §8.7: the frame the caller passes (the engine frame's id, a parameter once minified).
+    expect(backgroundMainWorldProblems(`${SHIM_BODY};${SHIM_CALL.replace('frameIds:[0]', 'frameIds:[o]')}`)).toEqual(
+      [],
+    );
   });
 
   it.each([
@@ -321,11 +327,20 @@ describe('T3 patterns: one MAIN-world injection, the portrait shim, in backgroun
       `${SHIM_BODY};${SHIM_CALL.replace('func:r,args:[n]', 'files:[`/x.js`]')}`,
       /lacks func:.*|has files:/,
     ],
-    ['every frame', `${SHIM_BODY};${SHIM_CALL.replace('frameIds:[0]', 'allFrames:!0')}`, /lacks frameIds:\[0\]/],
     [
-      'frames other than the top one',
+      'every frame',
+      `${SHIM_BODY};${SHIM_CALL.replace('frameIds:[0]', 'allFrames:!0')}`,
+      /lacks frameIds:\[<one frame>\]/,
+    ],
+    [
+      'more than one frame',
       `${SHIM_BODY};${SHIM_CALL.replace('frameIds:[0]', 'frameIds:[0,3]')}`,
-      /lacks frameIds:\[0\]/,
+      /lacks frameIds:\[<one frame>\]/,
+    ],
+    [
+      'a spread of frames',
+      `${SHIM_BODY};${SHIM_CALL.replace('frameIds:[0]', 'frameIds:[...f]')}`,
+      /lacks frameIds:\[<one frame>\]/,
     ],
     [
       'documents instead of a tab',
@@ -422,5 +437,39 @@ describe('T3 patterns: the guarded-only E2E hooks never reach the live build (F2
     const live =
       'await e.windows.create({type:`popup`,url:`about:blank`,focused:!0,state:`normal`,...t});e.windows.onBoundsChanged.addListener(n)';
     expect(hits(live, E2E_HOOKS)).toEqual([]);
+  });
+});
+
+describe('T3 patterns: the in-page content script (docs/inpage.md §8.7)', () => {
+  it.each([
+    ['el.click()', '.click'],
+    ['el.dispatchEvent(new Event(`x`))', 'dispatchEvent'],
+    ['host.innerHTML=`<b>`', 'innerHTML'],
+    ['n.insertAdjacentHTML(`beforeend`,h)', 'insertAdjacentHTML'],
+    ['localStorage.getItem(`k`)', 'localStorage'],
+    ['sessionStorage.setItem(`k`,v)', 'sessionStorage'],
+    ['document.cookie', 'document.cookie'],
+    ['fetch(`/x`)', 'fetch('],
+    ['window.postMessage({},`*`)', 'postMessage'],
+    ['location.href=`https://x`', 'location.href='],
+  ])('fires on %s', (code, label) => {
+    expect(hits(code, CONTENT_SCRIPT_ONLY)).toContain(label);
+  });
+
+  it('stays silent on what the content script does: a host, a shadow root, iframes, listeners, URLs read', () => {
+    const ok =
+      'let e=document.createElement(`div`),t=e.attachShadow({mode:`closed`});document.documentElement.append(e);' +
+      'n.addEventListener(`click`,()=>r());i.setAttribute(`referrerpolicy`,`origin`);i.src=`https://www.instagram.com/`;' +
+      'try{let o=i.contentWindow?.location;return o?.origin!==`https://www.instagram.com`?null:o.pathname}catch{return null}';
+    expect(hits(ok, CONTENT_SCRIPT_ONLY)).toEqual([]);
+    expect(contentScriptMetaUrls(ok)).toEqual([]);
+  });
+
+  it('Meta-host URLs other than https://www.instagram.com are reported', () => {
+    expect(
+      contentScriptMetaUrls(
+        'a=`https://www.instagram.com/api/v1/`;b="https://graph.facebook.com/x";c=`https://www.instagram.com/`',
+      ),
+    ).toEqual(['https://www.instagram.com/api/v1/', 'https://graph.facebook.com/x']);
   });
 });

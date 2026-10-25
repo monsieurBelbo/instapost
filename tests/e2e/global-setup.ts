@@ -23,7 +23,7 @@ import { chromium, type FullConfig } from '@playwright/test';
 import { keyPath } from '../../tools/chrome/ext-id.ts';
 import { assertSealed, HEADLESS_SCREEN_ARGS, readSpki, sealedArgs } from '../../tools/chrome/flags.ts';
 import { fakeSourceHash } from '../../tools/fake-ig/source-hash.ts';
-import { ARTIFACTS, type ArtifactMode, MANIFEST_NAMES } from './helpers/artifacts.ts';
+import { ARTIFACTS, type ArtifactMode, KEY_OF, MANIFEST_NAMES } from './helpers/artifacts.ts';
 import { createFakeClient } from './helpers/fake-client.ts';
 
 const fail = (why: string): never => {
@@ -41,9 +41,11 @@ function checkArtifacts(): void {
     };
     if (manifest.name !== MANIFEST_NAMES[mode])
       fail(`${dir} is named "${manifest.name}", not "${MANIFEST_NAMES[mode]}"`);
-    if (manifest.key !== readFileSync(keyPath(mode), 'utf8').trim()) fail(`${dir} does not carry keys/${mode}.pub.b64`);
-    const guarded = manifest.declarative_net_request !== undefined;
-    if (guarded !== (mode === 'mock')) fail(`${dir}: static write-block ruleset ${guarded ? 'present' : 'missing'}`);
+    if (manifest.key !== readFileSync(keyPath(KEY_OF[mode]), 'utf8').trim()) {
+      fail(`${dir} does not carry keys/${KEY_OF[mode]}.pub.b64`);
+    }
+    const blocked = manifest.declarative_net_request !== undefined;
+    if (blocked !== (mode === 'mock')) fail(`${dir}: static write-block ruleset ${blocked ? 'present' : 'missing'}`);
   }
 }
 

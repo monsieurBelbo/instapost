@@ -13,6 +13,7 @@
 
 import {
   checkRate,
+  checkRateFor,
   effectiveCaps,
   type LocalDay,
   pruneOpens,
@@ -60,10 +61,11 @@ export interface LocalState {
    * stays). Returns whether the lane is unlocked afterwards.
    */
   clearMsiteLock(seen: number | null): Promise<boolean>;
-  rate(now: number, settings: Settings): Promise<RateDecision>;
+  /** `kind` 'test' (check, setup test, Share test): spacing only, exempt from the caps. */
+  rate(now: number, settings: Settings, kind?: 'post' | 'test'): Promise<RateDecision>;
   /** ux.md §4.10: the decision with the counts and caps (the lane, History's header). */
   rateInfo(now: number, settings: Settings): Promise<RateInfo>;
-  noteOpen(t: number): Promise<void>;
+  noteOpen(t: number, kind?: 'post' | 'test'): Promise<void>;
   /** AM22: the popup of the active (or an interrupted) hand-off. */
   composerWindow(): Promise<ComposerWindowRecord | null>;
   rememberWindow(rec: ComposerWindowRecord): Promise<void>;
@@ -137,6 +139,10 @@ export function localState(guarded: boolean, day: LocalDay = machineDay, area: A
       lastTestPassAt: timeOf(testAt),
     };
   }
+  async function lastTest(): Promise<number | null> {
+    const t = await area.get('lastTestOpen');
+    return typeof t === 'number' && Number.isFinite(t) ? t : null;
+  }
   async function opens(): Promise<number[]> {
     const log = await area.get('rateLog');
     return Array.isArray(log) ? log.filter((t) => typeof t === 'number' && Number.isFinite(t)) : [];
@@ -163,16 +169,17 @@ export function localState(guarded: boolean, day: LocalDay = machineDay, area: A
       }
       return true;
     },
-    async rate(now, s) {
-      return checkRate(await opens(), now, effectiveCaps(s.rateCaps), day);
+    async rate(now, s, kind = 'post') {
+      return checkRateFor(kind, await opens(), await lastTest(), now, effectiveCaps(s.rateCaps), day);
     },
     async rateInfo(now, s) {
       const log = await opens();
       const caps = effectiveCaps(s.rateCaps);
       return { decision: checkRate(log, now, caps, day), counts: rateCounts(log, now, day), caps };
     },
-    async noteOpen(t) {
-      await area.set('rateLog', pruneOpens([...(await opens()), t], t, day));
+    async noteOpen(t, kind = 'post') {
+      if (kind === 'test') await area.set('lastTestOpen', t);
+      else await area.set('rateLog', pruneOpens([...(await opens()), t], t, day));
     },
     async composerWindow() {
       const rec = await area.get('composerWindow');

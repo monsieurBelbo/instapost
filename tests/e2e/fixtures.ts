@@ -42,7 +42,7 @@ import type { DnrRule } from '../../src/core/ig-contract/rules.ts';
 import { extIdForMode } from '../../tools/chrome/ext-id.ts';
 import { assertSealed, type HeadlessScreens, readSpki, sealedPlaywrightArgs } from '../../tools/chrome/flags.ts';
 import { DEFAULT_KNOBS, FAKE_ACCOUNT } from '../../tools/fake-ig/knobs.ts';
-import { type ArtifactMode, artifactMode, MANIFEST_NAMES } from './helpers/artifacts.ts';
+import { type ArtifactMode, artifactMode, KEY_OF, MANIFEST_NAMES } from './helpers/artifacts.ts';
 import { createFakeClient, type FakeClient } from './helpers/fake-client.ts';
 import { type Human, human } from './helpers/human.ts';
 
@@ -169,7 +169,7 @@ interface Fixtures {
    * `msiteLockedUntil`; undefined until the editor or the background wrote either.
    */
   storedSettings: () => Promise<Partial<Settings> | undefined>;
-  /** Empties the rate guard's open log (storage.local `rateLog`). See the header. */
+  /** Empties the rate guard's open log (storage.local `rateLog`, and `lastTestOpen`, AM50). See the header. */
   clearRateLog: () => Promise<void>;
   /**
    * Moves every open in the rate guard's log `ms` into the past, so the 60 s spacing ends sooner (E39's
@@ -249,8 +249,9 @@ export async function checkInvariants(o: {
     const paths = [...fromExtension, ...writesFromExtension].map((r) => `${r.method} ${r.host}${r.path}`);
     problems.push(`the extension made its own requests to Instagram hosts: ${paths.join(', ')}`);
   }
+  // The mock build carries the static write block: nothing may land.
   if (o.mode === 'mock' && writes.length > 0) {
-    problems.push(`writes reached the fake in the mock build: ${writes.map((w) => w.path).join(', ')}`);
+    problems.push(`writes reached the fake in the ${o.mode} build: ${writes.map((w) => w.path).join(', ')}`);
   }
   if (problems.length > 0) throw new Error(`e2e invariants failed:\n- ${problems.join('\n- ')}`);
 }
@@ -314,7 +315,7 @@ export const test = base.extend<
     }
   },
 
-  tripwire: async ({ context, artifact }, use) => {
+  tripwire: async ({ context }, use) => {
     // Who made each request: the extension's own service worker or pages, or anything else.
     const seen: { url: string; initiator: string }[] = [];
     context.on('request', (req) => {
@@ -328,8 +329,9 @@ export const test = base.extend<
       }
       seen.push({ url: req.url(), initiator });
     });
-    // Our own pages only: the key-derived id (the extension fixture asserts the loaded one equals it).
-    const extId = extIdForMode(artifactMode(artifact));
+    // Our own pages only. The sealed browser loads this extension alone (the extension fixture asserts its id
+    // is the key-derived one), and its in-page composer is framed through a dynamic URL, a per-session host
+    // rather than the id (docs/inpage.md §3.3), so any chrome-extension: origin is ours.
     const parse = (raw: string): URL | null => {
       try {
         return new URL(raw);
@@ -342,7 +344,7 @@ export const test = base.extend<
       (u.protocol === 'data:' ||
         u.protocol === 'blob:' ||
         u.protocol === 'about:' ||
-        (u.protocol === 'chrome-extension:' && u.host === extId));
+        u.protocol === 'chrome-extension:');
     const outside: (string | RegExp)[] = [];
     const fromExtension: (string | RegExp)[] = [];
     const matches = (list: (string | RegExp)[], url: string) =>
@@ -354,7 +356,7 @@ export const test = base.extend<
           const u = parse(r.url);
           if (local(u)) continue;
           if (!SEALED_HOSTS.includes(u?.hostname ?? '') && !matches(outside, r.url)) out.push(`outside: ${r.url}`);
-          if (r.initiator.startsWith(`chrome-extension://${extId}/`) && !matches(fromExtension, r.url)) {
+          if (r.initiator.startsWith('chrome-extension://') && !matches(fromExtension, r.url)) {
             out.push(`from the extension (${r.initiator}): ${r.url}`);
           }
         }
@@ -375,7 +377,7 @@ export const test = base.extend<
     const id = new URL(sw.url()).host;
     const logs: string[] = [];
     sw.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
-    expect(id, 'extension id must equal the key-derived id').toBe(extIdForMode(mode));
+    expect(id, 'extension id must equal the key-derived id').toBe(extIdForMode(KEY_OF[mode]));
     const name = await sw.evaluate(() => (globalThis as ExtGlobal).chrome.runtime.getManifest().name);
     expect(name, 'manifest name must match the artifact mode').toBe(MANIFEST_NAMES[mode]);
     await use({ id, mode, sw, logs });
@@ -538,7 +540,10 @@ export const test = base.extend<
   },
 
   clearRateLog: async ({ extension }, use) => {
-    await use(() => extension.sw.evaluate(() => (globalThis as ExtGlobal).chrome.storage.local.remove('rateLog')));
+    // `rateLog` holds the posts' opens; since AM50 a check or test run is spaced by `lastTestOpen` alone.
+    await use(() =>
+      extension.sw.evaluate(() => (globalThis as ExtGlobal).chrome.storage.local.remove(['rateLog', 'lastTestOpen'])),
+    );
   },
 
   ageRateLog: async ({ extension }, use) => {

@@ -8,6 +8,12 @@
  * headers and the classification. Write paths are matched with the same WRITE_URL_FILTERS the
  * extension's block rules use, so the fake and the rules cannot drift apart.
  *
+ * docs/inpage.md §9.1: every HTML document on the Instagram hosts carries Instagram's framing headers as
+ * the knobs say (F4–F6: `X-Frame-Options: DENY`, a CSP with `frame-src`/`child-src https://*.instagram.com`
+ * and no `frame-ancestors`, COOP `same-origin-allow-popups`), so the sealed browser enforces them for real;
+ * a shell request with `sec-fetch-dest: iframe` is answered as the `framed` knob says (by default, C15:
+ * "Sorry, this page isn't available", which is why the in-page lane forges `document` with rule 1021).
+ *
  * The write paths behave as Instagram's do (ux.md §6.1, C13, IF5): the photo upload on i.instagram.com
  * (`/rupload_igphoto/fb_uploader_<id>`, CORS for www with credentials, the preflight echoing the requested
  * headers) and the publish request on www (`/api/v1/media/configure_to_story/`), each answering as its
@@ -172,9 +178,36 @@ export function seenHeaders(h: HeaderBag): SeenHeaders {
     ch: pick('sec-ch-ua'),
     fetch: pick('sec-fetch-'),
     origin: h.origin ?? null,
+    referer: h.referer ?? null,
     viaSw: h[FAKE_VIA_SW_HEADER] === '1',
   };
 }
+
+/** F5: the CSP's frame directives as Instagram sends them (only those: the fake models framing, not XSS). */
+export const FRAME_CSP = 'frame-src https://*.instagram.com; child-src https://*.instagram.com';
+
+/**
+ * docs/inpage.md F4–F6, §9.1: the framing headers of an HTML document on the Instagram hosts, as the
+ * knobs say. Chromium enforces them in the sealed browser, so a frame of the fake fails as Instagram's would.
+ */
+export function documentHeaders(knobs: Knobs): Record<string, string> {
+  const xfo = knobs.xfo === 'deny' ? 'DENY' : knobs.xfo === 'sameorigin' ? 'SAMEORIGIN' : null;
+  const ancestors =
+    knobs.frameAncestors === 'none'
+      ? "; frame-ancestors 'none'"
+      : knobs.frameAncestors === 'self'
+        ? "; frame-ancestors 'self'"
+        : '';
+  return {
+    ...(xfo ? { 'x-frame-options': xfo } : {}),
+    'content-security-policy': `${FRAME_CSP}${ancestors}`,
+    'cross-origin-opener-policy': 'same-origin-allow-popups',
+  };
+}
+
+/** The `framed=refuse` answer: a 403 page (text only). */
+export const FRAMED_REFUSED_HTML =
+  '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Forbidden</title></head><body><p>Forbidden</p></body></html>';
 
 function parseMeta(raw: string | undefined): { meta: FakeShareMeta | null; error: string | null } {
   if (raw === undefined) return { meta: null, error: `${FAKE_META_HEADER} header missing` };
@@ -317,6 +350,12 @@ export function createCore(opts: CoreOptions): FakeCore {
     if (knobs.auth === 'codeentry') return redirect(`${FAKE_PATHS.codeEntry}?next=${next}`);
     // offhost=firstLoad: the composer route itself leaves Instagram, before the kill switch is armed.
     if (route === 'composer' && knobs.offhost === 'firstLoad') return redirect(OFFHOST_URL);
+    // docs/inpage.md §3.7, C15: a document request the server sees as framed (the browser's own
+    // `sec-fetch-dest: iframe`; rule 1021 sends `document` instead), as the `framed` knob says.
+    const framed = req.headers['sec-fetch-dest'] === 'iframe';
+    if (framed && knobs.framed === 'refuse') return html(403, FRAMED_REFUSED_HTML);
+    if (framed && knobs.framed === 'login') return redirect(`${FAKE_PATHS.login}?next=${next}`);
+    if (framed && knobs.framed === 'offhost') return redirect(OFFHOST_URL);
     const classification = classify(req.headers, knobs.classifier);
     if (route === 'composer') {
       // Desktop has no story entry (research §1 item 1): a 302 home, or (desktopComposer) the desktop shell.
@@ -325,8 +364,11 @@ export function createCore(opts: CoreOptions): FakeCore {
       if (classification.is_mobile && knobs.route === 'homeOnly') return redirect(FAKE_PATHS.home);
       if (classification.is_mobile && knobs.route === 'elsewhere') return redirect(FAKE_PATHS.elsewhere);
     }
-    const shell = classification.is_mobile ? 'msite' : 'desktop';
-    return html(200, shellHtml({ shell, route, knobs, classification, token }), {
+    const shell = classification.is_mobile && !(framed && knobs.framed === 'desktop') ? 'msite' : 'desktop';
+    const shown = shell === 'desktop' ? { ...classification, is_mobile: false } : classification;
+    // C15 (live 2026-10-14): "Sorry, this page isn't available" in the shell, nothing else (200: unverified).
+    const unavailable = framed && knobs.framed === 'unavailable';
+    return html(200, shellHtml({ shell, route, knobs, classification: shown, token, unavailable }), {
       'accept-ch': ACCEPT_CH,
       vary: 'User-Agent, Sec-CH-UA-Mobile',
     });
@@ -702,9 +744,13 @@ export function createCore(opts: CoreOptions): FakeCore {
     }
     const isFake = url.pathname === '/__fake__' || url.pathname.startsWith('/__fake__/');
     if (isFake) return host === WWW_HOST ? fakeRoute(req, url) : text(404, 'not found');
-    const { res, write } = IG_HOSTS.includes(host)
+    const { res: raw, write } = IG_HOSTS.includes(host)
       ? siteRoute(req, host, url)
       : { res: text(404, 'not found'), write: false };
+    // F4–F6: every HTML document on the Instagram hosts carries the framing headers.
+    const res = (raw.headers['content-type'] ?? '').startsWith('text/html')
+      ? { ...raw, headers: { ...raw.headers, ...documentHeaders(store.knobs()) } }
+      : raw;
     store.addRequest({
       ...seenHeaders(req.headers),
       host,

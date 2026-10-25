@@ -11,6 +11,7 @@ import { GUARDED, MODE } from '../../src/shared/env.ts';
 import { installSafetyCopies, testRun } from '../../src/ui/actions.ts';
 import { tabTitle } from '../../src/ui/copy.ts';
 import { loadDrafts, scheduleAutosave } from '../../src/ui/drafts.ts';
+import { followEditorNotice } from '../../src/ui/editor-notice.ts';
 import {
   doc,
   errorNotice,
@@ -70,6 +71,8 @@ function setup(): () => void {
   startTicking();
   const stops = [
     installSafetyCopies(),
+    // FX14: "instapost was updated. Reload your Instagram tab…", when the toolbar sent the owner here for it.
+    followEditorNotice(),
     onResult(() => void refreshHistory()),
     // The export cache and the draft follow every edit (§4.3, §4.5).
     effect(() => {

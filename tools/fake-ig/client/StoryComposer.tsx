@@ -65,6 +65,15 @@ import { CLAIM_LATE_DELAY_MS, registerClaimLate } from './sw.ts';
 import { AVATAR_SRC, GLYPH, Glyph, Snackbar, useToasts } from './ui.tsx';
 import { refreshTray, uploadStory } from './upload.ts';
 
+/**
+ * F8 (docs/inpage.md): msite's instajax error path on a failed non-GET request with a `checkpoint_url` or a
+ * login redirect sets `window.top.location.href`. In a popup that is the page itself; in a frame it is the
+ * desktop page of the tab.
+ */
+export function instajaxRedirect(url: string): void {
+  (window.top ?? window).location.href = url;
+}
+
 export interface StoryComposerProps {
   knobs: Knobs;
   t: Strings;
@@ -328,6 +337,10 @@ export function StoryComposer(props: StoryComposerProps) {
     if (knobs.challenge === 'afterReady') {
       timers.push(window.setTimeout(() => window.location.assign(challenge), CHALLENGE_DELAY_MS));
     }
+    if (knobs.challenge === 'afterReadyTop') {
+      // F8: a background POST answered with a checkpoint_url; msite's instajax error path moves window.top.
+      timers.push(window.setTimeout(() => instajaxRedirect(challenge), CHALLENGE_DELAY_MS));
+    }
     if (knobs.challenge === 'afterReadySpa') {
       // In-page, as the msite router would: pushState, then let the shell follow (popstate).
       const spa = () => {
@@ -390,10 +403,11 @@ export function StoryComposer(props: StoryComposerProps) {
         return;
       }
       case 'checkpoint':
-        window.location.assign(outcome.url);
+        // F8: PolarisInstajax sets window.top.location.href (in a frame: the desktop page).
+        instajaxRedirect(outcome.url);
         return;
       case 'login':
-        window.location.assign(`${FAKE_PATHS.login}?next=${encodeURIComponent(window.location.pathname)}`);
+        instajaxRedirect(`${FAKE_PATHS.login}?next=${encodeURIComponent(window.location.pathname)}`);
         return;
       case 'feedback':
         telemetry('compose_failure');

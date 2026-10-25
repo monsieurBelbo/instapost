@@ -151,6 +151,14 @@ describe('U12 acceptAgentMessage (§3.5)', () => {
     expect(reason(report(), sender({ url }), active('probing'))).toBe('origin');
   });
 
+  it('prefers the browser-reported origin over the url (Arc subframes report an odd url)', () => {
+    const ig = 'https://www.instagram.com';
+    expect(reason(report(), sender({ url: 'about:blank', origin: ig }), active('probing'))).toBe('ok');
+    expect(reason(report(), sender({ url: undefined, origin: ig }), active('probing'))).toBe('ok');
+    expect(reason(report(), sender({ origin: 'https://evil.example' }), active('probing'))).toBe('origin');
+    expect(reason(report(), sender({ origin: 'null' }), active('probing'))).toBe('origin');
+  });
+
   it('accepts any path and query on the Instagram origin (the URL check is the origin only)', () => {
     expect(reason(report(), sender({ url: 'https://www.instagram.com/?x=1#y' }), active('probing'))).toBe('ok');
   });
@@ -326,6 +334,43 @@ describe('U12 acceptAgentMessage (§3.5)', () => {
     expect(r.msg).toEqual(report());
     expect(Object.keys(r.msg)).not.toContain('extra');
     expect(Object.keys((r.msg as { probe: object }).probe)).not.toContain('html');
+  });
+});
+
+describe('U34 acceptAgentMessage with the in-page engine frame (docs/inpage.md §8.2)', () => {
+  const ENGINE = 7;
+  const DOC = '8C1F3B2A9E7D6C5B4A3928170F1E2D3C';
+
+  it('accepts the engine frame of the run, and refuses the top frame and other frames', () => {
+    const a = active('probing', { frameId: ENGINE });
+    expect(reason(report(), sender({ frameId: ENGINE }), a)).toBe('ok');
+    expect(reason(report(), sender({ frameId: 0 }), a)).toBe('frame');
+    expect(reason(report(), sender({ frameId: ENGINE + 1 }), a)).toBe('frame');
+    expect(reason(report(), sender({ frameId: undefined }), a)).toBe('frame');
+  });
+
+  it('a session without frameId is the window lane: frame 0 only (U12 unchanged)', () => {
+    expect(reason(report(), sender({ frameId: 0 }), active('probing'))).toBe('ok');
+    expect(reason(report(), sender({ frameId: ENGINE }), active('probing'))).toBe('frame');
+  });
+
+  it('once the documentId is known, a stale or missing document is refused', () => {
+    const a = active('probing', { frameId: ENGINE, documentId: DOC });
+    expect(reason(report(), sender({ frameId: ENGINE, documentId: DOC }), a)).toBe('ok');
+    expect(reason(report(), sender({ frameId: ENGINE, documentId: 'A'.repeat(32) }), a)).toBe('document');
+    expect(reason(report(), sender({ frameId: ENGINE }), a)).toBe('document');
+  });
+
+  it('the checks keep their order: tab before frame before document before origin', () => {
+    const a = active('probing', { frameId: ENGINE, documentId: DOC });
+    expect(reason(report(), sender({ tab: { id: 99 }, frameId: 0 }), a)).toBe('tab');
+    expect(reason(report(), sender({ frameId: 0, documentId: 'x' }), a)).toBe('frame');
+    expect(reason(report(), sender({ frameId: ENGINE, documentId: 'x', url: 'https://evil.example/' }), a)).toBe(
+      'document',
+    );
+    expect(reason(report(), sender({ frameId: ENGINE, documentId: DOC, url: 'https://evil.example/' }), a)).toBe(
+      'origin',
+    );
   });
 });
 

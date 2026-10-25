@@ -1,7 +1,8 @@
 {
   "name": "instapost",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "engines": {
@@ -20,35 +21,36 @@
     "lint": "biome check .",
     "test": "vitest run --project unit",
     "test:browser": "vitest run --project browser",
-    "test:e2e": "pnpm run build:all && playwright test --project=mock --project=live",
+    "test:e2e": "pnpm run build:all && playwright test --project=mock --project=live --project=inpage --project=inpage-live",
     "test:smoke155": "pnpm run build:all && playwright test --project=cft155-mock --project=cft155-live",
     "check:bundle": "node scripts/check-bundle.ts",
     "contract:check": "node tools/contract/check-ua.ts",
-    "arc:use": "node scripts/arc-use.ts",
+    "unpacked": "node scripts/unpacked.ts",
     "package": "node scripts/package.ts",
     "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:browser && pnpm run build:all && pnpm run check:bundle && playwright test"
   },
   "dependencies": {
-    "preact": "10.29.8",
     "@preact/signals": "2.11.3",
-    "idb": "8.0.3"
+    "idb": "8.0.3",
+    "libheif-js": "1.23.2",
+    "preact": "10.29.8"
   },
   "devDependencies": {
-    "wxt": "0.21.4",
-    "web-ext": "10.7.0",
-    "vite": "8.3.1",
-    "typescript": "6.0.3",
-    "vitest": "4.1.11",
-    "@vitest/browser-playwright": "4.1.11",
+    "@biomejs/biome": "2.5.14",
     "@playwright/test": "1.64.0",
-    "playwright": "1.64.0",
     "@puppeteer/browsers": "3.2.3",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
+    "@types/node": "22.20.4",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
+    "@vitest/browser-playwright": "4.1.11",
     "esbuild": "0.28.2",
-    "@biomejs/biome": "2.5.14",
-    "@types/node": "22.20.4"
+    "playwright": "1.64.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "4.1.11",
+    "web-ext": "10.7.0",
+    "wxt": "0.21.4"
   }
 }

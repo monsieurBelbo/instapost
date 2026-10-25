@@ -5,7 +5,10 @@
  * A proxy of at most 2160 px on the long side drives interaction; exports use the full bitmap.
  *
  * The format is sniffed from the bytes, not trusted from the file name or `blob.type`.
- * HEIC is recognised so the error can say it arrives in P4 (libheif worker).
+ * HEIC/HEIF (docs/inpage.md §13.7) goes to the libheif worker (heic.ts) when an entrypoint turned it on with
+ * enableHeic (the in-page composer does); the loader is a dynamic import, so heic.ts, its worker and the wasm
+ * exist only in builds that call it, and load on the first HEIC. Elsewhere HEIC is recognised only to say
+ * it is unsupported.
  */
 import type { Size } from '../core/geometry/fit.ts';
 import { RasterError } from './errors.ts';
@@ -14,6 +17,20 @@ export const SUPPORTED_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/
 export type ImageMime = (typeof SUPPORTED_MIMES)[number];
 /** For `<input accept>`. */
 export const ACCEPT_ATTR = SUPPORTED_MIMES.join(',');
+
+interface HeicModule {
+  decodeHeic(blob: Blob): Promise<{ bitmap: ImageBitmap; size: Size; jpeg: Promise<Blob | null> }>;
+}
+let loadHeic: (() => Promise<HeicModule>) | null = null;
+
+/** Turns HEIC/HEIF import on: `load` is `() => import('…/raster/heic.ts')`, called on the first HEIC. */
+export function enableHeic(load: () => Promise<HeicModule>): void {
+  loadHeic = load;
+}
+
+/** `<input accept>` with HEIC/HEIF when it is on (macOS needs the extensions: Finder types HEIC unevenly). */
+export const acceptAttr = (): string =>
+  loadHeic ? [...SUPPORTED_MIMES, 'image/heic', 'image/heif', '.heic', '.heif'].join(',') : ACCEPT_ATTR;
 
 /** Long-side limit of the interaction proxy. */
 export const PROXY_MAX_SIDE = 2160;
@@ -24,7 +41,8 @@ const ascii = (b: Uint8Array, at: number, s: string): boolean => {
 };
 
 const AVIF_BRANDS = ['avif', 'avis'];
-const HEIC_BRANDS = ['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1'];
+/** HEIF brands of a HEIC/HEIF (ISO/IEC 23008-12): iPhones write `heic` (plus `mif1`), cameras `heix`, `mif1`… */
+export const HEIC_BRANDS = ['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1'];
 
 /** The ISO-BMFF major and compatible brands of an `ftyp` box at offset 0, or []. */
 function ftypBrands(b: Uint8Array): string[] {
@@ -53,14 +71,57 @@ export interface DecodedImage {
   bitmap: ImageBitmap;
   /** Natural, upright size (what compose()'s assetSize reports). */
   size: Size;
-  mime: ImageMime;
+  mime: ImageMime | 'image/heic';
+  /**
+   * HEIC only: a JPEG of the decoded pixels, to store as the original instead of the file (browsers can't
+   * show a HEIC in Recent photos). Resolves after the bitmap, null when there is none.
+   */
+  standIn?: Promise<Blob | null>;
+}
+
+export interface DecodeOptions {
+  /** Called when the file is a HEIC and conversion starts (the UI says "Converting HEIC…"). */
+  onConvert?: () => void;
+}
+
+const HEIC_NAME = /\.(heic|heif|hif)$/i;
+const HEIC_TYPES = ['image/heic', 'image/heif', 'image/heic-sequence', 'image/heif-sequence'];
+
+/** A HEIC/HEIF by its name or its type, without reading it (macOS types a dragged HEIC unevenly). */
+export function heicByLabel(f: { name?: string; type: string }): boolean {
+  return HEIC_TYPES.includes(f.type.toLowerCase()) || HEIC_NAME.test(f.name ?? '');
+}
+
+/**
+ * Whether a dropped or pasted file is a photo to open: an image/* type or a HEIC/HEIF name; anything else
+ * (a HEIC typed '' or application/octet-stream, no extension) by its first bytes (JPEG, PNG, WebP, AVIF,
+ * or an ftyp brand in HEIC_BRANDS).
+ */
+export async function isPhotoFile(f: Blob & { name?: string }): Promise<boolean> {
+  if (f.type.toLowerCase().startsWith('image/') || heicByLabel(f)) return true;
+  try {
+    return sniffImageMime(new Uint8Array(await f.slice(0, 64).arrayBuffer())) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the first bytes are a HEIC/HEIF. */
+export async function isHeic(blob: Blob): Promise<boolean> {
+  return sniffImageMime(new Uint8Array(await blob.slice(0, 64).arrayBuffer())) === 'image/heic';
 }
 
 /** Decodes a supported image; DECODE_FAILED for anything else or a corrupt file. */
-export async function decodeImage(blob: Blob): Promise<DecodedImage> {
+export async function decodeImage(blob: Blob, opts: DecodeOptions = {}): Promise<DecodedImage> {
   const head = new Uint8Array(await blob.slice(0, 64).arrayBuffer());
   const mime = sniffImageMime(head);
-  if (mime === 'image/heic') throw new RasterError('DECODE_FAILED', 'HEIC is not supported yet (arrives in P4)');
+  if (mime === 'image/heic') {
+    if (!loadHeic) throw new RasterError('DECODE_FAILED', 'HEIC is not supported in this build');
+    opts.onConvert?.();
+    const { decodeHeic } = await loadHeic();
+    const d = await decodeHeic(blob);
+    return { bitmap: d.bitmap, size: d.size, mime, standIn: d.jpeg };
+  }
   if (mime === null)
     throw new RasterError('DECODE_FAILED', `not a JPEG, PNG, WebP or AVIF file (${blob.type || 'no type'})`);
   let bitmap: ImageBitmap;

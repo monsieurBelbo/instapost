@@ -2,7 +2,7 @@
  * E1, E2 (strategy §7.11, SG1, SG10, S10): the browser is sealed and the right artifact is loaded.
  */
 import { type ExtGlobal, expect, IG_ORIGIN, test } from './fixtures.ts';
-import { MANIFEST_NAMES } from './helpers/artifacts.ts';
+import { KEY_OF, MANIFEST_NAMES } from './helpers/artifacts.ts';
 
 /** Hosts that must never resolve in a sealed browser (E1). */
 const OUTSIDE = [
@@ -64,7 +64,7 @@ test('E2 @smoke the extension service worker is up with the key-derived id and i
   expect(manifest.name).toBe(MANIFEST_NAMES[extension.mode]);
   expect(manifest.minimum_chrome_version).toBe('155');
   const { extIdForMode } = await import('../../tools/chrome/ext-id.ts');
-  expect(extension.id).toBe(extIdForMode(extension.mode));
+  expect(extension.id).toBe(extIdForMode(KEY_OF[extension.mode]));
   // AM23: sealed browsers report no branded brand, so guarded builds hand off here (and refuse in
   // a branded profile before any window opens).
   const brands = await extension.sw.evaluate(

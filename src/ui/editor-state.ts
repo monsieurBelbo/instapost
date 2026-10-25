@@ -60,12 +60,16 @@ export const fontsReady = signal(false);
 
 export type Busy = 'import' | 'download' | 'share' | 'post';
 export const busy = signal<Busy | null>(null);
+/** The import in progress is a HEIC being converted (docs/inpage.md §13.7: "Converting HEIC…"). */
+export const converting = signal(false);
 
 export interface Notice {
   kind: 'info' | 'error';
   text: string;
   /** Error code (ErrorCode or RasterError code) for tests and styling. */
   code?: string;
+  /** RL-16: a DECODE_FAILED that came from the HEIC conversion (heic.ts), not from any other format. */
+  heic?: boolean;
 }
 export const notice = signal<Notice | null>(null);
 
@@ -128,10 +132,13 @@ export function errorNotice(err: unknown): Notice {
   const code = (err as { code?: unknown } | null)?.code;
   if (isEditorCode(code)) {
     const c = ERROR_COPY[code];
+    // RL-16: the localized copy mentions HEIC for every decode failure; the raw message says which it was.
+    const heic = code === 'DECODE_FAILED' && err instanceof Error && /^DECODE_FAILED: HEIC\b/.test(err.message);
     return {
       kind: 'error',
       text: t('notice.errorCopy', { title: c.title, body: c.body({ nothingPosted: true }) }),
       code,
+      ...(heic ? { heic: true } : {}),
     };
   }
   const text = err instanceof Error ? err.message : String(err);
@@ -155,7 +162,16 @@ export async function restoreDraft(saved: StoryDoc, original: Blob | null): Prom
   busy.value = 'import';
   setNotice(null);
   try {
-    const loaded = original ? await importImage(original, async () => undefined) : null;
+    // The saved doc points at its asset id; keep it (a HEIC's stored original is its JPEG, another hash).
+    const layer = saved.frames[0]?.layers.find((l): l is ImageLayer => l.kind === 'image');
+    const loaded = original
+      ? await importImage(original, async () => undefined, {
+          ...(layer ? { assetId: layer.assetId } : {}),
+          onConvert: () => {
+            converting.value = true;
+          },
+        })
+      : null;
     const previous = image.value;
     batch(() => {
       image.value = loaded;
@@ -166,18 +182,27 @@ export async function restoreDraft(saved: StoryDoc, original: Blob | null): Prom
     setNotice(errorNotice(err));
   } finally {
     busy.value = null;
+    converting.value = false;
   }
 }
 
 // ---- image ------------------------------------------------------------------------------
 
-/** Loads a file as the frame's image (replacing the previous one), cover-fitted and centred. */
-export async function loadImageFile(file: Blob): Promise<void> {
-  if (busy.value) return;
+/**
+ * Loads a file as the frame's image (replacing the previous one), cover-fitted and centred. `assetId` when
+ * the file is a stored asset (Recent photos). Resolves true when the photo is on the stage.
+ */
+export async function loadImageFile(file: Blob, opts: { assetId?: string } = {}): Promise<boolean> {
+  if (busy.value) return false;
   busy.value = 'import';
   setNotice(null);
   try {
-    const loaded = await importImage(file);
+    const loaded = await importImage(file, undefined, {
+      ...(opts.assetId ? { assetId: opts.assetId as LoadedImage['assetId'] } : {}),
+      onConvert: () => {
+        converting.value = true;
+      },
+    });
     const previous = image.value;
     const layer: ImageLayer = {
       kind: 'image',
@@ -189,16 +214,24 @@ export async function loadImageFile(file: Blob): Promise<void> {
     };
     batch(() => {
       image.value = loaded;
-      updateFrame((f) => ({ ...f, layers: [layer, ...f.layers.filter((l) => l.kind !== 'image')] }));
+      updateFrame((f) => ({
+        ...f,
+        // A new photo starts filled (a blurred backdrop of the previous photo would point at its asset).
+        background: { kind: 'solid', color: '#000000' },
+        layers: [layer, ...f.layers.filter((l) => l.kind !== 'image')],
+      }));
     });
     if (previous) releaseImage(previous);
     const hasText = (textLayer.value?.text.trim() ?? '') !== '';
     if (!loaded.stored) setNotice({ kind: 'info', text: t('notice.notStored') });
     else if (previous && hasText) setNotice({ kind: 'info', text: t('notice.replaced') });
+    return true;
   } catch (err) {
     setNotice(errorNotice(err));
+    return false;
   } finally {
     busy.value = null;
+    converting.value = false;
   }
 }
 
@@ -219,6 +252,52 @@ export const setImageRotation = (raw: number): void =>
 
 /** Back to the initial cover placement. */
 export const refitImage = (): void => updateImage((l, src) => ({ xf: initialXf(l.fit, src, l.focal) }));
+
+/** The blurred backdrop behind a fitted (contain) photo. */
+const FIT_BACKDROP = { radiusPx: 48, dim: 0.2 } as const;
+
+/**
+ * Framing (inpage-ui-spec.md FS3): Fill covers the frame (black behind), Fit shows the whole photo over a
+ * blurred, dimmed copy of itself. The placement starts over, keeping the rotation.
+ */
+export function setFit(fit: 'cover' | 'contain'): void {
+  const l = imageLayer.value;
+  const img = image.value;
+  if (!l || !img || l.fit === fit) return;
+  const start = initialXf(fit, img.size, l.focal);
+  const xf = rotateImageToXf({ fit, xf: start }, img.size, l.xf.rotDeg);
+  const background =
+    fit === 'contain'
+      ? { kind: 'blur' as const, assetId: l.assetId, ...FIT_BACKDROP }
+      : { kind: 'solid' as const, color: '#000000' };
+  updateFrame((f) => ({
+    ...f,
+    background,
+    layers: f.layers.map((x) => (x.id === l.id ? { ...l, fit, xf } : x)),
+  }));
+}
+
+/** Rotate by a quarter turn (Left −90°, Right +90°), within ±180°. */
+export function rotateImageBy(deg: number): void {
+  updateImage((l, src) => {
+    let next = l.xf.rotDeg + deg;
+    while (next > 180) next -= 360;
+    while (next <= -180) next += 360;
+    return { xf: rotateImageToXf(l, src, Math.round(next * 2) / 2) };
+  });
+}
+
+/** Whether the photo moved from its initial placement (Reset shows only then). */
+export const placementChanged = computed(() => {
+  const l = imageLayer.value;
+  const img = image.value;
+  if (!l || !img) return false;
+  const start = initialXf(l.fit, img.size, l.focal);
+  const d = (a: number, b: number) => Math.abs(a - b) > 0.5;
+  return (
+    d(l.xf.cx, start.cx) || d(l.xf.cy, start.cy) || Math.abs(l.xf.scale - start.scale) > 0.001 || l.xf.rotDeg !== 0
+  );
+});
 
 // ---- text -------------------------------------------------------------------------------
 

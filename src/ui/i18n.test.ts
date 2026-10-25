@@ -1,6 +1,7 @@
 /**
- * U30 (strategy §11 AM44): the editor's two languages. Both catalogs have exactly the same keys and, per
- * key, the same `{placeholders}` and the same leading/trailing spaces (fragments are glued to their
+ * U30 (strategy §11 AM44, AM48): the extension's two languages (the editor; since AM48 also the in-page
+ * `inpage.*` and `page.*` keys, whose surfaces U39 and B20 check). Both catalogs have exactly the same keys
+ * and, per key, the same `{placeholders}` and the same leading/trailing spaces (fragments are glued to their
  * neighbours); Spanish is really Spanish (only a short list of keys may read the same in both); the
  * language follows the setting, and Auto follows the browser (es-* → Spanish, anything else English);
  * the copy rules of U21 hold in Spanish too (no codes, no Meta-host URLs, "Nothing was posted" only under
@@ -95,7 +96,10 @@ describe('U30 the catalogs', () => {
         'details.steps.unit',
         'details.viewport',
         'history.seconds',
+        'inpage.edit.zoom',
+        'inpage.stage.zoom',
         'notice.errorCopy',
+        'page.entry.resultName',
         'photo.zoom',
         'step.name.instagram',
         'step.seconds',

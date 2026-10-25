@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   checkRate,
+  checkRateFor,
   DEFAULT_RATE_CAPS,
   effectiveCaps,
   HOUR_MS,
@@ -202,5 +203,38 @@ describe('U10 on a fake clock', () => {
     vi.setSystemTime(at(10));
     expect(tryOpen().ok).toBe(true);
     expect(opens).toHaveLength(7);
+  });
+});
+
+describe('test runs: spacing only, exempt from the caps (owner, 2026-10-14)', () => {
+  const sixInTheHour = [at(10), at(10, 5), at(10, 10), at(10, 15), at(10, 20), at(10, 25)];
+
+  it('a test run ignores the hourly and daily caps but keeps the 60 s spacing', () => {
+    expect(checkRate(sixInTheHour, at(10, 30), caps, utcMinus3).ok).toBe(false);
+    expect(checkRateFor('test', sixInTheHour, null, at(10, 30), caps, utcMinus3)).toEqual({ ok: true });
+    expect(checkRateFor('test', [], at(10, 30), at(10, 30, 30), caps, utcMinus3)).toEqual({
+      ok: false,
+      code: 'RATE_LIMITED',
+      rule: 'spacing',
+      freeAt: at(10, 31),
+    });
+    expect(checkRateFor('test', [at(10, 30, 10)], at(10, 30), at(10, 31), caps, utcMinus3).ok).toBe(false);
+  });
+
+  it('a real post keeps every cap and also waits 60 s after a test run', () => {
+    expect(checkRateFor('post', [], at(10), at(10, 0, 30), caps, utcMinus3)).toEqual({
+      ok: false,
+      code: 'RATE_LIMITED',
+      rule: 'spacing',
+      freeAt: at(10, 1),
+    });
+    expect(checkRateFor('post', [], at(10), at(10, 1), caps, utcMinus3)).toEqual({ ok: true });
+    expect(checkRateFor('post', sixInTheHour, null, at(10, 30), caps, utcMinus3)).toEqual(
+      checkRate(sixInTheHour, at(10, 30), caps, utcMinus3),
+    );
+  });
+
+  it('test runs never fill the caps of real posts', () => {
+    expect(checkRateFor('post', [], at(10, 30), at(10, 31), caps, utcMinus3)).toEqual({ ok: true });
   });
 });

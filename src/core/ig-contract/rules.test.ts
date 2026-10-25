@@ -50,7 +50,7 @@ describe('U8 write-block rules', () => {
   it('rehearsal ids stay inside the reserved session range, which cleanup removes whole', () => {
     const ids = rehearsalRules(7).map((r) => r.id);
     expect(Math.max(...ids)).toBeLessThanOrEqual(SESSION_RULE_LAST_ID);
-    expect(SESSION_RULE_IDS).toEqual(Array.from({ length: 19 }, (_, i) => 1001 + i));
+    expect(SESSION_RULE_IDS).toEqual(Array.from({ length: 29 }, (_, i) => 1001 + i));
     for (const id of [UA_RULE_ID, ...ids]) expect(SESSION_RULE_IDS).toContain(id);
   });
 

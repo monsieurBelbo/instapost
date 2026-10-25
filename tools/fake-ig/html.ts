@@ -48,13 +48,22 @@ export interface ShellInput {
   classification: UaClassification;
   /** Random token source for `drift=renamed` (ids and the UA script's data attribute). */
   token: () => string;
+  /** C15 (`framed=unavailable`): the shell renders "Sorry, this page isn't available" only. */
+  unavailable?: boolean;
 }
 
 export function shellHtml(i: ShellInput): string {
   const renamed = i.knobs.drift === 'renamed';
   const rootId = renamed ? `r${i.token()}` : 'root';
   const uaAttr = renamed ? `data-${i.token()}` : 'data-fake-ua';
-  const boot: FakeBoot = { v: 1, shell: i.shell, route: i.route, knobs: i.knobs, rootId };
+  const boot: FakeBoot = {
+    v: 1,
+    shell: i.shell,
+    route: i.route,
+    ...(i.unavailable ? { unavailable: true as const } : {}),
+    knobs: i.knobs,
+    rootId,
+  };
   return [
     `<!doctype html><html lang="${i.knobs.locale}"><head>`,
     '<meta charset="utf-8">',

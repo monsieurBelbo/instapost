@@ -29,17 +29,55 @@
  *
  * Extra (recorded in the integrator report): no bundle embeds an absolute path of this checkout,
  * and each artifact ships only its own mode's icons. Exits 1 when anything fails.
+ *
+ * The in-page lane (docs/inpage.md §8.7, §13; inpage-ui-spec.md) is in every build, the window lane stays as
+ * the fallback. What §5 forbade and the in-page lane needs is allowed here deliberately, one allowance at a
+ * time, each pinned to an exact shape (the IN_PAGE constants below say why):
+ * - T1: `content_scripts`, exactly one: `instagram-page.js`, matches `https://www.instagram.com/*` only, top
+ *   frame only, at document_idle (the "New story" entry and the composer's host in the owner's own tab).
+ * - T1: `web_accessible_resources`, exactly one: `composer.html` and the chunks, assets and fonts it loads,
+ *   matches www only, `use_dynamic_url` (the page sees a per-session host, never the extension id; N3).
+ * - T1: the permissions `webRequest` (observational frame watch, OD19; never `webRequestBlocking`) and
+ *   `declarativeNetRequest` (as in the build proven live in Arc, 2026-10-14/15).
+ * - T2: the frame rules 1020 (X-Frame-Options removed, owner-approved) and 1021 (forged Sec-Fetch-Dest,
+ *   owner-approved) are session rules only: their builders give ids in the session range, one tab,
+ *   `sub_frame` only; no static ruleset carries a session-range id or a header rule; no bundle calls
+ *   `updateDynamicRules`; the two header names appear in background.js only (where the session rules are
+ *   built), and must appear there (a positive control for the scan of every other file).
+ * - T3: still exactly one MAIN-world call site, the portrait shim's, in background.js; its target is one
+ *   frame of one tab: `frameIds:[0]` (the window lane's popup) or `frameIds:[<identifier>]` (the engine frame).
+ * - T3: instagram-page.js gets the agent's bans plus no click of any kind, no dispatched event, no network
+ *   API, no HTML parsing, no page storage or cookies, no postMessage, and no Meta-host URL but
+ *   https://www.instagram.com/ (CONTENT_SCRIPT_ONLY, contentScriptMetaUrls).
+ * - T3: the HEIC worker (`assets/heic.worker-*.js`, libheif-js, LGPL-3.0) is the one file besides the
+ *   background's rules that may carry XMLHttpRequest/fetch (libheif's Emscripten glue; the worker fetches only
+ *   its packaged wasm); Meta hosts stay banned there.
+ * - T1 (RL-3): a build that ships libheif's wasm ships `licenses/libheif-LICENSE.txt` (LGPL-3.0 and GPL-3.0)
+ *   and `licenses/THIRD-PARTY.txt` (libheif, libde265, their source); tools/bundle/licenses.ts.
+ * - T3: the in-page driver's marker exactly once in background.js and nowhere else; the Developer toggles'
+ *   storage key (`__e2eInpageToggles`) is an `__e2e…` name, so the live scan for E2E hooks proves it is gone.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { blockRuleset, STATIC_RULESET_ID, STATIC_RULESET_PATH } from '../src/core/ig-contract/rules.ts';
+import { FETCH_DEST_RULE_ID, fetchDestRule, XFO_RULE_ID, xfoRule } from '../src/core/ig-contract/frame-rules.ts';
+import {
+  blockRuleset,
+  type DnrRule,
+  FRAME_RULE_FIRST_ID,
+  SESSION_RULE_IDS,
+  STATIC_RULESET_ID,
+  STATIC_RULESET_PATH,
+} from '../src/core/ig-contract/rules.ts';
+import { licenseProblems } from '../tools/bundle/licenses.ts';
 import {
   AGENT_ONLY,
   agentClickProblems,
   BACKGROUND_ONLY,
   backgroundMainWorldProblems,
+  CONTENT_SCRIPT_ONLY,
+  contentScriptMetaUrls,
   E2E_HOOK_MARKERS,
   E2E_HOOKS,
   EDITOR_ONLY,
@@ -57,6 +95,15 @@ import {
 } from '../tools/bundle/patterns.ts';
 import { extIdForMode, KEY_MODES } from '../tools/chrome/ext-id.ts';
 
+/** docs/inpage.md §13.7: the HEIC worker Vite emits for the in-page composer (src/raster/heic.worker.ts). */
+const HEIC_WORKER = /^assets\/heic\.worker-[\w-]+\.js$/;
+
+/** libheif's wasm, which the worker fetches from the package. */
+const HEIC_WASM = /^assets\/libheif-[\w-]+\.wasm$/;
+
+/** docs/inpage.md §10.4: the in-page driver's marker (src/inpage/driver.ts INPAGE_DRIVER_MARKER). */
+const INPAGE_MARKER = 'instapost-inpage:modes=check,test,shareTest,post';
+
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 type Mode = 'mock' | 'live';
@@ -64,10 +111,53 @@ const MODES: readonly Mode[] = ['mock', 'live'];
 const ARTIFACT: Readonly<Record<Mode, string>> = { mock: '.output/chrome-mv3-mock', live: '.output/chrome-mv3-live' };
 /** AM44: the manifest's locales (the description; the editor's own copy is in src/ui/catalog.*.ts). */
 const LOCALES: readonly string[] = ['en', 'es'];
-const MODE_INFO: Readonly<Record<Mode, { name: string; icon: string; guarded: boolean }>> = {
-  mock: { name: 'instapost MOCK', icon: 'mock', guarded: true },
-  live: { name: 'instapost', icon: 'live', guarded: false },
+interface ModeInfo {
+  name: string;
+  icon: string;
+  /** The E2E hooks and the fake guard (mock only). */
+  guarded: boolean;
+  /** The static write-block ruleset ships. */
+  blocked: boolean;
+  key: 'mock' | 'live';
+}
+const MODE_INFO: Readonly<Record<Mode, ModeInfo>> = {
+  mock: { name: 'instapost MOCK', icon: 'mock', guarded: true, blocked: true, key: 'mock' },
+  live: { name: 'instapost', icon: 'live', guarded: false, blocked: false, key: 'live' },
 };
+
+// ---- the in-page lane's allowances (docs/inpage.md §8.7, §13) ------------------------------------------
+
+/**
+ * The in-page content script: the entry ("New story") and the composer's host, in the owner's desktop
+ * Instagram tab. www only (never i. or any other host), the top frame only (never the engine frame or
+ * another site's frame), at document_idle; an unlisted script, so WXT adds no page-visible hello (R25).
+ */
+const CONTENT_SCRIPT = 'instagram-page.js';
+const IN_PAGE_CONTENT_SCRIPTS = [
+  { matches: ['https://www.instagram.com/*'], js: [CONTENT_SCRIPT], run_at: 'document_idle', all_frames: false },
+];
+/**
+ * The composer page the content script frames, plus what it loads (its chunks, the HEIC worker and wasm,
+ * the fonts). www only; `use_dynamic_url`, so Instagram's page sees a per-session host, never the extension
+ * id, and cannot fetch the files by the fixed id (N3).
+ */
+const COMPOSER_PAGE = 'composer.html';
+const IN_PAGE_WEB_ACCESSIBLE = [
+  {
+    resources: [COMPOSER_PAGE, 'chunks/*', 'assets/*', 'fonts/*'],
+    matches: ['https://www.instagram.com/*'],
+    use_dynamic_url: true,
+  },
+];
+/**
+ * `webRequest`: the engine frame's id, URLs, redirects, status and errors, observed only (OD19: without it a
+ * refused first load cannot be told from an off-host one). `declarativeNetRequest`: carried over from the
+ * build proven live in Arc (2026-10-14/15); `declarativeNetRequestWithHostAccess` may cover every rule the
+ * lane installs, so drop it only after a live check.
+ */
+const IN_PAGE_PERMISSIONS = ['declarativeNetRequest', 'webRequest'];
+/** The two headers the frame rules 1020 and 1021 touch (session rules, one tab, www sub_frame only). */
+const FRAME_RULE_HEADERS: readonly RegExp[] = [/x-frame-options/i, /sec-fetch-dest/i];
 
 // ---- reporting --------------------------------------------------------------------------
 
@@ -143,7 +233,7 @@ function t5(): Mode[] {
 // ---- T1 ---------------------------------------------------------------------------------
 
 function expectedManifest(m: Mode): Record<string, unknown> {
-  const { name, icon, guarded } = MODE_INFO[m];
+  const { name, icon, guarded, blocked, key } = MODE_INFO[m];
   const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf8')) as { version: string };
   const icons = Object.fromEntries([16, 32, 48, 128].map((s) => [String(s), `icons/${icon}/${s}.png`]));
   return {
@@ -153,7 +243,7 @@ function expectedManifest(m: Mode): Record<string, unknown> {
     description: '__MSG_extDescription__',
     version: pkg.version,
     icons,
-    key: readFileSync(resolve(ROOT, 'keys', `${m}.pub.b64`), 'utf8').trim(),
+    key: readFileSync(resolve(ROOT, 'keys', `${key}.pub.b64`), 'utf8').trim(),
     minimum_chrome_version: '155',
     permissions: [
       'storage',
@@ -161,26 +251,34 @@ function expectedManifest(m: Mode): Record<string, unknown> {
       'scripting',
       'downloads',
       'declarativeNetRequestWithHostAccess',
-      ...(guarded ? ['declarativeNetRequest', 'declarativeNetRequestFeedback'] : []),
+      'declarativeNetRequest',
+      ...(guarded ? ['declarativeNetRequestFeedback'] : []),
+      'webRequest',
     ],
     host_permissions: ['https://www.instagram.com/*', 'https://i.instagram.com/*'],
     content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" },
     action: { default_title: name, default_icon: icons },
     commands: { _execute_action: { suggested_key: { default: 'Alt+Shift+S' } } },
-    ...(guarded
+    ...(blocked
       ? {
           declarative_net_request: {
             rule_resources: [{ id: STATIC_RULESET_ID, enabled: true, path: STATIC_RULESET_PATH }],
           },
         }
       : {}),
+    content_scripts: IN_PAGE_CONTENT_SCRIPTS,
+    web_accessible_resources: IN_PAGE_WEB_ACCESSIBLE,
     background: { service_worker: 'background.js' },
   };
 }
 
-/** Keys and permissions §5 lists as absent in every mode (a readable second line of defence). */
-const FORBIDDEN_KEYS = ['content_scripts', 'web_accessible_resources', 'side_panel', 'options_page', 'devtools_page'];
-const FORBIDDEN_PERMISSIONS = ['tabs', 'cookies', 'webRequest', 'debugger', '<all_urls>', 'webRequestBlocking'];
+/**
+ * Keys and permissions §5 lists as absent in every mode (a readable second line of defence), less the in-page
+ * lane's allowances above: `content_scripts` and `web_accessible_resources` must equal their IN_PAGE shapes
+ * exactly, and `webRequest` is observational (`webRequestBlocking` stays banned).
+ */
+const FORBIDDEN_KEYS = ['side_panel', 'options_page', 'devtools_page', 'externally_connectable', 'sandbox'];
+const FORBIDDEN_PERMISSIONS = ['tabs', 'cookies', 'debugger', '<all_urls>', 'webRequestBlocking', 'activeTab'];
 
 function t1(m: Mode): void {
   const dir = resolve(ROOT, ARTIFACT[m]);
@@ -191,6 +289,12 @@ function t1(m: Mode): void {
   for (const k of FORBIDDEN_KEYS) if (k in manifest) problems.push(`forbidden key ${k}`);
   const perms = [...((manifest.permissions as string[]) ?? []), ...((manifest.host_permissions as string[]) ?? [])];
   for (const p of FORBIDDEN_PERMISSIONS) if (perms.includes(p)) problems.push(`forbidden permission ${p}`);
+  // The in-page allowances, spelled out again (the snapshot above already pins them).
+  const cs = jsonDiff(manifest.content_scripts, IN_PAGE_CONTENT_SCRIPTS, '$.content_scripts');
+  if (cs) problems.push(`content_scripts is not the one in-page script: ${cs}`);
+  const war = jsonDiff(manifest.web_accessible_resources, IN_PAGE_WEB_ACCESSIBLE, '$.web_accessible_resources');
+  if (war) problems.push(`web_accessible_resources is not the composer's: ${war}`);
+  for (const p of IN_PAGE_PERMISSIONS) if (!perms.includes(p)) problems.push(`in-page permission ${p} missing`);
   // Every file the manifest names exists; only this mode's icons ship.
   const files = walk(dir);
   for (const f of Object.values(expectedManifest(m).icons as Record<string, string>)) {
@@ -215,6 +319,15 @@ function t1(m: Mode): void {
   }
   const otherLocales = files.filter((f) => f.startsWith('_locales/') && !messages.includes(f));
   if (otherLocales.length) problems.push(`unexpected locale files: ${otherLocales.join(', ')}`);
+  if (!files.includes(CONTENT_SCRIPT)) problems.push(`${CONTENT_SCRIPT} missing`);
+  if (!files.includes(COMPOSER_PAGE)) problems.push(`${COMPOSER_PAGE} missing`);
+  const workers = files.filter((f) => HEIC_WORKER.test(f));
+  const wasm = files.filter((f) => HEIC_WASM.test(f));
+  if (workers.length !== 1 || wasm.length !== 1) {
+    problems.push(`expected one HEIC worker and one libheif wasm, found [${workers}] [${wasm}]`);
+  }
+  // RL-3: libheif (LGPL-3.0) ships with its licence texts and a notice naming it and its source.
+  for (const p of licenseProblems(files, (f) => readFileSync(join(dir, f), 'utf8'))) problems.push(p);
   const foreignIcons = files.filter((f) => f.startsWith('icons/') && !f.startsWith(`icons/${MODE_INFO[m].icon}/`));
   if (foreignIcons.length) problems.push(`other modes' icons shipped: ${foreignIcons.join(', ')}`);
   check('T1', `${m} manifest snapshot (§5)`, problems);
@@ -228,7 +341,7 @@ function t2(m: Mode): void {
   const rulesFile = join(dir, STATIC_RULESET_PATH);
   const rulesFiles = walk(dir).filter((f) => f.startsWith('rules/'));
   const problems: string[] = [];
-  if (MODE_INFO[m].guarded) {
+  if (MODE_INFO[m].blocked) {
     if (!('declarative_net_request' in manifest)) problems.push('declarative_net_request key missing');
     if (!existsSync(rulesFile)) problems.push(`${STATIC_RULESET_PATH} missing`);
     else {
@@ -241,11 +354,63 @@ function t2(m: Mode): void {
     if ('declarative_net_request' in manifest) problems.push('declarative_net_request key present in live');
     if (rulesFiles.length) problems.push(`rules files present in live: ${rulesFiles.join(', ')}`);
   }
+  // The in-page frame rules (and every other session-range rule) never ship static.
+  for (const f of rulesFiles) {
+    const rules = JSON.parse(readFileSync(join(dir, f), 'utf8')) as { id?: unknown; action?: { type?: unknown } }[];
+    for (const r of Array.isArray(rules) ? rules : []) {
+      if (typeof r.id === 'number' && SESSION_RULE_IDS.includes(r.id)) problems.push(`${f}: session-range id ${r.id}`);
+      if (r.action?.type === 'modifyHeaders') problems.push(`${f}: rule ${String(r.id)} modifies headers`);
+    }
+  }
   check(
     'T2',
-    `${m} static write-block ruleset ${MODE_INFO[m].guarded ? 'present and = blockRuleset()' : 'absent'}`,
+    `${m} static write-block ruleset ${MODE_INFO[m].blocked ? 'present and = blockRuleset()' : 'absent'}`,
     problems,
   );
+}
+
+/**
+ * The in-page frame rules 1020 (X-Frame-Options removed) and 1021 (Sec-Fetch-Dest forged), both approved by
+ * the owner (OD15-style decisions, 2026-10-14), from their builders in src/core: frame-range ids inside the
+ * session range, one tab named, www `sub_frame` requests only, the one header each, and nothing else; a
+ * tab that is not a real tab throws (-1 would cover every service worker's requests).
+ */
+function t2FrameRules(): void {
+  const problems: string[] = [];
+  const tab = 7;
+  const want = (rule: DnrRule, id: number, header: string, side: 'requestHeaders' | 'responseHeaders') => {
+    if (rule.id !== id) problems.push(`rule ${rule.id}: expected id ${id}`);
+    if (!SESSION_RULE_IDS.includes(rule.id) || rule.id < FRAME_RULE_FIRST_ID) {
+      problems.push(`rule ${rule.id}: outside the frame rules' session range (${FRAME_RULE_FIRST_ID}..)`);
+    }
+    const c = rule.condition;
+    if (jsonDiff(c.tabIds, [tab])) problems.push(`rule ${rule.id}: tabIds ${JSON.stringify(c.tabIds)}`);
+    if (jsonDiff(c.resourceTypes, ['sub_frame'])) problems.push(`rule ${rule.id}: resourceTypes not [sub_frame]`);
+    if (jsonDiff(c.requestDomains, ['www.instagram.com'])) problems.push(`rule ${rule.id}: not www only`);
+    const a = rule.action as unknown as Record<string, unknown>;
+    const other = side === 'requestHeaders' ? 'responseHeaders' : 'requestHeaders';
+    const ops = (Array.isArray(a[side]) ? a[side] : []) as { header?: unknown }[];
+    if (a.type !== 'modifyHeaders' || ops.length !== 1 || ops[0]?.header !== header || other in a) {
+      problems.push(`rule ${rule.id}: not one ${side} op on ${header}: ${JSON.stringify(a)}`);
+    }
+  };
+  want(xfoRule(tab), XFO_RULE_ID, 'x-frame-options', 'responseHeaders');
+  want(fetchDestRule(tab), FETCH_DEST_RULE_ID, 'sec-fetch-dest', 'requestHeaders');
+  const builders: [string, (tabId: number) => DnrRule][] = [
+    ['xfoRule', xfoRule],
+    ['fetchDestRule', fetchDestRule],
+  ];
+  for (const [name, build] of builders) {
+    for (const bad of [-1, 1.5]) {
+      try {
+        build(bad);
+        problems.push(`${name}(${bad}) did not throw`);
+      } catch {
+        // Expected: one real tab only.
+      }
+    }
+  }
+  check('T2', 'in-page frame rules 1020/1021: session ids, one tab, www sub_frame, one header each', problems);
 }
 
 // ---- T3 ---------------------------------------------------------------------------------
@@ -275,7 +440,29 @@ function t3(m: Mode): void {
       for (const d of forbiddenDispatches(text)) problems.push(`${f}: dispatchEvent other than input/change: ${d}`);
     }
     if (f === 'background.js') for (const label of hits(text, BACKGROUND_ONLY)) problems.push(`${f}: ${label}`);
-    if (f.endsWith('.js') && f !== 'background.js' && f !== 'composer-agent.js') {
+    // Session rules only: no bundle installs dynamic rules (they would outlive the run and the browser session).
+    if (/updateDynamicRules/.test(text)) problems.push(`${f}: updateDynamicRules`);
+    // The frame rules' headers: in background.js (a positive control for this scan), nowhere else.
+    for (const re of FRAME_RULE_HEADERS) {
+      if (f !== 'background.js' && re.test(text)) problems.push(`${f}: frame-rule header ${re.source}`);
+      if (f === 'background.js' && !re.test(text)) problems.push(`${f}: frame-rule header ${re.source} missing`);
+    }
+    // docs/inpage.md §10.4: the in-page driver is in background.js once, and nowhere else.
+    const markers = text.split(INPAGE_MARKER).length - 1;
+    if (f === 'background.js' && markers !== 1) {
+      problems.push(`${f}: expected the in-page driver's marker once, found ${markers}`);
+    }
+    if (f !== 'background.js' && markers > 0) problems.push(`${f}: the in-page driver outside background.js`);
+    if (f === CONTENT_SCRIPT) {
+      // docs/inpage.md §8.7: the content script reads Instagram's DOM, frames, and nothing else.
+      for (const label of hits(text, CONTENT_SCRIPT_ONLY)) problems.push(`${f}: ${label}`);
+      for (const url of contentScriptMetaUrls(text)) problems.push(`${f}: Meta-host URL ${url}`);
+    } else if (HEIC_WORKER.test(f)) {
+      // docs/inpage.md §13.7: libheif's Emscripten glue carries XMLHttpRequest and fetch (unused: the worker
+      // hands it the wasm bytes), and the worker fetches its own packaged wasm. Meta hosts stay banned.
+      for (const label of hits(text, EDITOR_ONLY)) if (label === 'Meta host URL') problems.push(`${f}: ${label}`);
+      if (!text.includes('.wasm')) problems.push(`${f}: the HEIC worker without its packaged wasm`);
+    } else if (f.endsWith('.js') && f !== 'background.js' && f !== 'composer-agent.js') {
       for (const label of hits(text, EDITOR_ONLY)) problems.push(`${f}: ${label}`);
       for (const x of forbiddenEditorFetches(text)) problems.push(`${f}: fetch other than modulepreload: ${x}`);
     }
@@ -363,12 +550,13 @@ function t4(): void {
 
 // ---- main -------------------------------------------------------------------------------
 
-const present = t5();
+const present: Mode[] = t5();
 for (const m of present) {
   t1(m);
   t2(m);
   t3(m);
 }
+t2FrameRules();
 t3Source();
 t4();
 

@@ -5,7 +5,8 @@
  * (src/core has none). src/platform/dnr.ts casts them at the API boundary.
  *
  * Session rule ids: 1001 is the UA rule (device-profile.ts); 1002..1019 are reserved for
- * rehearsal rules. Cleanup always removes the whole range 1001..1019.
+ * rehearsal rules; 1020..1029 for the in-page lane (docs/inpage.md §3.5, frame-rules.ts: 1020 removes
+ * X-Frame-Options from the engine frame's document). Cleanup always removes the whole range 1001..1029.
  */
 import { WRITE_URL_FILTERS } from './write-endpoints.ts';
 
@@ -40,7 +41,10 @@ export interface DnrCondition {
   tabIds?: number[];
 }
 
-export type DnrAction = { type: 'block' } | { type: 'modifyHeaders'; requestHeaders: HeaderOperation[] };
+export type DnrAction =
+  | { type: 'block' }
+  /** At least one of the two lists; rule 1020 (docs/inpage.md §3.5) has response headers only. */
+  | { type: 'modifyHeaders'; requestHeaders?: HeaderOperation[]; responseHeaders?: HeaderOperation[] };
 
 export interface DnrRule {
   id: number;
@@ -57,14 +61,18 @@ export const STATIC_RULESET_PATH = 'rules/block_ig_writes.json';
 
 export const UA_RULE_ID = 1001;
 export const REHEARSAL_FIRST_ID = 1002;
-export const SESSION_RULE_LAST_ID = 1019;
-/** Every session rule id this extension may own: 1001..1019. Cleanup removes all of them. */
+/** The last id the rehearsal (test write-block) rules may use. */
+export const REHEARSAL_LAST_ID = 1019;
+/** docs/inpage.md §3.5: 1020..1029 belong to the in-page lane (frame-rules.ts). */
+export const FRAME_RULE_FIRST_ID = 1020;
+export const SESSION_RULE_LAST_ID = 1029;
+/** Every session rule id this extension may own: 1001..1029. Cleanup removes all of them. */
 export const SESSION_RULE_IDS: readonly number[] = Array.from(
   { length: SESSION_RULE_LAST_ID - UA_RULE_ID + 1 },
   (_, i) => UA_RULE_ID + i,
 );
 
-if (REHEARSAL_FIRST_ID + WRITE_URL_FILTERS.length - 1 > SESSION_RULE_LAST_ID) {
+if (REHEARSAL_FIRST_ID + WRITE_URL_FILTERS.length - 1 > REHEARSAL_LAST_ID) {
   throw new Error('rules: too many write filters for the reserved rehearsal id range 1002..1019');
 }
 

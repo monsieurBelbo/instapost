@@ -139,6 +139,11 @@ export interface FakeBoot {
   shell: 'msite' | 'desktop';
   /** The server-side route that rendered this document. */
   route: 'home' | 'composer';
+  /**
+   * C15 (`framed=unavailable`): the server refused a framed document request, so the shell renders only
+   * Instagram's "Sorry, this page isn't available" (no header, no + entry, no story input, no navigation).
+   */
+  unavailable?: true;
   knobs: Knobs;
   /** id of the React root element (randomised with `drift=renamed`). */
   rootId: string;

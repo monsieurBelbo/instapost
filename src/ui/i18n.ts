@@ -13,48 +13,37 @@
  *
  * Instagram's own UI language is another matter (L21): the autopilot never reads Instagram's text
  * (docs/contract.md § "Instagram in Spanish").
+ *
+ * AM48: the in-page composer (an extension page framed in Instagram's tab) uses this module too, through
+ * `src/inpage/strings.ts`; the content script uses `i18n-core.ts` (the rules without signals or catalogs)
+ * with the small page catalogs, and gets the resolved language from the background (`inpage/state`).
  */
 import { computed, signal } from '@preact/signals';
-import type { UiLangSetting } from '../core/handoff/state.ts';
 import { EN } from './catalog.en.ts';
 import { ES } from './catalog.es.ts';
+import {
+  type ArgsOf,
+  browserLanguage,
+  fill,
+  type Lang,
+  type LangSetting,
+  localeFor,
+  resolveLang,
+} from './i18n-core.ts';
 
-export type Lang = 'en' | 'es';
-export type LangSetting = UiLangSetting;
-export const LANGS: readonly Lang[] = ['en', 'es'];
+export {
+  browserLanguage,
+  LANGS,
+  type Lang,
+  type LangSetting,
+  langOf,
+  placeholders,
+  resolveLang,
+} from './i18n-core.ts';
 
 export type MsgKey = keyof typeof EN;
 export type Catalog = { readonly [K in MsgKey]: string };
 export const CATALOGS: Readonly<Record<Lang, Catalog>> = { en: EN, es: ES };
-
-/** The `{name}` placeholders of a text, sorted and without repeats. */
-export function placeholders(text: string): string[] {
-  return [...new Set(Array.from(text.matchAll(/\{([A-Za-z][A-Za-z0-9]*)\}/g), (m) => m[1] ?? ''))].sort();
-}
-
-/** The language a browser language tag maps to: `es`, `es-AR`, `es_419` → es; anything else → en. */
-export function langOf(tag: string | null | undefined): Lang {
-  return /^es(?:[-_]|$)/i.test((tag ?? '').trim()) ? 'es' : 'en';
-}
-
-/** The setting as the UI shows it: Auto follows the browser. */
-export function resolveLang(setting: LangSetting, browserTag: string | null | undefined): Lang {
-  return setting === 'auto' ? langOf(browserTag) : setting;
-}
-
-/** The browser's UI language (chrome.i18n), else the page's `navigator.language`, else `en`. */
-export function browserLanguage(): string {
-  try {
-    const i18n = (globalThis as { chrome?: { i18n?: { getUILanguage?: () => string } } }).chrome?.i18n;
-    const ui = i18n?.getUILanguage?.();
-    if (typeof ui === 'string' && ui !== '') return ui;
-  } catch {
-    // Not an extension page (unit tests, the fake's own pages): fall through.
-  }
-  return typeof navigator !== 'undefined' && typeof navigator.language === 'string' && navigator.language !== ''
-    ? navigator.language
-    : 'en';
-}
 
 /** The Settings choice (settings-state.ts keeps it in step with storage.local `settings.lang`). */
 export const langSetting = signal<LangSetting>('auto');
@@ -69,21 +58,10 @@ export function setLangSetting(next: LangSetting): void {
 
 /** The locale for Intl: the browser's own tag when it is in the chosen language (keeps its region), else the bare language. */
 export function intlLocale(l: Lang = lang.value): string {
-  const tag = (typeof navigator !== 'undefined' && navigator.language) || browserTag.value;
-  return langOf(tag) === l && /^[a-z]{2}(?:-[A-Za-z0-9]{2,8})*$/.test(tag) ? tag : l;
+  return localeFor(l, (typeof navigator !== 'undefined' && navigator.language) || browserTag.value);
 }
 
-type ParamNames<S extends string> = S extends `${string}{${infer P}}${infer R}` ? P | ParamNames<R> : never;
-/** The placeholders of a key, from its English text. */
-export type Params<K extends MsgKey> = ParamNames<(typeof EN)[K]>;
-type Args<K extends MsgKey> = [Params<K>] extends [never] ? [] : [Readonly<Record<Params<K>, string | number>>];
-
-function fill(text: string, params: Readonly<Record<string, string | number>> | undefined): string {
-  if (!params) return text;
-  return text.replace(/\{([A-Za-z][A-Za-z0-9]*)\}/g, (whole, name: string) =>
-    Object.hasOwn(params, name) ? String(params[name]) : whole,
-  );
-}
+type Args<K extends MsgKey> = ArgsOf<(typeof EN)[K]>;
 
 /** The text of `key` in the current language, with its placeholders filled. */
 export function t<K extends MsgKey>(key: K, ...args: Args<K>): string {
