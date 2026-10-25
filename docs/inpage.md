@@ -661,7 +661,7 @@ ux.md P1–P6 hold. P5 now reads "a phone inside the panel" where it read "a win
 | # | Principle |
 |---|---|
 | P7 | **Never leave Instagram and never take focus.** No window, no tab switch, no resize. instapost waits instead of raising anything |
-| P8 | **Instagram's own page is never edited.** instapost adds only its pill and its panel, in its own host. Instagram's DOM is read only to place the pill |
+| P8 | **Instagram's own page is never edited.** instapost adds only its pill and its panel, in its own host. Instagram's DOM is read only to place instapost's own controls, and, at the owner's click, to read a post's or a mention's metadata (docs/repost.md RP-13–RP-16, strategy AM57) |
 
 ### 7.2 Entry
 
@@ -1369,3 +1369,7 @@ The in-page lane worked live in Arc on the secondary account (2026-10-14/15), an
 - **RL-19** SW_INTERCEPTS and ACCEPT_DRIFT have their own copy (Instagram changed its page; trying again won't help) with Send to phone as the only action.
 
 Still open for the release: the "Post using: This tab | A window" switch of FS14, and whether `declarativeNetRequest` is still needed now that live ships no static ruleset (drop it only after a live check). The version is 0.1.1.
+
+## 15. Repost (0.2.0)
+
+Repost to story (Share → **Add to story** on a photo post, **Add to your story** on a story that mentions the owner) builds on this lane without changing it: the content script reads a post's metadata at the owner's click and docks its entries to Instagram's Share dialog, the composer loads the picture from Instagram's image CDN (the one audited GET, strategy AM55) and renders it as a card, and the run posts pixels as any story. Nothing changes Instagram's publish request: App-style repost (strategy AM60, OD21: the post sticker and the @mention by app-only fields in that request) was declined in the build and is not implemented (README hard rule 8). Spec, ids (RP-n; U40–U51, B21–B28, L37–L51, R31–R41 per AM61), risks and the owner's live checks: [`docs/repost.md`](repost.md).

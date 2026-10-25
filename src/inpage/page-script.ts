@@ -21,6 +21,9 @@
  *   (Small, Large or Hidden, geometry.ts) and the chip's thumbnail. `pointer-events: none`. Removed on
  *   command or when the background's port goes away.
  * - **the chip's badge** (✓ ! ?) above the thumbnail.
+ * - **the repost entries** (docs/repost.md §2, src/inpage/repost/entry.ts): Add to story docked to Instagram's
+ *   Share dialog after the owner's click on a post's Share, and Add to your story on story mentions. Their
+ *   click sends `inpage/repost` (metadata only) and opens the composer.
  *
  * It reports the frame's `load` and its pathname (polled every 250 ms: msite moves by pushState), and sets
  * a `beforeunload` guard on command. It never clicks, never uses the network, never stores anything, never
@@ -65,6 +68,7 @@ import {
   shortcutOf,
   toLang,
 } from './page-copy.ts';
+import { REPOST_CSS, type RepostHandle, startRepost } from './repost/entry.ts';
 import { type PagePalette, pagePalette } from './theme.ts';
 
 export interface PageRuntime {
@@ -235,7 +239,7 @@ export function startPageScript(win: Window, rt: PageRuntime): { dispose(): void
   const host = doc.createElement('div');
   const root = host.attachShadow({ mode: 'closed' });
   const style = doc.createElement('style');
-  style.textContent = CSS;
+  style.textContent = CSS + REPOST_CSS;
   const wrap = el('div', 'ip');
   // Our own texts are English or Spanish: left to right even on a mirrored (right-to-left) Instagram (RL-9).
   wrap.setAttribute('dir', 'ltr');
@@ -983,6 +987,7 @@ export function startPageScript(win: Window, rt: PageRuntime): { dispose(): void
     placeBadge();
     schedule();
     renderEntry();
+    repost.refresh();
   }
 
   // ---- input ------------------------------------------------------------------------------------------
@@ -990,6 +995,24 @@ export function startPageScript(win: Window, rt: PageRuntime): { dispose(): void
   const preload = () => {
     if (ready) ensureComposer();
   };
+
+  // ---- the repost entries (docs/repost.md §2) -----------------------------------------------------------
+
+  const repost: RepostHandle = startRepost({
+    win,
+    host,
+    wrap,
+    lang: () => lang,
+    prefOn: () => ready && state.prefs.repost,
+    busy: () => state.run.phase === 'running',
+    me: () => profileHandle(profile),
+    send: (msg) => rt.send(msg),
+    open: () => {
+      ensureComposer();
+      open();
+    },
+    preload,
+  });
   entry.addEventListener('click', () => toggle());
   entry.addEventListener('pointerenter', () => {
     preload();
@@ -1060,6 +1083,7 @@ export function startPageScript(win: Window, rt: PageRuntime): { dispose(): void
     win.removeEventListener('keyup', onInput, { capture: true });
     win.removeEventListener('popstate', schedule);
     setGuard(false);
+    repost.dispose();
     host.remove();
   }
 

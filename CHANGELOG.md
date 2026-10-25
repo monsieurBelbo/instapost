@@ -4,6 +4,13 @@ All notable changes to instapost are listed here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+Version 0.2.0 (not released).
+
+### Added
+
+- Repost to story: Share → **Add to story** on a photo post (feed, modal, permalink), and **Add to your story** on a story that mentions you (the DM preview, the story viewer). The post is drawn as a card over a generated background with the author's @handle, and posted like any story. The composer loads the photo from Instagram's image server once you allow it (optional host permission). Videos come later. Settings → On Instagram turns it off (docs/repost.md, strategy AM54–AM59).
+- The repost is a photo: people can't tap through to the post, and the author is not notified. The composer says so, and how to notify them (Send to phone…, then a mention in the Instagram app).
+
 ## [0.1.1] - 2026-10-15
 
 Post stories from inside Instagram's own desktop page, without leaving the tab.

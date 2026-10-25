@@ -2,12 +2,14 @@
  * The composer's root (inpage-ui-spec.md FC, FA): the dialog when open, the chip as a chip, nothing when
  * closed (the page keeps it loaded at 0×0, so its state, a queued post and the draft survive). Also the
  * editor's plumbing (fonts, drafts, the export cache, autosave), the theme, the keyboard (FA4), the focus
- * trap and focus moves (FC5, FA1), tooltips (§9), toasts and the live region (FA3).
+ * trap and focus moves (FC5, FA1), tooltips (§9), toasts and the live region (FA3). A repost (docs/repost.md
+ * RP-28) adds S (cycle the look); F does nothing on its card, 0 and = − reset and size it.
  */
 import { effect } from '@preact/signals';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { dialogLayout } from '../../src/inpage/geometry.ts';
-import { runSteps } from '../../src/inpage/run-view.ts';
+import { autoCopy, runSteps } from '../../src/inpage/run-view.ts';
+import { composerStrings as S } from '../../src/inpage/strings.ts';
 import { DEFAULT_FONT_ID, loadFont } from '../../src/raster/fonts.ts';
 import { loadDrafts, scheduleAutosave } from '../../src/ui/drafts.ts';
 import {
@@ -24,6 +26,14 @@ import {
 } from '../../src/ui/editor-state.ts';
 import { scheduleExport } from '../../src/ui/export-cache.ts';
 import { lang } from '../../src/ui/i18n.ts';
+import {
+  cycleRepostLook,
+  onRepostReady,
+  repostActive,
+  repostScale,
+  resetRepost,
+  setRepostScale,
+} from '../../src/ui/repost-state.ts';
 import { isTyping } from '../../src/ui/shortcuts.ts';
 import { firstImage, pickPhoto, takePhoto } from './actions.ts';
 import { Chip } from './Chip.tsx';
@@ -37,6 +47,7 @@ import {
   fireQueue,
   followSettings,
   ghost,
+  hint,
   keepCopiesOn,
   leave,
   loggedIn,
@@ -59,6 +70,7 @@ import {
   tab,
   testRate,
   tick,
+  toast,
   toastMsg,
   view,
   viewport,
@@ -85,6 +97,20 @@ function setupEditor(): void {
   // Instagram's buttons are drawn as ghost outlines over the stage (G); the canvas's margin bands stay off.
   showSafeZones.value = false;
   ghost.value = true;
+  // RP-28, RP-30: a repost on the stage: "Click the post to change its look" for 1.8 s, and the story it
+  // replaced is kept as a draft.
+  let hintTimer: ReturnType<typeof setTimeout> | null = null;
+  onRepostReady(({ kept, kind }) => {
+    if (kind === 'post') {
+      hint.value = true;
+      if (hintTimer !== null) clearTimeout(hintTimer);
+      hintTimer = setTimeout(() => {
+        hint.value = false;
+      }, 1800);
+    }
+    if (kept) toast(S.repost.keptDraft);
+    if (mode.value === 'open') focusForView();
+  });
 }
 
 // ---- results: seal, auto-close, copies, K12 ---------------------------------------------------------
@@ -102,10 +128,10 @@ function setupResults(): void {
       // K12 now reads the stored records (state.ts guard, RL-13), so it survives View story's page load.
       // FD9: zero interaction after Post: it closes itself after 4 s (only if it is open to see it).
       if (mode.value === 'open' && !closing.value) autoClose.value = Date.now();
-      if (keepCopiesOn()) void saveCopy(rec.runId, true);
     }
-    // "Stories that are not posted are always saved there."
-    if (rec.mode === 'post' && (kind === 'failed' || kind === 'unknown')) void saveCopy(rec.runId, true);
+    // "Stories that are not posted are always saved there", and posted ones with Keep copies; never a repost
+    // (AM59: Save copy stays the owner's choice).
+    if (autoCopy(rec, kind, keepCopiesOn())) void saveCopy(rec.runId, true);
     announce(currentResult()?.rv.title ?? '');
     if (mode.value === 'open') focusPrimary();
   });
@@ -250,14 +276,19 @@ function onKey(e: KeyboardEvent): void {
     requestAnimationFrame(() => document.getElementById('story-text')?.focus());
   } else if (lk === 'g') {
     ghost.value = !ghost.value;
+  } else if (lk === 's') {
+    if (repostActive.value) cycleRepostLook();
   } else if (lk === 'f') {
-    setFit(imageLayer.value?.fit === 'contain' ? 'cover' : 'contain');
+    if (!repostActive.value) setFit(imageLayer.value?.fit === 'contain' ? 'cover' : 'contain');
   } else if (k === '0') {
-    refitImage();
+    if (repostActive.value) resetRepost();
+    else refitImage();
   } else if (k === '=' || k === '+') {
-    setImageScale((imageLayer.value?.xf.scale ?? 1) * 1.1);
+    if (repostActive.value) setRepostScale(repostScale.value * 1.1);
+    else setImageScale((imageLayer.value?.xf.scale ?? 1) * 1.1);
   } else if (k === '-' || k === '−') {
-    setImageScale((imageLayer.value?.xf.scale ?? 1) / 1.1);
+    if (repostActive.value) setRepostScale(repostScale.value / 1.1);
+    else setImageScale((imageLayer.value?.xf.scale ?? 1) / 1.1);
   }
 }
 

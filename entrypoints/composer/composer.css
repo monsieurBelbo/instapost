@@ -464,6 +464,84 @@ kbd {
   opacity: 1;
 }
 
+/* ---- a repost's intake (docs/repost.md RP-20, RP-22): where the import view goes ------------------------- */
+
+.rp-intake {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+.rp-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  color: var(--text-2);
+}
+.rp-in {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: 320px;
+}
+.rp-av,
+.rp-mark {
+  width: 56px;
+  height: 56px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  margin-bottom: 10px;
+}
+.rp-av {
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 600;
+}
+.rp-mark {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.rp-mark svg {
+  width: 28px;
+  height: 28px;
+}
+.rp-t {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 16px;
+  line-height: 21px;
+  font-weight: 600;
+  color: var(--text);
+}
+.rp-b {
+  margin: 0;
+  font-size: 14px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+.rp-a {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+/* The loading spinner follows the text colour, so it shows on the light surface as on the dark one. */
+.rp-t .spinner {
+  display: inline-block;
+  border-color: color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+}
+
 /* The spinner in a button follows the button's text colour (both themes). */
 /* Converting HEIC… stays readable (a disabled button is dimmed otherwise). */
 .btn[aria-busy="true"]:disabled {

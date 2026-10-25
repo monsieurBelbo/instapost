@@ -2,12 +2,25 @@
  * Editor state (strategy §7.10, ux.md §4.3): one StoryDoc with one photo frame, holding at most one image
  * layer (bottom) and one text layer (top). Signals at module scope. Drafts autosave (drafts.ts); a photo
  * replaced under existing text keeps the text.
+ *
+ * docs/repost.md RP-24, RP-30 (AM59): a repost puts a painted card bitmap on the stage as the image layer
+ * (`fit: 'free'`) and keeps its source photo as a second in-memory asset (`backdrop`, for the Blur
+ * background); the doc is `transient` then: no autosave, nothing stored. Loading a photo, a draft or a new
+ * story ends it.
  */
 import { batch, computed, signal } from '@preact/signals';
 import type { Size } from '../core/geometry/fit.ts';
 import { initialXf } from '../core/geometry/fit.ts';
 import { newId } from '../core/model/ids.ts';
-import { createDoc, type Frame, type ImageLayer, type StoryDoc, type TextLayer } from '../core/model/story.ts';
+import {
+  createDoc,
+  type Fill,
+  type Frame,
+  type ImageLayer,
+  type StoryDoc,
+  type TextLayer,
+  type Xf,
+} from '../core/model/story.ts';
 import type { TextMeasurer } from '../core/text/layout.ts';
 import { DEFAULT_FONT_ID } from '../raster/fonts.ts';
 import { canvasMeasurer } from '../raster/measurer-canvas.ts';
@@ -54,6 +67,10 @@ function freshDoc(): StoryDoc {
 export const doc = signal<StoryDoc>(freshDoc());
 /** The decoded image behind the image layer, if any. */
 export const image = signal<LoadedImage | null>(null);
+/** RP-24: a second in-memory asset (a repost's source photo, behind its Blur background), or null. */
+export const backdrop = signal<LoadedImage | null>(null);
+/** AM59: the doc on the stage is not kept (a repost): no autosave (drafts.ts), nothing stored. */
+export const transient = signal(false);
 export const showSafeZones = signal(true);
 /** Instrument Sans is loaded (text cannot be measured or drawn before). */
 export const fontsReady = signal(false);
@@ -95,7 +112,21 @@ export const textLayer = computed(() => frame.value.layers.find((l): l is TextLa
 /** Natural size of an asset the editor holds, for compose(). */
 export function assetSize(assetId: string): Size | undefined {
   const img = image.value;
-  return img && img.assetId === assetId ? img.size : undefined;
+  if (img && img.assetId === assetId) return img.size;
+  const b = backdrop.value;
+  return b && b.assetId === assetId ? b.size : undefined;
+}
+
+/** The bitmap of an asset the editor holds: `full` for the export, `proxy` for the stage. */
+export function assetBitmap(assetId: string, which: 'full' | 'proxy'): ImageBitmap | undefined {
+  for (const a of [image.value, backdrop.value]) if (a && a.assetId === assetId) return a[which];
+  return undefined;
+}
+
+/** RP-28: the limits of a `free` image layer (the repost card's scale range and centre clamp), or none. */
+let freeLimit: ((xf: Xf, src: Size) => Xf) | null = null;
+export function setFreeLimit(f: ((xf: Xf, src: Size) => Xf) | null): void {
+  freeLimit = f;
 }
 
 function updateFrame(fn: (f: Frame) => Frame): void {
@@ -108,6 +139,7 @@ function updateImage(fn: (l: ImageLayer, src: Size) => Partial<ImageLayer>): voi
   const img = image.value;
   if (!l || !img) return;
   const patch = fn(l, img.size);
+  if (l.fit === 'free' && freeLimit && patch.xf) patch.xf = freeLimit(patch.xf, img.size);
   updateFrame((f) => ({ ...f, layers: f.layers.map((x) => (x.id === l.id ? { ...l, ...patch } : x)) }));
 }
 
@@ -145,8 +177,85 @@ export function errorNotice(err: unknown): Notice {
   return typeof code === 'string' ? { kind: 'error', text, code } : { kind: 'error', text };
 }
 
+// ---- transient docs (docs/repost.md RP-24, RP-30) --------------------------------------------
+
+const transientEnds = new Set<() => void>();
+/** Called whenever a transient doc ends (a photo, a draft or a new story replaced it). */
+export function onTransientEnd(f: () => void): () => void {
+  transientEnds.add(f);
+  return () => transientEnds.delete(f);
+}
+
+/** Ends a transient doc: the backdrop is released, autosave resumes. */
+export function endTransient(): void {
+  if (!transient.value && !backdrop.value) return;
+  const b = backdrop.value;
+  batch(() => {
+    transient.value = false;
+    backdrop.value = null;
+  });
+  if (b) releaseImage(b);
+  freeLimit = null;
+  for (const f of transientEnds) f();
+}
+
+/**
+ * Puts a transient image (a repost's card) on the stage as a `free` layer at `xf`, with `back` as the
+ * backdrop asset and `background` as the frame's fill. `fresh` starts a new doc (an empty text layer).
+ */
+export function placeTransient(
+  card: LoadedImage,
+  back: LoadedImage | null,
+  xf: Xf,
+  background: Fill,
+  fresh: boolean,
+): void {
+  const previous = image.value;
+  const prevBack = backdrop.value;
+  const base = fresh ? freshDoc() : doc.value;
+  const f0 = base.frames[0];
+  if (!f0) return;
+  const old = f0.layers.find((l): l is ImageLayer => l.kind === 'image');
+  const layer: ImageLayer = {
+    kind: 'image',
+    id: old?.id ?? newId('layer', uuid),
+    assetId: card.assetId,
+    fit: 'free',
+    focal: { x: 0.5, y: 0.5 },
+    xf,
+  };
+  batch(() => {
+    image.value = card;
+    backdrop.value = back;
+    transient.value = true;
+    doc.value = {
+      ...base,
+      frames: [
+        { ...f0, background, layers: [layer, ...f0.layers.filter((l) => l.kind !== 'image')] },
+        ...base.frames.slice(1),
+      ],
+      updatedAt: Date.now(),
+    };
+  });
+  if (previous && previous !== card) releaseImage(previous);
+  if (prevBack && prevBack !== back) releaseImage(prevBack);
+}
+
+/** The frame's background (the repost's Colours, Blur or Black). */
+export function setBackground(background: Fill): void {
+  updateFrame((f) => ({ ...f, background }));
+}
+
+/** The image layer's placement as given (the repost computes its own clamps). */
+export function setImageXf(xf: Xf): void {
+  const l = imageLayer.value;
+  if (!l) return;
+  updateFrame((f) => ({ ...f, layers: f.layers.map((x) => (x.id === l.id ? { ...l, xf } : x)) }));
+}
+
 /** New story (§4.7 New story): a fresh doc with an empty text layer; the image is released. */
 export function newStory(): void {
+  endTransient();
   const previous = image.value;
   batch(() => {
     image.value = null;
@@ -161,6 +270,7 @@ export async function restoreDraft(saved: StoryDoc, original: Blob | null): Prom
   if (busy.value) return;
   busy.value = 'import';
   setNotice(null);
+  endTransient();
   try {
     // The saved doc points at its asset id; keep it (a HEIC's stored original is its JPEG, another hash).
     const layer = saved.frames[0]?.layers.find((l): l is ImageLayer => l.kind === 'image');
@@ -203,6 +313,7 @@ export async function loadImageFile(file: Blob, opts: { assetId?: string } = {})
         converting.value = true;
       },
     });
+    endTransient();
     const previous = image.value;
     const layer: ImageLayer = {
       kind: 'image',

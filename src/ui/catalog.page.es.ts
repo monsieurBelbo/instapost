@@ -26,4 +26,13 @@ export const PAGE_ES: PageCatalog = {
   'page.coach.body': 'instapost se abre sobre Instagram, así que nunca sales de la página.',
   'page.coach.key': 'Atajo',
   'page.coach.ok': 'Entendido',
+  'page.repost.add': 'Añadir a tu historia',
+  'page.repost.addName': 'instapost: añadir esta publicación a tu historia',
+  'page.repost.with': 'con instapost',
+  'page.repost.mention': 'Añadir a tu historia',
+  'page.repost.mentionName': 'instapost: añadir la historia de @{handle} a la tuya',
+  'page.repost.video': 'Los vídeos llegarán más adelante',
+  'page.repost.blocked': '@{handle} no permite compartir esta publicación',
+  'page.repost.busy': 'Espera a que termine la publicación en curso',
+  'page.repost.expired': 'Esta historia ha caducado',
 };

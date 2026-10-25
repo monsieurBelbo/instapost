@@ -214,7 +214,9 @@ describe('frame watch (webRequest, §3.14 source 1)', () => {
       entry: 'none',
       preview: 'small',
       coachSeen: true,
+      repost: true,
     });
+    expect(toUiPrefs({ repost: false }).repost).toBe(false);
   });
 
   it('inpage/attach: the content script asks before touching the page; the answer is a boolean', () => {

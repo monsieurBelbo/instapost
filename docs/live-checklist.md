@@ -1,6 +1,6 @@
 # instapost: live checklist
 
-The owner's checklist for everything that touches real Instagram. It copies the L and G lists of `docs/strategy.md` §8 with the same ids; tick items here as they are done. Since 2026-10-15 the product is the in-page lane (posting from inside your own Instagram tab): its checks are L30–L36; L1–L24 are the window lane's and stay valid for it, the fallback. Ids are stable: never renumber or reuse one, and strike through an item that is dropped instead of deleting it.
+The owner's checklist for everything that touches real Instagram. It copies the L and G lists of `docs/strategy.md` §8 with the same ids (the repost's L37–L51 live only here and in `docs/repost.md` §13; §8 points to them); tick items here as they are done. Since 2026-10-15 the product is the in-page lane (posting from inside your own Instagram tab): its checks are L30–L36, and the repost's L37–L51; L1–L24 are the window lane's and stay valid for it, the fallback. Ids are stable: never renumber or reuse one, and strike through an item that is dropped instead of deleting it.
 
 **Before any step that loads the extension (strategy §6.4):**
 
@@ -124,6 +124,34 @@ After **Post story** instapost taps Instagram's own + → Story and Share by its
 - [ ] **L34** *Requires L33, at least 60 s later.* **A real post from the composer** of a frame you are happy to post on the secondary: **Post story**, hands off. Expect **Posted to @…'s story** within about 15–25 s and the dialog closing itself after 4 s. In Details: Result `posted`, Steps, Frame. **Check on the phone** that the story is live once (no duplicate), with the expected crop and sharpness; then delete it. Afterwards the tab is normal Instagram again: reload it and check the desktop layout (the rules are gone). If the result is **Couldn't confirm**, check the phone before anything else and never post the same photo again before that.
 - [ ] **L35** **HEIC.** AirDrop an iPhone photo (HEIC) to the Mac, then drag it from Finder (Downloads) into the dialog: "Converting HEIC…", then the photo on the stage, upright, with colours that match the Photos app; it shows in Recent photos afterwards. Try a 48 MP photo (a few seconds) and a Live Photo (the still is used). No post needed (a Test run is enough). Note the time to the stage and any colour difference.
 - [ ] **L36** **The in-page lane in Spanish.** In the composer, Settings → **Language** → **Español**: the dialog switches at once, and so does the entry in Instagram's sidebar ("Nueva historia") and its tooltip; reload the tab: still Spanish. One Test run in Spanish (it counts towards the spacing only): the steps, the result ("Prueba superada") and Details in Spanish. Switch to **Auto (browser)**: it follows Arc's language. Note any text that stayed English or does not fit, and switch back if you like.
+
+### Reposts (added 2026-10-25; strategy §11 AM54–AM61, `docs/repost.md` §13)
+
+Secondary account only; **Test run** before any post; your own post first; after OD20. These were RPL-1–RPL-15 on `spike/repost` (AM61). When something does not attach or load, Settings → Advanced → Diagnostics → **Copy** includes the reasons (`repost`: where and why, no URL).
+
+- [ ] **L37** Load the 0.2.0 live build (Remove, then Load unpacked: the manifest changed). Reload instagram.com and check that **New story** still works (L30).
+- [ ] **L38** **Own photo post, Test run.**
+  1. Profile → open one of your own photo posts → Share. The **Add to story** strip appears at the dialog's edge. Click it.
+  2. The composer opens with the permission card → **Allow** → the browser prompt → Allow. The card appears on the coloured background. Note whether the prompt appeared from the framed composer.
+  3. Click the card: Card → Photo → Dark. Switch Show @handle off and on. Drag and resize it.
+  4. **Test run**: it passes, nothing is posted.
+  5. Record: the Details Repost row and `mediaW`.
+- [ ] **L39** **Own post, real post** (at least 60 s after L38): Post story → **Posted**. On the phone: the card is sharp, the credit is readable, and the story is not tappable (as expected). Then delete it.
+- [ ] **L40** **Carousel:** on slide 2 of a carousel, click Share → Add to story. The composer shows slide 2. Repeat from the feed (not the modal).
+- [ ] **L41** **Video:** a reel and a video slide each show the strip **disabled**, "Videos come later".
+- [ ] **L42** **Others' public photo post** (a test account you follow): Share → strip → composer, with the credit locked on and the one-time note. Test run only. Also open a **private** account's post you can see and a post whose author turned off story sharing (if available). Record whether Instagram shows Share at all, whether the strip shows, and whether the dialog has the external share bar (Copy link and so on), so RP-16 can decide whether `bar` becomes a gate. Note the dialog's title in EN and ES. Under the controls the note says "@author isn't notified" and how to notify them (not on your own post, L38; on a mention, L44, it does).
+- [ ] **L43** **Feed vs hard-loaded permalink:** paste `/p/<code>/` into the address bar, reload, then Share → strip. In Details, the Repost row reads `consent allowed` when the reloaded page carries the post's sharing flags (else `not known`; record which). From the feed it reads `not known`.
+- [ ] **L44** **Mention:** from a second test account, post a photo story mentioning the secondary account.
+  1. In the secondary's DM thread: the **Add to your story** pill on the preview → composer → story card + "@author" → Test run.
+  2. Open the story from the DM: the viewer pill appears beside the card; compare the sharpness.
+  3. Record: the DM wording in EN and ES, the href form, the preview width, and whether a story reply or shared story shows no pill.
+- [ ] **L45** **Headers** (DevTools on the composer frame → Network, the image GET). Record: the status, `Origin` (present or absent, and its value), `Referer` (none), `Sec-Fetch-Mode` and `-Dest`, cookies (none), and the response's `Access-Control-Allow-Origin` and `Cross-Origin-Resource-Policy`. Only these values go into `baseline.json`, never a URL or a screenshot.
+- [ ] **L46** **Spanish Instagram:** switch Instagram to Español and repeat L38 up to the Test run. The strip reads "Añadir a tu historia"; the DM mention pill is recognised.
+- [ ] **L47** **Light and dark:** the strip and pills follow Instagram's appearance; the strip never covers Instagram's dialog content.
+- [ ] **L48** **Expired link:** leave a post open for hours (or overnight), then Share → strip. Either it loads, or you see "The photo's link expired…". Reload and it works.
+- [ ] **L49** **The credit stays:** on someone else's post (L42), size the card to the largest and drag it hard to each edge and corner, in each look (Card, Photo, Dark), and the mention's card (L44). The credit (header, "@author" pill, story pill) always stays whole, below the top bar and above the reply bar. Test run only.
+- [ ] **L50** **Short window:** make Arc about 720 px tall, Share on a feed post. If the strip has no room, the **Add to story** pill sits beside Instagram's dialog, never over its contacts or search; clicking in the dialog keeps it, closing the dialog removes it.
+- [ ] **L51** **A repost after a result:** after L39's Posted (let it auto-close), Share → Add to story on another post. The composer opens on the new repost's loading or permission card, not on the old Posted result.
 
 ## G: gate before the primary account
 

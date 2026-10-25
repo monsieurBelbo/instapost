@@ -11,7 +11,12 @@
  *   same tab, and the composer's requests (close, hide, open, the preview size) to its page. Page ⇄ composer
  *   traffic always goes through here, never `window.postMessage` (R25);
  * - `inpage/state` (the run as each Instagram tab sees it) to every Instagram tab whenever it changes;
- * - tabs.onUpdated (the page's own URL, F8) and tabs.onRemoved.
+ * - tabs.onUpdated (the page's own URL, F8) and tabs.onRemoved;
+ * - docs/repost.md RP-19: the owner's Add to story (`inpage/repost`, metadata only) is accepted from frame 0 on
+ *   www (and refused during a run in that tab), held in memory one per tab (the newest wins, 60 s, never
+ *   stored) and relayed once to that tab's composer as `ui/repost`, replayed on connect before `ui/page` and
+ *   `ui/mode` when the composer's port was not up yet. `inpage/repost-diag` goes to storage.local `repostDiag`
+ *   (diagnostics, structural). `ui/open-settings` opens the editor's Settings (the permission row, RP-20).
  *
  * The window lane's composer window is an Instagram tab too: its content script asks first (`inpage/attach`)
  * and is told to stay out, so that lane's page gets no host element, entry or observer (no behaviour change
@@ -26,6 +31,7 @@ import { type Browser, browser } from 'wxt/browser';
 import type { HandoffState } from '../core/handoff/state.ts';
 import { chromeMajorFromUa, isBrandedBrowser } from '../core/ig-contract/device-profile.ts';
 import { SESSION_RULE_IDS } from '../core/ig-contract/rules.ts';
+import type { RepostSource } from '../core/repost/source.ts';
 import type { LocalState } from '../handoff/local-state.ts';
 import type { Logger, Runner } from '../handoff/runner.ts';
 import { actionShortcut } from '../platform/commands.ts';
@@ -37,6 +43,7 @@ import { calibrationCanvas, cornerMarkers } from '../raster/calibration.ts';
 import { GUARDED } from '../shared/env.ts';
 import type { AgentReply, SenderLike } from '../shared/protocol.ts';
 import { browserLanguage, resolveLang } from '../ui/i18n-core.ts';
+import { appendRepostDiag } from '../ui/repost/diag.ts';
 import {
   createInpageDriver,
   INFLIGHT_KEY,
@@ -74,6 +81,29 @@ const RECORDS_KEY = 'inpageRecords';
 const MAX_RECORDS = 20;
 const IG_PREFIX = 'https://www.instagram.com/';
 const IG_TABS = 'https://www.instagram.com/*';
+/** docs/repost.md RP-19: a held repost is dropped after this long. */
+export const REPOST_HOLD_MS = 60_000;
+const EDITOR_SETTINGS = '/editor.html#settings';
+
+/** RP-19: the newest repost per tab, in memory only, consumed once. */
+export function repostHold(now: () => number = Date.now) {
+  const held = new Map<number, { src: RepostSource; at: number }>();
+  return {
+    put(tabId: number, src: RepostSource): void {
+      held.set(tabId, { src, at: now() });
+    },
+    /** The held repost (once), or null when there is none or it is older than REPOST_HOLD_MS. */
+    take(tabId: number): RepostSource | null {
+      const h = held.get(tabId);
+      held.delete(tabId);
+      return h && now() - h.at <= REPOST_HOLD_MS ? h.src : null;
+    },
+    drop(tabId: number): void {
+      held.delete(tabId);
+    },
+    size: () => held.size,
+  };
+}
 
 /** The insert's photo when a test run comes without one: a 1080×1920 calibration card, as a PNG. */
 async function calibrationPng(): Promise<{ mime: string; bytes: Uint8Array }> {
@@ -250,6 +280,20 @@ export function startInpageLane(runner: Runner, local: LocalState, log: Logger):
     }
   };
   const toPage = (tabId: number, msg: BackgroundToPage) => tabs.sendMessage(tabId, msg, 0).catch(() => undefined);
+  const reposts = repostHold();
+  /** RP-19: hand a held repost to the tab's composer, once; kept when its port is not up. */
+  const relayRepost = (tabId: number): void => {
+    const port = panels.get(tabId);
+    if (!port) return;
+    const src = reposts.take(tabId);
+    if (!src) return;
+    try {
+      port.postMessage({ v: 1, type: 'ui/repost', src } satisfies BackgroundToPanel);
+    } catch {
+      panels.delete(tabId);
+      reposts.put(tabId, src);
+    }
+  };
 
   // ---- inpage/state to every Instagram tab ------------------------------------------------------------
 
@@ -317,6 +361,8 @@ export function startInpageLane(runner: Runner, local: LocalState, log: Logger):
     const tabId = sender.tab?.id as number;
     panels.set(tabId, port);
     toPanel(tabId, { v: 1, type: 'ui/hello', tabId });
+    // RP-19: a repost clicked before the composer's port was up, before ui/page and ui/mode (no import flash).
+    relayRepost(tabId);
     const info = pages.get(tabId);
     if (info) {
       toPanel(tabId, { v: 1, type: 'ui/page', scheme: info.scheme, loggedIn: info.loggedIn, handle: info.handle });
@@ -348,6 +394,11 @@ export function startInpageLane(runner: Runner, local: LocalState, log: Logger):
         case 'ui/preview':
           void toPage(tabId, { v: 1, type: 'inpage/preview', preview: raw.preview });
           return;
+        case 'ui/open-settings':
+          void tabs
+            .create((browser.runtime.getURL as (path: string) => string)(EDITOR_SETTINGS))
+            .catch(() => undefined);
+          return;
         case 'ui/view-story':
           void tabs.navigate(tabId, `${IG_PREFIX}stories/${raw.handle}/`).catch(() => undefined);
           return;
@@ -368,7 +419,13 @@ export function startInpageLane(runner: Runner, local: LocalState, log: Logger):
           return;
         case 'run/start':
           void driver
-            .start({ tabId, mode: raw.mode, confirmShare: raw.confirmShare, photo: raw.photo ?? null })
+            .start({
+              tabId,
+              mode: raw.mode,
+              confirmShare: raw.confirmShare,
+              photo: raw.photo ?? null,
+              ...(raw.repost ? { repost: raw.repost } : {}),
+            })
             .then((r) => {
               if (r.ok) return;
               try {
@@ -429,6 +486,20 @@ export function startInpageLane(runner: Runner, local: LocalState, log: Logger):
           pages.set(tabId, { ...info, scheme: m.scheme, loggedIn: m.loggedIn, handle: m.handle });
           toPanel(tabId, { v: 1, type: 'ui/page', scheme: m.scheme, loggedIn: m.loggedIn, handle: m.handle });
           return false;
+        case 'inpage/repost': {
+          // RP-19: never during a run in this tab (the entry shows busy then; this is the second line).
+          const run = pageRunState(driver.status(), tabId);
+          if (run.here && run.phase === 'running') {
+            void appendRepostDiag('post', 'refused-running');
+            return false;
+          }
+          reposts.put(tabId, m.src);
+          relayRepost(tabId);
+          return false;
+        }
+        case 'inpage/repost-diag':
+          void appendRepostDiag(m.where, m.why);
+          return false;
         case 'inpage/coach-seen':
           void browser.storage.local
             .get(UI_PREFS_KEY)
@@ -451,6 +522,7 @@ export function startInpageLane(runner: Runner, local: LocalState, log: Logger):
     pages.delete(tabId);
     sent.delete(tabId);
     panels.delete(tabId);
+    reposts.drop(tabId);
   });
 
   // §8.3: no run survives a worker restart; nothing may keep its rules. RS-3: a run the previous worker lost

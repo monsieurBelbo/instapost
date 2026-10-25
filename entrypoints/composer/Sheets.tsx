@@ -128,6 +128,18 @@ function SettingsSheet() {
           </button>
         </fieldset>
       </div>
+      <label class="opt">
+        <input
+          type="checkbox"
+          checked={p.repost}
+          data-testid="inpage-repost-pref"
+          onChange={(e) => setPrefs({ repost: (e.currentTarget as HTMLInputElement).checked })}
+        />
+        <span>
+          {S.settings.repost}
+          <small>{S.settings.repostHelp}</small>
+        </span>
+      </label>
       <div class="field">
         <span class="field-l">{S.settings.preview}</span>
         <fieldset class="seg" aria-label={S.settings.preview}>

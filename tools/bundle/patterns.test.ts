@@ -6,12 +6,15 @@ import { readFileSync } from 'node:fs';
 import { transformSync } from 'esbuild';
 import { describe, expect, it } from 'vitest';
 import { portraitShim } from '../../src/agent/portrait-shim.ts';
+import { CDN_ORIGINS } from '../../src/core/repost/cdn-url.ts';
 import {
   AGENT_ONLY,
   agentClickProblems,
   BACKGROUND_ONLY,
   backgroundMainWorldProblems,
+  CDN_PERMISSION_PATTERNS,
   CONTENT_SCRIPT_ONLY,
+  cdnFetchProblems,
   contentScriptMetaUrls,
   E2E_HOOK_MARKERS,
   E2E_HOOKS,
@@ -25,11 +28,13 @@ import {
   hits,
   MAIN_WORLD,
   PORTRAIT_SHIM_MARKER,
+  permissionRequestProblems,
   portraitShimRunProblems,
   portraitShimSource,
   sameBlock,
   TAP_MARKER,
   WRITE_STRINGS,
+  withoutCdnPatterns,
 } from './patterns.ts';
 
 describe('T3 patterns: composer-agent.js', () => {
@@ -471,5 +476,45 @@ describe('T3 patterns: the in-page content script (docs/inpage.md §8.7)', () =>
         'a=`https://www.instagram.com/api/v1/`;b="https://graph.facebook.com/x";c=`https://www.instagram.com/`',
       ),
     ).toEqual(['https://www.instagram.com/api/v1/', 'https://graph.facebook.com/x']);
+  });
+});
+
+describe('T3 U50 the repost allowances (docs/repost.md RP-35)', () => {
+  const audited =
+    'async function g(e,t){if(!x(e))return{ok:!1};let n=await fetch(e,{method:`GET`,credentials:`omit`,referrerPolicy:`no-referrer`,redirect:`error`,mode:`cors`,signal:AbortSignal.timeout(15e3)}).catch(e=>e);if(!(n instanceof Response))return{ok:!1};return{ok:!0,via:`instapost:cdn-fetch`,blob:await n.blob()}}';
+  it("the audited GET passes; Vite's preload stays exempt", () => {
+    expect(cdnFetchProblems(audited)).toEqual({ sites: 1, markers: 1, problems: [] });
+    expect(forbiddenEditorFetches(audited)).toEqual([]);
+    expect(cdnFetchProblems('fetch(l.href,o)')).toEqual({ sites: 0, markers: 0, problems: [] });
+  });
+  it('an option missing, two fetches, or the marker outside the block fail', () => {
+    for (const opt of ['credentials:`omit`,', 'referrerPolicy:`no-referrer`,', 'redirect:`error`,']) {
+      const bad = audited.replace(opt, '');
+      expect(cdnFetchProblems(bad).problems.length, opt).toBeGreaterThan(0);
+      expect(forbiddenEditorFetches(bad)).toHaveLength(1);
+    }
+    const two = `${audited};function h(u){return fetch(u,{credentials:"omit",referrerPolicy:"no-referrer",redirect:"error"})}`;
+    expect(cdnFetchProblems(two).problems.length).toBeGreaterThan(0);
+    const outside =
+      'function a(e){return fetch(e,{credentials:"omit",referrerPolicy:"no-referrer",redirect:"error"})}function b(){return{via:"instapost:cdn-fetch"}}';
+    expect(cdnFetchProblems(outside).sites).toBe(0);
+    expect(forbiddenEditorFetches(outside)).toHaveLength(1);
+  });
+  it('permissions.request: banned in the background, the agent and the content script; editor chunks only with the CDN origins', () => {
+    const call = 'await _.permissions.request({origins:[...yn]})';
+    expect(hits(call, BACKGROUND_ONLY)).toContain('permissions.request');
+    expect(hits(call, AGENT_ONLY)).toContain('permissions.request');
+    expect(hits(call, CONTENT_SCRIPT_ONLY)).toContain('permissions.request');
+    expect(permissionRequestProblems(call)).toEqual([]);
+    expect(permissionRequestProblems('_.permissions.request({origins:["<all_urls>"]})')).toHaveLength(1);
+    expect(permissionRequestProblems('_.permissions.request({permissions:["tabs"],origins:[...yn]})')).toHaveLength(1);
+    expect(permissionRequestProblems('let r=_.permissions.request;r(x)')).toHaveLength(1);
+  });
+  it('the Meta-host scan exempts exactly the two permission patterns', () => {
+    expect([...CDN_PERMISSION_PATTERNS]).toEqual([...CDN_ORIGINS]);
+    const chunk = `const yn=["${CDN_ORIGINS[0]}","${CDN_ORIGINS[1]}"];`;
+    expect(hits(withoutCdnPatterns(chunk), EDITOR_ONLY)).toEqual([]);
+    const literal = `${chunk}const u="https://scontent.cdninstagram.com/v/x.jpg";`;
+    expect(hits(withoutCdnPatterns(literal), EDITOR_ONLY)).toContain('Meta host URL');
   });
 });

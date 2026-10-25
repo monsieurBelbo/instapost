@@ -79,6 +79,7 @@ import {
   frameUrlVerdict,
   pageUrlVerdict,
 } from '../core/inpage/frame-verdict.ts';
+import { isRepostMeta, type RepostMeta } from '../core/repost/source.ts';
 import type { LocalState } from '../handoff/local-state.ts';
 import { testRulesInstalled } from '../handoff/runner.ts';
 import type { DnrPort } from '../platform/dnr.ts';
@@ -218,6 +219,8 @@ export interface InpageRecord {
   /** RL-13: the owner's correction of a Couldn't confirm (It posted · It didn't post), and when. */
   mark?: 'posted' | 'notPosted';
   markedAt?: number;
+  /** docs/repost.md RP-31: the story is a repost (its facts; no URL). */
+  repost?: RepostMeta;
 }
 
 /** What the composer shows. */
@@ -293,6 +296,8 @@ export interface InpageDriver {
     confirmShare: boolean;
     /** The edited export; required for `post`, optional for test modes (else the calibration card). */
     photo?: RunPhoto | null;
+    /** RP-31: the export is a repost (diagnostics only: the driver posts pixels either way). */
+    repost?: RepostMeta;
   }): Promise<{ ok: true; runId: string } | { ok: false; why: StartRefusal; freeAt?: number }>;
   /** The owner's Stop. */
   stop(): void;
@@ -1083,6 +1088,7 @@ export function createInpageDriver(d: InpageDeps): InpageDriver {
             net: [],
             pageUrls: startPath === null ? [] : [startPath],
             steps: [],
+            ...(req.repost && isRepostMeta(req.repost) ? { repost: req.repost } : {}),
           },
           nonce: d.uuid(),
           phase: 'probing',

@@ -7,6 +7,7 @@ import { composerStrings as S } from '../../src/inpage/strings.ts';
 import { getAsset } from '../../src/platform/idb.ts';
 import { acceptAttr, isPhotoFile } from '../../src/raster/decode.ts';
 import { image, loadImageFile, textLayer } from '../../src/ui/editor-state.ts';
+import { cancelIntake } from '../../src/ui/repost-state.ts';
 import { forceImport, hint, toast } from './state.ts';
 
 let input: HTMLInputElement | null = null;
@@ -17,6 +18,8 @@ export async function takePhoto(file: Blob, opts: { assetId?: string } = {}): Pr
   const replacing = image.value !== null && (textLayer.value?.text.trim() ?? '') !== '';
   const ok = await loadImageFile(file, opts);
   if (!ok || !image.value) return false;
+  // A photo chosen, dropped or pasted during a repost's intake replaces the repost (RP-25).
+  cancelIntake();
   forceImport.value = false;
   hint.value = true;
   if (hintTimer !== null) clearTimeout(hintTimer);

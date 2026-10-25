@@ -9,7 +9,7 @@ import { newId } from '../core/model/ids.ts';
 import { type ExportRecord, putDoc, putExport } from '../platform/idb.ts';
 import { exportFrame } from '../raster/export.ts';
 import { bytesToB64 } from '../shared/b64.ts';
-import { assetSize, doc, fontsReady, frame, image, measurer } from './editor-state.ts';
+import { assetBitmap, assetSize, doc, fontsReady, frame, image, measurer } from './editor-state.ts';
 import { sha256Hex } from './hash.ts';
 
 export const RENDER_DELAY_MS = 600;
@@ -65,7 +65,8 @@ async function render(): Promise<CachedExport | null> {
   const d = doc.value;
   const f = frame.value;
   const rendered = await exportFrame(d, f.id, 'msite', {
-    sources: { image: (id) => (id === img.assetId ? img.full : undefined) },
+    // The image layer's asset and, for a repost's Blur background, its backdrop (RP-24).
+    sources: { image: (id) => assetBitmap(id, 'full') },
     assetSize,
     measurer,
   });

@@ -5,12 +5,17 @@
  * (acceptPageMessage). The content script's messages never carry a photo, a cookie or page content: only
  * sizes, pathnames and booleans. The panel's start carries the edited export (the panel is an extension page;
  * the bytes never pass through Instagram's page).
+ *
+ * AM57 (docs/repost.md RP-18): `inpage/repost` adds a repost's metadata, read at the owner's click: handles,
+ * a shortcode, a story pk, validated image-CDN URLs (isCdnImageUrl), numbers and booleans. No caption, no other
+ * text, no bytes. `inpage/repost-diag` carries a short structural reason (why an entry could not attach).
  */
 
 import { IG_ORIGIN } from '../core/ig-contract/urls.ts';
 import type { Box, FrameToggle } from '../core/inpage/frame-box.ts';
 import { FRAME_TOGGLES } from '../core/inpage/frame-box.ts';
 import { FRAME_UA_VARIANTS, type FrameUaVariant } from '../core/inpage/variants.ts';
+import { isRepostMeta, isRepostSource, type RepostMeta, type RepostSource } from '../core/repost/source.ts';
 import type { SenderLike } from '../shared/protocol.ts';
 import type { Lang } from '../ui/i18n-core.ts';
 import type { PreviewMode } from './geometry.ts';
@@ -71,10 +76,12 @@ export interface InpageUiPrefs {
   preview: PreviewMode;
   /** FE8: the coach mark was dismissed. */
   coachSeen: boolean;
+  /** docs/repost.md RP-8: Settings → On Instagram → Show Add to story (default on). */
+  repost: boolean;
 }
 export const UI_PREFS_KEY = 'inpageUi';
 export const PREVIEW_MODES: readonly PreviewMode[] = ['small', 'large', 'hidden'];
-export const DEFAULT_UI_PREFS: InpageUiPrefs = { entry: 'sidebar', preview: 'small', coachSeen: false };
+export const DEFAULT_UI_PREFS: InpageUiPrefs = { entry: 'sidebar', preview: 'small', coachSeen: false, repost: true };
 
 export function toUiPrefs(x: unknown): InpageUiPrefs {
   const o = (typeof x === 'object' && x !== null ? x : {}) as Record<string, unknown>;
@@ -82,6 +89,7 @@ export function toUiPrefs(x: unknown): InpageUiPrefs {
     entry: o.entry === 'none' ? 'none' : 'sidebar',
     preview: PREVIEW_MODES.includes(o.preview as PreviewMode) ? (o.preview as PreviewMode) : 'small',
     coachSeen: o.coachSeen === true,
+    repost: o.repost !== false,
   };
 }
 
@@ -176,7 +184,15 @@ export type PageUiToBackground =
   | { v: 1; type: 'inpage/hello' }
   | { v: 1; type: 'inpage/composer'; mode: ComposerMode; compact: boolean; closing: boolean }
   | { v: 1; type: 'inpage/page'; scheme: 'light' | 'dark'; loggedIn: boolean | null; handle: string | null }
-  | { v: 1; type: 'inpage/coach-seen' };
+  | { v: 1; type: 'inpage/coach-seen' }
+  /** docs/repost.md RP-18: the owner clicked Add to story; sent before the `inpage/composer` open. */
+  | { v: 1; type: 'inpage/repost'; src: RepostSource }
+  /** A repost entry could not attach (diagnostics: a short structural reason, no URL, no text). */
+  | { v: 1; type: 'inpage/repost-diag'; where: RepostDiagWhere; why: string };
+
+export const REPOST_DIAG_WHERE = ['post', 'dialog', 'mention', 'viewer', 'intake', 'fetch'] as const;
+export type RepostDiagWhere = (typeof REPOST_DIAG_WHERE)[number];
+export const isDiagWhy = (x: unknown): x is string => typeof x === 'string' && /^[a-z0-9][a-z0-9-]{0,47}$/.test(x);
 
 // ---- panel ⇄ background (PANEL_PORT) --------------------------------------------------------------------
 
@@ -198,7 +214,9 @@ export interface RunPhoto {
 }
 
 export type PanelToBackground =
-  | { v: 1; type: 'run/start'; mode: RunMode; confirmShare: boolean; photo?: RunPhoto | null }
+  | { v: 1; type: 'run/start'; mode: RunMode; confirmShare: boolean; photo?: RunPhoto | null; repost?: RepostMeta }
+  /** docs/repost.md RP-20: Allow in instapost's settings (the editor tab's permission row). */
+  | { v: 1; type: 'ui/open-settings' }
   | { v: 1; type: 'run/stop' }
   | { v: 1; type: 'ui/close-panel' }
   /** Close, hide or open the composer (the content script decides closed vs chip). */
@@ -215,7 +233,9 @@ export type PanelToBackground =
 export type BackgroundToPanel =
   | { v: 1; type: 'ui/hello'; tabId: number }
   | { v: 1; type: 'ui/mode'; mode: ComposerMode; compact: boolean; closing: boolean }
-  | { v: 1; type: 'ui/page'; scheme: 'light' | 'dark'; loggedIn: boolean | null; handle: string | null };
+  | { v: 1; type: 'ui/page'; scheme: 'light' | 'dark'; loggedIn: boolean | null; handle: string | null }
+  /** docs/repost.md RP-19: the owner's Add to story, relayed once (replayed on connect, before ui/page). */
+  | { v: 1; type: 'ui/repost'; src: RepostSource };
 
 // ---- guards ---------------------------------------------------------------------------------------------
 
@@ -276,6 +296,10 @@ export function isPageUiToBackground(x: unknown): x is PageUiToBackground {
         (x.loggedIn === null || typeof x.loggedIn === 'boolean') &&
         (x.handle === null || (typeof x.handle === 'string' && /^[A-Za-z0-9._]{1,30}$/.test(x.handle)))
       );
+    case 'inpage/repost':
+      return isRepostSource(x.src) && Object.keys(x).length === 3;
+    case 'inpage/repost-diag':
+      return REPOST_DIAG_WHERE.includes(x.where as RepostDiagWhere) && isDiagWhy(x.why);
     default:
       return false;
   }
@@ -336,10 +360,12 @@ export function isPanelToBackground(x: unknown): x is PanelToBackground {
       return (
         RUN_MODES.includes(x.mode as RunMode) &&
         typeof x.confirmShare === 'boolean' &&
-        (x.photo === undefined || x.photo === null || isRunPhoto(x.photo))
+        (x.photo === undefined || x.photo === null || isRunPhoto(x.photo)) &&
+        (x.repost === undefined || isRepostMeta(x.repost))
       );
     case 'run/stop':
     case 'ui/close-panel':
+    case 'ui/open-settings':
       return true;
     case 'ui/request':
       return (

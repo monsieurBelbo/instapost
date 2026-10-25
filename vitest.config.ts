@@ -31,8 +31,20 @@ export default defineConfig({
         ? [
             {
               // B6 mounts the fake's React 19 components. Pre-bundle React up front: a dependency
-              // discovered mid-run re-optimises and leaves two React copies (null dispatcher).
-              optimizeDeps: { include: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client'] },
+              // discovered mid-run re-optimises and leaves two React copies (null dispatcher). The same for
+              // Preact, since B26 (docs/repost.md) mounts the editor's Stage.
+              optimizeDeps: {
+                include: [
+                  'react',
+                  'react/jsx-runtime',
+                  'react-dom',
+                  'react-dom/client',
+                  'preact',
+                  'preact/hooks',
+                  'preact/jsx-runtime',
+                  '@preact/signals',
+                ],
+              },
               test: {
                 name: 'browser',
                 include: ['src/**/*.browser.test.ts'],

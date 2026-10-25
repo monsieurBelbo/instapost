@@ -56,6 +56,19 @@
  *   and `licenses/THIRD-PARTY.txt` (libheif, libde265, their source); tools/bundle/licenses.ts.
  * - T3: the in-page driver's marker exactly once in background.js and nowhere else; the Developer toggles'
  *   storage key (`__e2eInpageToggles`) is an `__e2e…` name, so the live scan for E2E hooks proves it is gone.
+ *
+ * Repost (docs/repost.md RP-33–RP-35; strategy AM55, owner decision OD20), each pinned to an exact shape:
+ * - T1: `optional_host_permissions`, exactly Instagram's image CDN (`https://*.cdninstagram.com/*`,
+ *   `https://*.fna.fbcdn.net/*`), requested on the owner's click only; never in `host_permissions`; no
+ *   `optional_permissions` key; FORBIDDEN_PERMISSIONS unchanged.
+ * - T3: across every editor-side file (not background.js, composer-agent.js, the content script or the HEIC
+ *   worker) exactly one `fetch(` besides the modulepreload polyfill: the composer's audited GET, in the same
+ *   block as `instapost:cdn-fetch`, with `credentials:"omit"`, `referrerPolicy:"no-referrer"` and
+ *   `redirect:"error"` (cdnFetchProblems); the marker exactly once.
+ * - T3: `permissions.request` banned in background.js, composer-agent.js and the content script; in editor
+ *   chunks only as `({origins:[...CDN_ORIGINS]})` (permissionRequestProblems).
+ * - T3: the Meta-host URL scan of editor chunks exempts exactly the two permission patterns (withoutCdnPatterns);
+ *   any other Meta URL (a CDN URL literal included) still fails. The content-script scans are unchanged.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -70,13 +83,17 @@ import {
   STATIC_RULESET_ID,
   STATIC_RULESET_PATH,
 } from '../src/core/ig-contract/rules.ts';
+import { CDN_ORIGINS } from '../src/core/repost/cdn-url.ts';
 import { licenseProblems } from '../tools/bundle/licenses.ts';
 import {
   AGENT_ONLY,
   agentClickProblems,
   BACKGROUND_ONLY,
   backgroundMainWorldProblems,
+  CDN_FETCH_MARKER,
+  CDN_PERMISSION_PATTERNS,
   CONTENT_SCRIPT_ONLY,
+  cdnFetchProblems,
   contentScriptMetaUrls,
   E2E_HOOK_MARKERS,
   E2E_HOOKS,
@@ -89,9 +106,11 @@ import {
   hits,
   MAIN_WORLD,
   PORTRAIT_SHIM_MARKER,
+  permissionRequestProblems,
   portraitShimRunProblems,
   portraitShimSource,
   WRITE_STRINGS,
+  withoutCdnPatterns,
 } from '../tools/bundle/patterns.ts';
 import { extIdForMode, KEY_MODES } from '../tools/chrome/ext-id.ts';
 
@@ -156,6 +175,12 @@ const IN_PAGE_WEB_ACCESSIBLE = [
  * lane installs, so drop it only after a live check.
  */
 const IN_PAGE_PERMISSIONS = ['declarativeNetRequest', 'webRequest'];
+/**
+ * docs/repost.md RP-33 (AM55, OD20): Instagram's image CDN, an optional host permission the composer requests
+ * on the owner's click, for its one audited GET of a picture the page already shows. Pinned twice: the
+ * constant the build uses (src/core/repost/cdn-url.ts) must equal the patterns check-bundle knows.
+ */
+const REPOST_OPTIONAL_HOSTS = [...CDN_PERMISSION_PATTERNS];
 /** The two headers the frame rules 1020 and 1021 touch (session rules, one tab, www sub_frame only). */
 const FRAME_RULE_HEADERS: readonly RegExp[] = [/x-frame-options/i, /sec-fetch-dest/i];
 
@@ -256,6 +281,7 @@ function expectedManifest(m: Mode): Record<string, unknown> {
       'webRequest',
     ],
     host_permissions: ['https://www.instagram.com/*', 'https://i.instagram.com/*'],
+    optional_host_permissions: REPOST_OPTIONAL_HOSTS,
     content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" },
     action: { default_title: name, default_icon: icons },
     commands: { _execute_action: { suggested_key: { default: 'Alt+Shift+S' } } },
@@ -277,7 +303,15 @@ function expectedManifest(m: Mode): Record<string, unknown> {
  * lane's allowances above: `content_scripts` and `web_accessible_resources` must equal their IN_PAGE shapes
  * exactly, and `webRequest` is observational (`webRequestBlocking` stays banned).
  */
-const FORBIDDEN_KEYS = ['side_panel', 'options_page', 'devtools_page', 'externally_connectable', 'sandbox'];
+const FORBIDDEN_KEYS = [
+  'side_panel',
+  'options_page',
+  'devtools_page',
+  'externally_connectable',
+  'sandbox',
+  // RP-34: the CDN origins are the only optional permissions, and host ones.
+  'optional_permissions',
+];
 const FORBIDDEN_PERMISSIONS = ['tabs', 'cookies', 'debugger', '<all_urls>', 'webRequestBlocking', 'activeTab'];
 
 function t1(m: Mode): void {
@@ -295,6 +329,14 @@ function t1(m: Mode): void {
   const war = jsonDiff(manifest.web_accessible_resources, IN_PAGE_WEB_ACCESSIBLE, '$.web_accessible_resources');
   if (war) problems.push(`web_accessible_resources is not the composer's: ${war}`);
   for (const p of IN_PAGE_PERMISSIONS) if (!perms.includes(p)) problems.push(`in-page permission ${p} missing`);
+  // RP-34: the repost's optional CDN origins, exactly, and never as granted host permissions.
+  const optional = jsonDiff(manifest.optional_host_permissions, REPOST_OPTIONAL_HOSTS, '$.optional_host_permissions');
+  if (optional) problems.push(`optional_host_permissions is not the image CDN's two patterns: ${optional}`);
+  const cdn = jsonDiff([...CDN_ORIGINS], REPOST_OPTIONAL_HOSTS, 'CDN_ORIGINS');
+  if (cdn) problems.push(`src/core/repost/cdn-url.ts CDN_ORIGINS differs from check-bundle's: ${cdn}`);
+  for (const h of (manifest.host_permissions as string[]) ?? []) {
+    if (/cdninstagram|fbcdn/i.test(h)) problems.push(`image-CDN pattern in host_permissions: ${h}`);
+  }
   // Every file the manifest names exists; only this mode's icons ship.
   const files = walk(dir);
   for (const f of Object.values(expectedManifest(m).icons as Record<string, string>)) {
@@ -419,6 +461,9 @@ function t3(m: Mode): void {
   const dir = resolve(ROOT, ARTIFACT[m]);
   const files = walk(dir).filter((f) => TEXT_EXT.has(extname(f)));
   const problems: string[] = [];
+  // RP-35: the audited image-CDN GETs and their markers across every editor-side file.
+  let cdnSites = 0;
+  let cdnMarkers = 0;
   const absRoot = ROOT.replace(/\/$/, '');
   for (const f of files) {
     const text = readFileSync(join(dir, f), 'utf8');
@@ -463,15 +508,30 @@ function t3(m: Mode): void {
       for (const label of hits(text, EDITOR_ONLY)) if (label === 'Meta host URL') problems.push(`${f}: ${label}`);
       if (!text.includes('.wasm')) problems.push(`${f}: the HEIC worker without its packaged wasm`);
     } else if (f.endsWith('.js') && f !== 'background.js' && f !== 'composer-agent.js') {
-      for (const label of hits(text, EDITOR_ONLY)) problems.push(`${f}: ${label}`);
-      for (const x of forbiddenEditorFetches(text)) problems.push(`${f}: fetch other than modulepreload: ${x}`);
+      // RP-35: the two CDN permission patterns are the only Meta-host strings an editor chunk may hold.
+      for (const label of hits(withoutCdnPatterns(text), EDITOR_ONLY)) problems.push(`${f}: ${label}`);
+      for (const x of forbiddenEditorFetches(text)) {
+        problems.push(`${f}: fetch other than modulepreload and the audited CDN GET: ${x}`);
+      }
+      const cdn = cdnFetchProblems(text);
+      cdnSites += cdn.sites;
+      cdnMarkers += cdn.markers;
+      for (const p of cdn.problems) problems.push(`${f}: ${p}`);
+      for (const p of permissionRequestProblems(text)) problems.push(`${f}: ${p}`);
     }
+    const editorSide = f.endsWith('.js') && !['background.js', 'composer-agent.js', CONTENT_SCRIPT].includes(f);
+    if (!editorSide && text.includes(CDN_FETCH_MARKER))
+      problems.push(`${f}: the audited CDN GET outside the editor pages`);
     const writeAllowed = f === 'background.js' || (f.startsWith('rules/') && f.endsWith('.json'));
     if (!writeAllowed) for (const label of hits(text, WRITE_STRINGS)) problems.push(`${f}: ${label}`);
     if (text.includes(absRoot)) problems.push(`${f}: embeds the absolute path ${absRoot}`);
     // F2: the E2E window-quirk shim and its flags are compiled out of live.
     if (!MODE_INFO[m].guarded) for (const label of hits(text, E2E_HOOKS)) problems.push(`${f}: E2E hook ${label}`);
   }
+  if (cdnSites !== 1)
+    problems.push(`expected exactly one audited image-CDN GET in the editor chunks, found ${cdnSites}`);
+  if (cdnMarkers !== 1)
+    problems.push(`expected the ${CDN_FETCH_MARKER} marker once in the editor chunks, found ${cdnMarkers}`);
   check('T3', `${m} forbidden patterns (${files.length} files)`, problems);
   if (MODE_INFO[m].guarded) {
     // Positive control: the shim really is in the guarded build, so the live scan above means something.

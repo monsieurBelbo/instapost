@@ -3,6 +3,8 @@
  * "Only post as", Check again, Forget), Copies, Language (AM44: Auto (browser) / English / Español),
  * Pace and safety, and Advanced (Check connection, Share test, Diagnostics, the build). While a run is
  * active, settings that change a run apply to the next one (AM21); the language applies at once.
+ * docs/repost.md RP-20: Photos from Instagram's image server, Allow (the composer sends the owner here when
+ * the browser would not ask from the framed composer); the composer resumes by itself once it is granted.
  *
  * Test ids: `settings-sheet`, `settings-close`, `settings-account`, `settings-check-again`,
  * `settings-account-lock`, `settings-forget-account`, `settings-keep-copies`, `settings-language`,
@@ -10,7 +12,9 @@
  * `settings-copy-diagnostics`.
  */
 import { useSignal } from '@preact/signals';
+import { useEffect } from 'preact/hooks';
 import { UI_LANG_SETTINGS, type UiLangSetting } from '../core/handoff/state.ts';
+import { cdnGranted, onCdnGranted, requestCdn } from '../platform/permissions.ts';
 import { MODE } from '../shared/env.ts';
 import { checkConnection, shareTest } from './actions.ts';
 import { at, dateTime, folder } from './copy.ts';
@@ -32,6 +36,15 @@ export function SettingsSheet() {
   const st = settings.value;
   const advanced = useSignal(false);
   const copied = useSignal(false);
+  const cdn = useSignal(false);
+  useEffect(() => {
+    void cdnGranted().then((v) => {
+      cdn.value = v;
+    });
+    return onCdnGranted(() => {
+      cdn.value = true;
+    });
+  }, [cdn]);
   const running = runActive.value;
   const l = lane.value;
   const locked = isMsiteLocked(st, now.value);
@@ -160,6 +173,27 @@ export function SettingsSheet() {
             ))}
           </select>
           <p class="hint">{t('settings.langHint')}</p>
+        </section>
+
+        <section aria-labelledby="set-cdn">
+          <h2 id="set-cdn">{t('settings.cdn')}</h2>
+          <p class="hint">{t('settings.cdnHint')}</p>
+          <button
+            type="button"
+            class="button"
+            data-testid="settings-cdn"
+            disabled={cdn.value}
+            onClick={() => {
+              requestCdn().then(
+                (v) => {
+                  cdn.value = v;
+                },
+                () => undefined,
+              );
+            }}
+          >
+            {cdn.value ? t('settings.cdnAllowed') : t('settings.cdnAllow')}
+          </button>
         </section>
 
         <section aria-labelledby="set-pace">

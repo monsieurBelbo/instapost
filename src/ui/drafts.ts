@@ -7,7 +7,7 @@ import { signal } from '@preact/signals';
 import type { StoryDoc } from '../core/model/story.ts';
 import { type AssetRecord, getAsset, getDoc, pruneAssets, putDoc, recentAssets } from '../platform/idb.ts';
 import { local } from '../platform/storage.ts';
-import { doc, image, imageLayer, loadImageFile, restoreDraft } from './editor-state.ts';
+import { doc, image, imageLayer, loadImageFile, restoreDraft, transient } from './editor-state.ts';
 
 export const AUTOSAVE_MS = 500;
 export const RECENT_COUNT = 8;
@@ -26,13 +26,13 @@ export const savedDraft = signal<{ doc: StoryDoc; savedAt: number } | null>(null
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 
-/** Called on every doc change: saves 500 ms after the last one (only a doc with a photo). */
+/** Called on every doc change: saves 500 ms after the last one (only a doc with a photo; never a repost, AM59). */
 export function scheduleAutosave(): void {
   if (timer !== null) clearTimeout(timer);
   timer = setTimeout(() => {
     timer = null;
     const d = doc.value;
-    if (!imageLayer.value) return;
+    if (!imageLayer.value || transient.value) return;
     void putDoc(d)
       .then(() => local.set('lastDocId', d.id))
       .catch((err: unknown) => console.warn('[instapost] draft not saved', err));
@@ -64,6 +64,28 @@ export async function loadDrafts(): Promise<void> {
     if (d && d.id !== doc.value.id) savedDraft.value = { doc: d, savedAt: d.updatedAt };
   } catch (err) {
     console.warn('[instapost] draft unavailable', err);
+  }
+}
+
+/**
+ * docs/repost.md RP-30: the story on the stage is saved now (a repost is about to replace it), and offered
+ * as Continue draft. Resolves true when there was one to keep.
+ */
+export async function keepCurrentDraft(): Promise<boolean> {
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  const d = doc.value;
+  if (!imageLayer.value || transient.value) return false;
+  try {
+    await putDoc(d);
+    await local.set('lastDocId', d.id);
+    savedDraft.value = { doc: d, savedAt: d.updatedAt };
+    return true;
+  } catch (err) {
+    console.warn('[instapost] draft not saved', err);
+    return false;
   }
 }
 

@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { setLangSetting } from '../ui/i18n.ts';
 import type { InpageRecord } from './driver.ts';
-import { detailRows, resultKind, resultView, runProgress, runSteps, unknownWhy } from './run-view.ts';
+import { autoCopy, detailRows, resultKind, resultView, runProgress, runSteps, unknownWhy } from './run-view.ts';
 
 function rec(over: Partial<InpageRecord> & { raw?: string[] } = {}): InpageRecord {
   const { raw = [], ...rest } = over;
@@ -227,4 +227,27 @@ describe('RL-19 Instagram changed its page: specific copy, Send to phone, no Try
       }
     });
   }
+});
+
+describe('RV-7 copies saved by themselves', () => {
+  const repost = {
+    kind: 'post' as const,
+    author: 'some.user',
+    via: 'dialog' as const,
+    slide: null,
+    mediaW: 1080,
+    consent: 'unknown' as const,
+    bar: 'seen' as const,
+  };
+  it('a post not confirmed, or posted with Keep copies; never a repost (AM59)', () => {
+    expect(autoCopy(rec(), 'failed', false)).toBe(true);
+    expect(autoCopy(rec(), 'unknown', false)).toBe(true);
+    expect(autoCopy(rec(), 'posted', false)).toBe(false);
+    expect(autoCopy(rec(), 'posted', true)).toBe(true);
+    expect(autoCopy(rec({ mode: 'test' }), 'failed', true)).toBe(false);
+    expect(autoCopy(rec(), 'stopped', true)).toBe(false);
+    for (const kind of ['failed', 'unknown', 'posted'] as const) {
+      expect(autoCopy(rec({ repost }), kind, true), kind).toBe(false);
+    }
+  });
 });

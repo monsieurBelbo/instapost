@@ -387,8 +387,24 @@ export function detailRows(rec: InpageRecord): [string, string][] {
   if (f.box) {
     rows.push([k.frame, composerStrings.result.frameRow(f.box.w, f.box.h, f.dpr ?? 1, rec.rules.installed)]);
   }
+  if (rec.repost) rows.push([k.repost, composerStrings.result.repostRow(rec.repost)]);
   if (rec.endedAt) rows.push([k.took, `${((rec.endedAt - rec.startedAt) / 1000).toFixed(1)} s`]);
   rows.push([k.steps, rec.steps.map((s) => s.step).join(' → ')]);
   rows.push([k.run, rec.runId]);
   return rows;
+}
+
+/**
+ * FS11, FS14: whether a finished run's export is saved to Downloads/instapost by itself: a post that was not
+ * confirmed (failed, Couldn't confirm), and a posted one when Keep copies is on. Never a repost (docs/repost.md
+ * AM59, RP-30): nothing of anyone's content is stored without the owner asking; Save copy stays their choice.
+ */
+export function autoCopy(
+  rec: Pick<InpageRecord, 'mode' | 'repost'>,
+  kind: ResultKind | null,
+  keepCopies: boolean,
+): boolean {
+  if (rec.repost) return false;
+  if (kind === 'posted') return keepCopies;
+  return rec.mode === 'post' && (kind === 'failed' || kind === 'unknown');
 }

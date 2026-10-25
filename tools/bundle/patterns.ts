@@ -4,6 +4,10 @@
  * fires on the code it is meant to catch and stays silent on the code the bundles must contain.
  * portraitShimRunProblems is the one non-textual check: it runs the shim's function, as found in the
  * built background.js, in a bare node:vm realm (SH-2).
+ *
+ * docs/repost.md RP-35 (AM55): the editor pages' one network call besides Vite's modulepreload, the
+ * composer's audited image-CDN GET (cdnFetchProblems), and `permissions.request` only with the CDN origins
+ * (permissionRequestProblems), banned outright in the background, the agent and the content script.
  */
 import { createContext, runInContext } from 'node:vm';
 
@@ -81,6 +85,8 @@ export const AGENT_ONLY: readonly Pattern[] = [
   { label: 'document.cookie', re: /document\.cookie/ },
   { label: 'caches.', re: /\bcaches\./ },
   { label: 'fake hooks', re: /fake[A-Z]|data-fake-|__fake__/ },
+  // RP-35: only the composer asks for the image-CDN permission, on the owner's click.
+  { label: 'permissions.request', re: /permissions\s*\.\s*request\b/ },
   // SH-4: the agent's realistic route into the page's MAIN world, which no world key shows.
   { label: 'createElement("script")', re: /createElement\(\s*["'`]script["'`]/i },
 ];
@@ -114,9 +120,10 @@ export function contentScriptMetaUrls(text: string): string[] {
     .filter((u) => u !== 'https://www.instagram.com' && u !== 'https://www.instagram.com/');
 }
 
-/** Banned in background.js (SG11, ux.md IT2): no network requests of its own, and no clicks. */
+/** Banned in background.js (SG11, ux.md IT2): no network requests of its own, and no clicks (RP-35: no permission requests). */
 export const BACKGROUND_ONLY: readonly Pattern[] = [
   { label: '.click(', re: /\.click\(/ },
+  { label: 'permissions.request', re: /permissions\s*\.\s*request\b/ },
   { label: 'fetch(', re: /fetch\(/ },
   { label: 'XMLHttpRequest', re: /XMLHttpRequest/ },
   { label: 'sendBeacon', re: /sendBeacon/ },
@@ -449,13 +456,88 @@ export function forbiddenDispatches(text: string): string[] {
 /** Vite's modulepreload polyfill: `fetch(<link>.href, <init>)`. */
 const PRELOAD_FETCH = /^fetch\(\s*[\w$]+\.href\s*,/;
 
-/** Every `fetch(` in an editor chunk other than the modulepreload polyfill, as snippets. */
-export function forbiddenEditorFetches(text: string): string[] {
-  const out: string[] = [];
-  for (const m of text.matchAll(/\bfetch\(/g)) {
-    const at = m.index ?? 0;
-    const snippet = text.slice(at, at + 60);
-    if (!PRELOAD_FETCH.test(snippet)) out.push(snippet);
+/** RP-21: the audited image-CDN GET's marker (src/ui/repost/cdn-fetch.ts returns it with the blob). */
+export const CDN_FETCH_MARKER = 'instapost:cdn-fetch';
+/** RP-21: the options the audited GET must pass (no cookies, no referrer, no redirect followed). */
+const CDN_FETCH_OPTIONS: readonly Pattern[] = [
+  { label: 'credentials:"omit"', re: /credentials["']?\s*:\s*["'`]omit["'`]/ },
+  { label: 'referrerPolicy:"no-referrer"', re: /referrerPolicy["']?\s*:\s*["'`]no-referrer["'`]/ },
+  { label: 'redirect:"error"', re: /redirect["']?\s*:\s*["'`]error["'`]/ },
+];
+
+/** Every `fetch(` call site in a file other than the modulepreload polyfill (index of `fetch`). */
+function fetchSites(text: string): number[] {
+  return [...text.matchAll(/\bfetch\(/g)]
+    .map((m) => m.index ?? 0)
+    .filter((at) => !PRELOAD_FETCH.test(text.slice(at, at + 60)));
+}
+
+/** Whether the fetch at `at` is the audited one: the marker later in its block, and the three options. */
+function auditedFetch(text: string, at: number): string[] {
+  const problems: string[] = [];
+  const call = callText(text, at + 'fetch'.length);
+  if (call === null) return ['an unbalanced fetch( call'];
+  for (const p of CDN_FETCH_OPTIONS)
+    if (!p.re.test(call)) problems.push(`fetch( without ${p.label}: ${call.slice(0, 120)}`);
+  const markers = [...text.matchAll(new RegExp(CDN_FETCH_MARKER, 'g'))].map((m) => m.index ?? 0);
+  if (!markers.some((m) => m > at && sameBlock(text, at, m))) {
+    problems.push(`fetch( outside the block that returns ${CDN_FETCH_MARKER}: ${text.slice(at, at + 60)}`);
   }
+  return problems;
+}
+
+/**
+ * RP-35, one editor-side file: its audited image-CDN GETs (`sites`) and the problems of every non-preload
+ * `fetch(` (each must be audited: the marker in the same block, credentials omit, no referrer, redirect
+ * error). check-bundle requires exactly one audited site, and one marker, across all editor-side files.
+ */
+export function cdnFetchProblems(text: string): { sites: number; markers: number; problems: string[] } {
+  const problems: string[] = [];
+  let sites = 0;
+  for (const at of fetchSites(text)) {
+    const p = auditedFetch(text, at);
+    if (p.length === 0) sites++;
+    else problems.push(...p);
+  }
+  return { sites, markers: text.split(CDN_FETCH_MARKER).length - 1, problems };
+}
+
+/** Every `fetch(` in an editor chunk other than the modulepreload polyfill and the audited CDN GET, as snippets. */
+export function forbiddenEditorFetches(text: string): string[] {
+  return fetchSites(text)
+    .filter((at) => auditedFetch(text, at).length > 0)
+    .map((at) => text.slice(at, at + 60));
+}
+
+/** RP-35: the one shape `permissions.request` may have in an editor chunk: `({origins:[...<constant>]})`. */
+const CDN_REQUEST_ARG = /^\(\s*\{\s*origins\s*:\s*\[\s*\.\.\.\s*[\w$]+\s*\]\s*\}\s*\)$/;
+
+/**
+ * RP-35, editor chunks: every `permissions.request` is a call whose only argument is `{origins:[...X]}` (the
+ * CDN_ORIGINS constant spread; the manifest's optional list holds exactly those two patterns, so Chrome can
+ * grant nothing else), and is never taken as a value.
+ */
+export function permissionRequestProblems(text: string): string[] {
+  const problems: string[] = [];
+  for (const m of text.matchAll(/permissions\s*\.\s*request\b/g)) {
+    const at = (m.index ?? 0) + m[0].length;
+    const open = text.slice(at).search(/\S/) + at;
+    const call = text[open] === '(' ? callText(text, open) : null;
+    if (call === null || !CDN_REQUEST_ARG.test(call)) {
+      problems.push(
+        `permissions.request other than ({origins:[...CDN_ORIGINS]}): ${text.slice(m.index ?? 0, at + 60)}`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** RP-35: the two optional host permission patterns (the CDN origins), exempt from the Meta-host URL scan. */
+export const CDN_PERMISSION_PATTERNS: readonly string[] = ['https://*.cdninstagram.com/*', 'https://*.fna.fbcdn.net/*'];
+
+/** The text without the two CDN permission patterns (exactly those), for the Meta-host URL scan. */
+export function withoutCdnPatterns(text: string): string {
+  let out = text;
+  for (const p of CDN_PERMISSION_PATTERNS) out = out.split(p).join('');
   return out;
 }

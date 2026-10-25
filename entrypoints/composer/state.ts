@@ -40,6 +40,8 @@ import { clock, dateTime } from '../../src/ui/copy.ts';
 import { fontsReady, image, measurer, textLayer } from '../../src/ui/editor-state.ts';
 import { type CachedExport, exportCache, freshExport } from '../../src/ui/export-cache.ts';
 import { setLangSetting } from '../../src/ui/i18n.ts';
+import { readRepostDiag } from '../../src/ui/repost/diag.ts';
+import { currentRepostMeta, intake, receiveRepost, setRepostAccount } from '../../src/ui/repost-state.ts';
 
 export const ls = localState(GUARDED);
 
@@ -156,6 +158,8 @@ export const view = computed<View>(() => {
     if (p.result === null && status.value?.running) return 'run';
     if (p.result !== null && !dismissed.value.has(r.runId)) return 'result';
   }
+  // docs/repost.md RP-22: a repost's intake (loading, permission, a failure) shows where the import view does.
+  if (intake.value) return 'import';
   return image.value && !forceImport.value ? 'edit' : 'import';
 });
 
@@ -163,6 +167,8 @@ export const view = computed<View>(() => {
 export const handle = computed<string | null>(
   () => settings.value?.expectedAccount?.handle ?? ownRun.value?.account.detected ?? pageHandle.value ?? null,
 );
+// RP-25: a repost is the owner's own post only when its author is the account the composer knows.
+setRepostAccount(() => settings.value?.expectedAccount?.handle ?? pageHandle.value ?? null);
 
 export const keepCopiesOn = (): boolean => settings.value?.keepCopies === true;
 
@@ -204,7 +210,8 @@ type FromBackground =
   | { v: 1; type: 'run/refused'; why: string; freeAt?: number }
   | { v: 1; type: 'ui/hello'; tabId: number }
   | { v: 1; type: 'ui/mode'; mode: ComposerMode; compact: boolean; closing: boolean }
-  | { v: 1; type: 'ui/page'; scheme: Scheme; loggedIn: boolean | null; handle: string | null };
+  | { v: 1; type: 'ui/page'; scheme: Scheme; loggedIn: boolean | null; handle: string | null }
+  | { v: 1; type: 'ui/repost'; src: unknown };
 
 const listeners = {
   opened: [] as (() => void)[],
@@ -326,6 +333,9 @@ export function connect(): void {
           loggedIn.value = m.loggedIn;
           pageHandle.value = m.handle;
         });
+        return;
+      case 'ui/repost':
+        takeRepost(m.src);
         return;
     }
   });
@@ -555,7 +565,16 @@ export async function start(m: RunMode, opts: { confirmShare?: boolean; photo?: 
     return;
   }
   preparing.value = m;
-  send({ v: 1, type: 'run/start', mode: m, confirmShare: m === 'shareTest' && opts.confirmShare === true, photo });
+  // RP-31: a repost's facts go on the run record (diagnostics; the driver posts pixels either way).
+  const repost = m !== 'check' && photo !== null ? currentRepostMeta() : null;
+  send({
+    v: 1,
+    type: 'run/start',
+    mode: m,
+    confirmShare: m === 'shareTest' && opts.confirmShare === true,
+    photo,
+    ...(repost ? { repost } : {}),
+  });
   // A refusal clears `preparing`; a start clears it with the first status.
   setTimeout(() => {
     if (preparing.value === m && !running.value) preparing.value = null;
@@ -615,6 +634,23 @@ export function dismissResult(): void {
   if (r) dismissed.value = new Set([...dismissed.value, r.runId]);
   seal.value = false;
   autoClose.value = null;
+}
+
+/**
+ * `ui/repost` (RP-19): it arrives before the open, so the dialog shows the repost's intake from its first frame.
+ * A finished result still on screen (closing, or the Posted auto-close, does not dismiss it) is dismissed first:
+ * the result view would otherwise hide the intake (its permission card included) while the repost loads behind
+ * it, and the result's buttons would act on the new doc. A run in flight keeps its view; the repost waits.
+ */
+export function takeRepost(src: unknown): boolean {
+  if (!receiveRepost(src)) return false;
+  batch(() => {
+    if (!running.value && preparing.value === null) dismissResult();
+    forceImport.value = false;
+    tab.value = 'photo';
+    sheet.value = null;
+  });
+  return true;
 }
 
 /**
@@ -693,7 +729,10 @@ export async function copyDiagnostics(): Promise<void> {
   try {
     const got = await browser.storage.local.get('inpageRecords');
     const list = Array.isArray(got.inpageRecords) ? got.inpageRecords : [];
-    await navigator.clipboard.writeText(JSON.stringify(list, null, 2));
+    // docs/repost.md RP-31: why a repost entry could not attach or load (reasons only), when there are any.
+    const repost = await readRepostDiag();
+    const out = repost.length > 0 ? { runs: list, repost } : list;
+    await navigator.clipboard.writeText(JSON.stringify(out, null, 2));
     toast(S.toast.diagnostics, S.toast.diagnosticsNote);
   } catch {
     toast(S.toast.savedFailed);

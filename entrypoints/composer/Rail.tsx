@@ -1,7 +1,8 @@
 /**
  * The dialog's right column (inpage-ui-spec.md FS3–FS6, FS9–FS12): the account row, then per view the
  * editor's tools (Photo | Text), the run's steps and note, or the result; and the sticky footer: the Post
- * card, Stop / Hide, or the result's actions.
+ * card, Stop / Hide, or the result's actions. A repost's first tab is Post (or Story) instead of Photo
+ * (docs/repost.md RP-29, PostTab.tsx).
  */
 import type { JSX } from 'preact';
 import { useEffect, useRef } from 'preact/hooks';
@@ -35,9 +36,11 @@ import {
 } from '../../src/ui/editor-state.ts';
 import { exportStale } from '../../src/ui/export-cache.ts';
 import { minZoom } from '../../src/ui/interaction.ts';
+import { repost, repostActive } from '../../src/ui/repost-state.ts';
 import { textFocus } from '../../src/ui/ui-state.ts';
 import { pickPhoto } from './actions.ts';
 import { Icon } from './icons.tsx';
+import { PostTab } from './PostTab.tsx';
 import {
   autoClose,
   cancelQueue,
@@ -318,6 +321,8 @@ function TextTab() {
 
 function EditTools() {
   const t = tab.value;
+  const rp = repostActive.value;
+  const first = rp ? (repost.value?.src.kind === 'mention' ? S.repost.tabStory : S.repost.tabPost) : S.edit.photo;
   const onKey = (e: KeyboardEvent) => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
@@ -339,7 +344,7 @@ function EditTools() {
             tab.value = 'photo';
           }}
         >
-          {S.edit.photo}
+          {first}
         </button>
         <button
           type="button"
@@ -356,7 +361,7 @@ function EditTools() {
           {S.edit.text}
         </button>
       </div>
-      {t === 'photo' ? <PhotoTab /> : <TextTab />}
+      {t === 'photo' ? rp ? <PostTab /> : <PhotoTab /> : <TextTab />}
     </>
   );
 }

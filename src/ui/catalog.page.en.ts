@@ -3,8 +3,9 @@
  * ("New story") on Instagram's desktop page, its tooltip and accessible name, and the one-time coach mark.
  * Part of the editor's catalog (`catalog.en.ts` spreads it, so i18n.test.ts checks it with every other key);
  * a separate file because the content script imports only these (and `catalog.page.es.ts`), never the
- * whole catalog. The shortcut's keys (as the browser spells them, RL-10) and the frame's title (instapost) are
- * not words and stay out of the catalog.
+ * whole catalog. Since docs/repost.md RP-12 also the repost entries (Add to story by Instagram's Share
+ * dialog, Add to your story on a story mention). The shortcut's keys (as the browser spells them, RL-10) and
+ * the frame's title (instapost) are not words and stay out of the catalog.
  */
 export const PAGE_EN = {
   'page.entry.label': 'New story',
@@ -28,6 +29,16 @@ export const PAGE_EN = {
   'page.coach.body': 'instapost opens over Instagram, so you never leave the page.',
   'page.coach.key': 'Shortcut',
   'page.coach.ok': 'Got it',
+  // Repost (docs/repost.md RP-12): Share → Add to story, and Add to your story on a story mention.
+  'page.repost.add': 'Add to story',
+  'page.repost.addName': 'instapost: add this post to your story',
+  'page.repost.with': 'with instapost',
+  'page.repost.mention': 'Add to your story',
+  'page.repost.mentionName': 'instapost: add @{handle}’s story to yours',
+  'page.repost.video': 'Videos come later',
+  'page.repost.blocked': '@{handle} doesn’t allow sharing this post',
+  'page.repost.busy': 'Wait until the current post finishes',
+  'page.repost.expired': 'This story has expired',
 } as const;
 
 export type PageKey = keyof typeof PAGE_EN;

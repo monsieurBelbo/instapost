@@ -5,6 +5,9 @@
  * Gestures, all in story px: drag pans the image, or moves the text when the pointer starts on
  * the text block; the wheel and trackpad pinch (wheel + ctrlKey) zoom about the pointer; two
  * touch pointers pinch-zoom; arrow keys nudge the image 1 px (10 with Shift).
+ *
+ * `onTap` (docs/repost.md RP-28): a press that moved under 6 px and lasted under 350 ms, not on the text,
+ * reported in story px (the composer cycles a repost's look with it).
  */
 import { useSignal, useSignalEffect } from '@preact/signals';
 import { useEffect, useRef } from 'preact/hooks';
@@ -13,7 +16,9 @@ import { compose } from '../core/render/compose.ts';
 import { layoutText } from '../core/text/layout.ts';
 import { rasterize } from '../raster/rasterize.ts';
 import {
+  assetBitmap,
   assetSize,
+  backdrop,
   doc,
   fontsReady,
   frame,
@@ -45,7 +50,11 @@ function onText(p: Point): boolean {
   }
 }
 
-export function Stage() {
+/** RP-28: a tap is a press under TAP_MOVE_PX of movement and TAP_MS long. */
+export const TAP_MOVE_PX = 6;
+export const TAP_MS = 350;
+
+export function Stage({ onTap }: { onTap?: (p: Point) => void } = {}) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cssSize = useSignal<Size>({ w: 0, h: 0 });
@@ -77,7 +86,9 @@ export function Stage() {
   useSignalEffect(() => {
     const d = doc.value;
     const frameId = frame.value.id;
-    const img = image.value;
+    // Redraw when either asset changes (the image layer's, a repost's backdrop).
+    void image.value;
+    void backdrop.value;
     const safe = showSafeZones.value;
     const size = cssSize.value;
     const ratio = dpr.value;
@@ -93,7 +104,7 @@ export function Stage() {
       if (!ctx) return;
       try {
         const ops = compose(d, frameId, 0, 'preview', { assetSize, measurer, guides: { safe, adSafe: false } });
-        rasterize(ops, ctx, bw / FRAME.w, { image: (id) => (img && id === img.assetId ? img.proxy : undefined) });
+        rasterize(ops, ctx, bw / FRAME.w, { image: (id) => assetBitmap(id, 'proxy') });
         renderError.value = null;
       } catch (err) {
         renderError.value = err instanceof Error ? err.message : String(err);
@@ -105,6 +116,8 @@ export function Stage() {
   // Pointer gestures. Positions are client px; deltas are converted with the stage's scale.
   const pointers = useRef(new Map<number, Point>());
   const pinch = useRef<{ dist: number; mid: Point } | null>(null);
+  /** The press that may be a tap: where and when it started, and how far it moved. */
+  const press = useRef<{ x: number; y: number; t: number; moved: number; text: boolean } | null>(null);
 
   const rect = () => canvasRef.current?.getBoundingClientRect() ?? null;
 
@@ -126,7 +139,10 @@ export function Stage() {
       return;
     }
     const p = clientToStory({ x: e.clientX, y: e.clientY }, r);
-    dragging.value = onText(p) ? 'text' : imageLayer.value ? 'image' : null;
+    const text = onText(p);
+    press.current =
+      pointers.current.size === 1 ? { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0, text } : null;
+    dragging.value = text ? 'text' : imageLayer.value ? 'image' : null;
   };
 
   const onPointerMove = (e: PointerEvent) => {
@@ -139,6 +155,7 @@ export function Stage() {
     }
     const cur = { x: e.clientX, y: e.clientY };
     pointers.current.set(e.pointerId, cur);
+    if (press.current) press.current.moved += Math.hypot(cur.x - prev.x, cur.y - prev.y);
     const k = storyPerClientPx(r.width);
     if (pinch.current) {
       const next = pinchState();
@@ -155,6 +172,15 @@ export function Stage() {
   };
 
   const onPointerEnd = (e: PointerEvent) => {
+    const pr = press.current;
+    if (pr && e.type === 'pointerup' && pointers.current.size === 1 && pointers.current.has(e.pointerId)) {
+      press.current = null;
+      const r = rect();
+      if (onTap && r && !pr.text && pr.moved < TAP_MOVE_PX && performance.now() - pr.t < TAP_MS) {
+        onTap(clientToStory({ x: e.clientX, y: e.clientY }, r));
+      }
+    }
+    if (pointers.current.size > 1) press.current = null;
     pointers.current.delete(e.pointerId);
     if (pointers.current.size < 2) pinch.current = null;
     if (pointers.current.size === 0) dragging.value = null;

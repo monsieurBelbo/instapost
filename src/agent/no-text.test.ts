@@ -44,6 +44,11 @@ const ALLOWED: readonly { file: string; line: RegExp; why: string }[] = [
     why: 'the extension’s own language setting (storage.local settings.lang, AM44), not Instagram’s page',
   },
   {
+    file: 'src/inpage/repost/detect-post.ts',
+    line: /yield s\.textContent \?\? '';/,
+    why: 'RP-16: the JSON of a script[type=application/json][data-sjs] (the sharing flags, a data blob, not UI text)',
+  },
+  {
     file: 'src/inpage/background.ts',
     line: /lang: resolveLang\(settings\?\.lang \?\? 'auto', browserLanguage\(\)\)/,
     why: 'the in-page entry’s language: the extension’s own setting for the content script (AM48), not Instagram’s page',
@@ -73,10 +78,14 @@ describe('U31 the autopilot reads no text (Instagram in any language, L21)', () 
     ...sources('src/handoff'),
     // AM46: the in-page lane decides the same way (its driver, the frame's kill switch, the entry's anchor).
     ...sources('src/core/inpage'),
+    ...sources('src/core/repost'),
     'src/inpage/driver.ts',
     'src/inpage/frame-watch.ts',
     'src/inpage/anchor.ts',
     'src/inpage/background.ts',
+    // AM57 (docs/repost.md): the repost entries' detectors decide by structure; words.ts is the one text table
+    // (excluded), entry.ts only writes instapost's own labels.
+    ...sources('src/inpage/repost').filter((f) => !/\/(words|entry)\.ts$/.test(f)),
   ];
 
   it('scans the agent and the decision code', () => {
@@ -86,6 +95,9 @@ describe('U31 the autopilot reads no text (Instagram in any language, L21)', () 
     expect(files).toContain('src/core/handoff/reducer.ts');
     expect(files).toContain('src/core/ig-contract/account.ts');
     expect(files).toContain('src/core/inpage/frame-verdict.ts');
+    expect(files).toContain('src/inpage/repost/detect-post.ts');
+    expect(files).toContain('src/inpage/repost/detect-mention.ts');
+    expect(files).not.toContain('src/inpage/repost/words.ts');
   });
 
   it('no visible text, ARIA label, alt, title or language is read, except the listed language-free reads', () => {

@@ -140,6 +140,32 @@ const SAMPLES: Readonly<Record<string, readonly unknown[][]>> = {
   list: [[]],
   RATE_LIMITED: [['14:05'], [null]],
   mode: [['post'], ['test'], ['shareTest'], ['check']],
+  // docs/repost.md RP-12, RP-31.
+  loadingPost: [['owner']],
+  loadingStory: [['owner']],
+  credit: [['owner']],
+  consent: [['owner']],
+  note: [
+    ['post', false, 'owner'],
+    ['post', true, 'owner'],
+    ['mention', false, 'owner'],
+  ],
+  repostRow: [
+    [{ kind: 'post', author: 'owner', via: 'dialog', slide: 2, mediaW: 1080, consent: 'allowed', bar: 'seen' }],
+    [{ kind: 'post', author: 'owner', via: 'popover', slide: null, mediaW: 640, consent: 'unknown', bar: 'unknown' }],
+    [{ kind: 'mention', author: 'owner', via: 'dm', slide: null, mediaW: 480, consent: 'allowed', bar: 'unknown' }],
+    [
+      {
+        kind: 'mention',
+        author: 'owner',
+        via: 'viewer',
+        slide: null,
+        mediaW: 1080,
+        consent: 'allowed',
+        bar: 'unknown',
+      },
+    ],
+  ],
 };
 
 /** Every string a surface group holds now, each function called with its samples. */
@@ -286,6 +312,31 @@ describe('U39 the composer in two languages', () => {
     expect(rows.Código).toBe('TIMEOUT');
     expect(rows.Marco).toBe('540 × 960 con DPR 2, en esta pestaña · reglas 1001, 1020, 1021');
     expect(rows.Cuenta).toBe('@owner · se esperaba @owner (ok)');
+    // RV-9: a repost's Details row has no English code values left.
+    expect(
+      S.result.repostRow({
+        kind: 'post',
+        author: 'a',
+        via: 'dialog',
+        slide: 2,
+        mediaW: 1080,
+        consent: 'allowed',
+        bar: 'seen',
+      }),
+    ).toBe(
+      'publicación de @a (diapositiva 2), desde Compartir, 1080 px · consentimiento permitido, barra para compartir vista',
+    );
+    expect(
+      S.result.repostRow({
+        kind: 'mention',
+        author: 'a',
+        via: 'dm',
+        slide: null,
+        mediaW: 480,
+        consent: 'unknown',
+        bar: 'absent',
+      }),
+    ).not.toMatch(/unknown|absent/);
     expect(failureCopy('LANDSCAPE')).toEqual(failureCopy('SCREEN_LANDSCAPE'));
     expect(failureCopy(null).title).toBe('Algo salió mal');
   });
@@ -304,6 +355,17 @@ describe('U39 the composer in two languages', () => {
     expect(resultView(noAccount, opts)?.title).toBe('Lista para publicar.');
     expect(S.settings.lock(null)).toBe('Publicar solo como la cuenta detectada');
     expect(S.refusal.RATE_LIMITED(null)).toBe('Entre ejecuciones pasa al menos un minuto.');
+  });
+
+  it('RP-29: a repost of anyone else’s content says its author is not notified; the owner’s own post does not', () => {
+    expect(S.repost.note('post', false, 'a.b')).toBe(
+      'Posted as a photo: people can’t tap through to the post. @a.b isn’t notified. To notify them, use Send to phone… and add a mention in the Instagram app.',
+    );
+    expect(S.repost.note('mention', false, 'a.b')).toMatch(/to the story\. @a\.b isn’t notified\./);
+    expect(S.repost.note('post', true, 'owner')).toBe('Posted as a photo: people can’t tap through to the post.');
+    setLangSetting('es');
+    expect(S.repost.note('post', false, 'a.b')).toMatch(/publicación\. @a\.b no recibe aviso\. .*Enviar al teléfono…/);
+    expect(S.repost.note('post', true, 'owner')).not.toMatch(/aviso/);
   });
 });
 

@@ -4,7 +4,13 @@
  * upload) with Instagram's buttons as ghost outlines and the round tools; during a run, the live phone's
  * slot (the engine frame is drawn above this iframe by the content script, at the same rect), its
  * placeholder, caption and size tool; on a result, the ✓ seal.
+ *
+ * docs/repost.md RP-22, RP-28: a repost's intake replaces the import view; on a repost's card a tap cycles its
+ * look (deferred 220 ms, so a double-click still opens the Text tab), the zoom tool sizes the card, Reset
+ * restores its defaults, and Fit/Fill is hidden (the card is never cropped or rotated).
  */
+
+import { SCALE_RANGE } from '../../src/core/repost/card-layout.ts';
 import { previewSlot, type Rect } from '../../src/inpage/geometry.ts';
 import { combo } from '../../src/inpage/keys.ts';
 import { runSteps } from '../../src/inpage/run-view.ts';
@@ -23,9 +29,20 @@ import {
   setImageScale,
 } from '../../src/ui/editor-state.ts';
 import { minZoom } from '../../src/ui/interaction.ts';
+import {
+  cycleRepostLook,
+  intake,
+  repost,
+  repostActive,
+  repostScale,
+  resetRepost,
+  setRepostScale,
+  tapsCard,
+} from '../../src/ui/repost-state.ts';
 import { Stage } from '../../src/ui/Stage.tsx';
 import { pickPhoto, takeRecent } from './actions.ts';
 import { DropGlyph, Icon } from './icons.tsx';
+import { RepostIntake } from './RepostIntake.tsx';
 import { forceImport, ghost, hint, ownRun, prefs, progress, seal, setPreview, tab, view, zoomPop } from './state.ts';
 
 function ImportView() {
@@ -74,7 +91,7 @@ function ImportView() {
         <div class="recent">
           <div class="recent-head">
             <span id="recent-lbl">{recent.length > 0 ? S.import.recent : ''}</span>
-            {back ? (
+            {back && !(draft && repostActive.value) ? (
               <button
                 type="button"
                 class="tlink sm"
@@ -140,6 +157,7 @@ function Ghost() {
 function Tools() {
   const l = imageLayer.value;
   const fit = l?.fit === 'contain';
+  const rp = repostActive.value;
   return (
     <>
       <div class="tools">
@@ -158,17 +176,19 @@ function Tools() {
         >
           <Icon name="zoom" size={18} />
         </button>
-        <button
-          type="button"
-          class="tool"
-          aria-label={fit ? S.stage.fill : S.stage.fit}
-          aria-pressed={fit}
-          data-tip={S.stage.fit}
-          data-tip-kbd="F"
-          onClick={() => setFit(fit ? 'cover' : 'contain')}
-        >
-          <Icon name="fit" size={18} />
-        </button>
+        {!rp && (
+          <button
+            type="button"
+            class="tool"
+            aria-label={fit ? S.stage.fill : S.stage.fit}
+            aria-pressed={fit}
+            data-tip={S.stage.fit}
+            data-tip-kbd="F"
+            onClick={() => setFit(fit ? 'cover' : 'contain')}
+          >
+            <Icon name="fit" size={18} />
+          </button>
+        )}
         <button
           type="button"
           class="tool"
@@ -186,11 +206,11 @@ function Tools() {
       <div class="tools r">
         <button
           type="button"
-          class={`tool${placementChanged.value ? '' : ' dim'}`}
+          class={`tool${placementChanged.value || rp ? '' : ' dim'}`}
           aria-label={S.stage.reset}
           data-tip={S.stage.reset}
           data-tip-kbd="0"
-          onClick={refitImage}
+          onClick={rp ? resetRepost : refitImage}
         >
           <Icon name="reset" size={18} />
         </button>
@@ -203,9 +223,12 @@ function Tools() {
 function ZoomPop() {
   const l = imageLayer.value;
   const img = image.value;
-  const min = l && img ? minZoom(l, img.size) : 1;
-  const v = Math.round((l?.xf.scale ?? 1) * 100);
-  const p = `${Math.max(0, Math.min(100, ((v - min * 100) / (400 - min * 100)) * 100))}%`;
+  const r = repostActive.value ? repost.value : null;
+  // A repost's card: its own size range (RP-26), not the photo's zoom.
+  const min = r ? SCALE_RANGE[r.src.kind].min : l && img ? minZoom(l, img.size) : 1;
+  const max = r ? SCALE_RANGE[r.src.kind].max : 4;
+  const v = Math.round((r ? repostScale.value : (l?.xf.scale ?? 1)) * 100);
+  const p = `${Math.max(0, Math.min(100, ((v - min * 100) / (max * 100 - min * 100)) * 100))}%`;
   return (
     <div class={`zoom-pop${zoomPop.value ? ' open' : ''}`}>
       <input
@@ -213,14 +236,34 @@ function ZoomPop() {
         class="range"
         type="range"
         min={Math.round(min * 100)}
-        max={400}
+        max={Math.round(max * 100)}
         value={v}
         style={{ '--p': p }}
         aria-label={S.stage.zoom}
-        onInput={(e) => setImageScale(Number((e.currentTarget as HTMLInputElement).value) / 100)}
+        onInput={(e) => {
+          const s = Number((e.currentTarget as HTMLInputElement).value) / 100;
+          if (r) setRepostScale(s);
+          else setImageScale(s);
+        }}
       />
     </div>
   );
+}
+
+/** RP-28: a tap cycles the look 220 ms later, unless a double-click (the Text tab) follows. */
+const TAP_DEFER_MS = 220;
+let tapTimer: ReturnType<typeof setTimeout> | null = null;
+function onStageTap(p: { x: number; y: number }): void {
+  if (!tapsCard(p)) return;
+  if (tapTimer !== null) clearTimeout(tapTimer);
+  tapTimer = setTimeout(() => {
+    tapTimer = null;
+    cycleRepostLook();
+  }, TAP_DEFER_MS);
+}
+function cancelTap(): void {
+  if (tapTimer !== null) clearTimeout(tapTimer);
+  tapTimer = null;
 }
 
 /** FS7: the live phone's slot, its placeholder, caption and size tool (the frame itself is the page's). */
@@ -293,22 +336,28 @@ function LiveSlot({ stage }: { stage: Rect }) {
 
 export function StagePane({ stage }: { stage: Rect }) {
   const v = view.value;
-  if (v === 'import') return <ImportView />;
+  if (v === 'import') return intake.value ? <RepostIntake /> : <ImportView />;
+  const rp = repostActive.value;
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: double-click is a shortcut to the Text tab (T does the same)
     <div
       class="stg"
       onDblClick={() => {
-        // FS2: double-click edits the text.
+        // FS2: double-click edits the text (and is not a repost's look change).
+        cancelTap();
         if (v !== 'edit') return;
         tab.value = 'text';
         requestAnimationFrame(() => document.getElementById('story-text')?.focus());
       }}
     >
-      <Stage />
+      <Stage onTap={v === 'edit' && rp ? onStageTap : undefined} />
       <Ghost />
       {v === 'edit' && <Tools />}
-      {v === 'edit' && <div class={`pill-hint${hint.value ? ' on' : ''}`}>{S.stage.hint}</div>}
+      {v === 'edit' && (
+        <div class={`pill-hint${hint.value ? ' on' : ''}`}>
+          {rp && repost.value?.src.kind === 'post' ? S.repost.hint : S.stage.hint}
+        </div>
+      )}
       {v === 'edit' && converting.value && (
         <div class="run-pill conv" role="status">
           <i class="spinner" />

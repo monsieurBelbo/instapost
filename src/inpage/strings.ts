@@ -82,6 +82,17 @@ const WHY: Readonly<Record<string, MsgKey>> = {
   'worker-restarted': 'inpage.why.restarted',
 };
 
+/** RP-31 Details: a repost's consent and share-bar values as words. */
+const REPOST_CONSENT: Readonly<Record<string, MsgKey>> = {
+  allowed: 'inpage.details.consent.allowed',
+  unknown: 'inpage.details.consent.unknown',
+};
+const REPOST_BAR: Readonly<Record<string, MsgKey>> = {
+  seen: 'inpage.details.bar.seen',
+  absent: 'inpage.details.bar.absent',
+  unknown: 'inpage.details.bar.unknown',
+};
+
 const HISTORY_MODE: Readonly<Record<string, MsgKey>> = {
   post: 'inpage.history.mode.post',
   test: 'inpage.history.mode.test',
@@ -132,6 +143,52 @@ export const composerStrings = {
     shrinkName: 'inpage.stage.shrinkName',
     converting: 'inpage.stage.converting',
   }),
+  /** docs/repost.md RP-20–RP-30: the repost's intake (stage area) and its Post / Story tab. */
+  repost: texts(
+    {
+      permTitle: 'inpage.repost.permTitle',
+      permBody: 'inpage.repost.permBody',
+      permAllow: 'inpage.repost.permAllow',
+      permSettings: 'inpage.repost.permSettings',
+      permDenied: 'inpage.repost.permDenied',
+      expiredLink: 'inpage.repost.expiredLink',
+      failed: 'inpage.repost.failed',
+      tryAgain: 'inpage.repost.tryAgain',
+      cancel: 'inpage.repost.cancel',
+      tabPost: 'inpage.repost.tabPost',
+      tabStory: 'inpage.repost.tabStory',
+      look: 'inpage.repost.look',
+      lookCard: 'inpage.repost.lookCard',
+      lookPhoto: 'inpage.repost.lookPhoto',
+      lookDark: 'inpage.repost.lookDark',
+      bg: 'inpage.repost.bg',
+      bgColours: 'inpage.repost.bgColours',
+      bgBlur: 'inpage.repost.bgBlur',
+      bgBlack: 'inpage.repost.bgBlack',
+      size: 'inpage.repost.size',
+      reset: 'inpage.repost.reset',
+      hint: 'inpage.repost.hint',
+      notePost: 'inpage.repost.notePost',
+      noteStory: 'inpage.repost.noteStory',
+      consentOk: 'inpage.repost.consentOk',
+      lowRes: 'inpage.repost.lowRes',
+      keptDraft: 'inpage.repost.keptDraft',
+    },
+    {
+      loadingPost: (handle: string) => t('inpage.repost.loadingPost', { handle }),
+      loadingStory: (handle: string) => t('inpage.repost.loadingStory', { handle }),
+      credit: (handle: string) => t('inpage.repost.credit', { handle }),
+      consent: (handle: string) => t('inpage.repost.consent', { handle }),
+      /**
+       * RP-29: always under the controls: the story is a photo people can't tap through, and, for anyone else's
+       * post or story, that its author is not notified (pixels only, AM54) and how to notify them.
+       */
+      note: (kind: 'post' | 'mention', own: boolean, handle: string) => {
+        const base = tk(kind === 'post' ? 'inpage.repost.notePost' : 'inpage.repost.noteStory');
+        return own ? base : `${base} ${t('inpage.repost.noMention', { handle })}`;
+      },
+    },
+  ),
   account: texts({
     yourStory: 'inpage.account.yourStory',
     posting: 'inpage.account.posting',
@@ -320,7 +377,38 @@ export const composerStrings = {
       unknownWhyDefault: () => t('inpage.why.default'),
       saved: (file: string) => t('inpage.result.saved', { file }),
       closesIn: (s: number) => t('inpage.result.closesIn', { s }),
+      /** RP-31: the Details row of a repost (no URL). */
+      repostRow: (r: {
+        kind: 'post' | 'mention';
+        author: string;
+        via: 'dialog' | 'popover' | 'dm' | 'viewer';
+        slide: number | null;
+        mediaW: number;
+        consent: string;
+        bar: string;
+      }) => {
+        const via = tk(`inpage.details.via.${r.via}` as MsgKey);
+        // The code values read as words in the chosen language (an unexpected one stays as it came).
+        const word = (keys: Readonly<Record<string, MsgKey>>, v: string): string => {
+          const k = keys[v];
+          return k ? tk(k) : v;
+        };
+        const facts = t('inpage.details.repostFacts', {
+          consent: word(REPOST_CONSENT, r.consent),
+          bar: word(REPOST_BAR, r.bar),
+        });
+        return r.kind === 'post'
+          ? t('inpage.details.repostPost', {
+              author: r.author,
+              slide: r.slide !== null ? t('inpage.details.repostSlide', { n: r.slide }) : '',
+              via,
+              w: r.mediaW,
+              facts,
+            })
+          : t('inpage.details.repostStory', { author: r.author, via, w: r.mediaW, facts });
+      },
       detailRows: texts({
+        repost: 'inpage.details.repost',
         result: 'inpage.details.result',
         code: 'inpage.details.code',
         detail: 'inpage.details.detail',
@@ -401,6 +489,8 @@ export const composerStrings = {
       large: 'inpage.settings.large',
       hidden: 'inpage.settings.hidden',
       previewHelp: 'inpage.settings.previewHelp',
+      repost: 'inpage.settings.repost',
+      repostHelp: 'inpage.settings.repostHelp',
       account: 'inpage.settings.account',
       noAccount: 'inpage.settings.noAccount',
       noAccountHelp: 'inpage.settings.noAccountHelp',
@@ -472,6 +562,7 @@ export const composerStrings = {
         ['F', t('inpage.keys.fit')],
         ['0', t('inpage.keys.reset')],
         ['= −', t('inpage.keys.zoom')],
+        ['S', t('inpage.keys.look')],
         ['← ↑ → ↓', t('inpage.keys.nudge')],
         ['N', t('inpage.keys.newStory')],
         ['H · ,', t('inpage.keys.panels')],

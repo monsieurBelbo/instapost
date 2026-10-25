@@ -18,7 +18,10 @@
  *   (an unlisted script, not a WXT `*.content.ts`: see entrypoints/instagram-page.ts);
  * - `web_accessible_resources`: the composer page (`composer.html`) and the chunks, assets and fonts it loads,
  *   for www only, with `use_dynamic_url`;
- * - the permissions `declarativeNetRequest` and `webRequest` (the observational frame watch).
+ * - the permissions `declarativeNetRequest` and `webRequest` (the observational frame watch);
+ * - docs/repost.md RP-33 (AM55, OD20): `optional_host_permissions` for Instagram's image CDN
+ *   (`https://*.cdninstagram.com/*`, `https://*.fna.fbcdn.net/*`), requested on the owner's click only, for the
+ *   composer's one audited GET of a picture the page already shows. `host_permissions` is unchanged.
  * Guarded builds keep the static write-block ruleset; live ships none, and every test run (either lane) blocks
  * writes with the per-run session rules. Every build ships `licenses/` (RL-3: libheif's LGPL-3.0 and GPL-3.0
  * texts and a third-party notice; tools/bundle/licenses.ts), outside web_accessible_resources.
@@ -26,6 +29,7 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'wxt';
 import { blockRuleset, STATIC_RULESET_ID, STATIC_RULESET_PATH } from './src/core/ig-contract/rules.ts';
+import { CDN_ORIGINS } from './src/core/repost/cdn-url.ts';
 import { LIBHEIF_LICENSE_SOURCE, LICENSE_FILES, thirdPartyNotice } from './tools/bundle/licenses.ts';
 import { assertDevRunnerSealed } from './tools/chrome/dev-seal.ts';
 import { assertSealed, DEV_PROFILE_DIR, readSpki, sealedWebExtArgs } from './tools/chrome/flags.ts';
@@ -89,6 +93,7 @@ export default defineConfig({
         'webRequest',
       ],
       host_permissions: ['https://www.instagram.com/*', 'https://i.instagram.com/*'],
+      optional_host_permissions: [...CDN_ORIGINS],
       content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" },
       action: { default_title: name, default_icon: icons },
       // ux.md §4.1 (IB4): the toolbar action's shortcut, ⌥⇧S, changeable at chrome://extensions/shortcuts.
