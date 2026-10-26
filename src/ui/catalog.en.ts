@@ -985,6 +985,12 @@ export const EN = {
   'inpage.menu.history': 'History',
   'inpage.menu.settings': 'Settings',
   'inpage.menu.keys': 'Keyboard shortcuts',
+  'inpage.menu.discard': 'Discard story',
+  'inpage.discard.title': 'Discard this story?',
+  'inpage.discard.body': 'If you discard it now, your edits will be lost.',
+  'inpage.discard.queued': 'Its queued post is cancelled too.',
+  'inpage.discard.go': 'Discard',
+  'inpage.discard.keep': 'Keep editing',
 
   'inpage.settings.title': 'Settings',
   'inpage.settings.close': 'Close settings',

@@ -89,6 +89,22 @@ export async function keepCurrentDraft(): Promise<boolean> {
   }
 }
 
+/**
+ * Discard story: the doc `id` stops being the autosaved draft (a pending autosave is dropped; a different
+ * draft offered as Continue draft, e.g. the one a repost replaced, is kept).
+ */
+export async function forgetDraft(id: string): Promise<void> {
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  try {
+    if ((await local.get('lastDocId')) === id) await local.remove('lastDocId');
+  } catch (err) {
+    console.warn('[instapost] draft not forgotten', err);
+  }
+}
+
 /** Recent photos: loads one as the story's photo. */
 export async function pickRecent(id: string): Promise<void> {
   const a = await getAsset(id);

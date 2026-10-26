@@ -16,6 +16,9 @@ import { currentResult, Rail } from './Rail.tsx';
 import { Sheets } from './Sheets.tsx';
 import { StagePane } from './StagePane.tsx';
 import {
+  canDiscard,
+  discardOpen,
+  discardStory,
   dragging,
   elapsed,
   forceImport,
@@ -23,6 +26,7 @@ import {
   menu,
   now,
   ownRun,
+  queued,
   saveCopy,
   sendToPhone,
   sheet,
@@ -96,6 +100,20 @@ function MoreMenu() {
       <button
         type="button"
         role="menuitem"
+        class="danger"
+        data-testid="inpage-menu-discard"
+        disabled={!canDiscard.value}
+        onClick={pick(() => {
+          discardOpen.value = true;
+        })}
+      >
+        <Icon name="trash" size={20} />
+        <span>{S.menu.discard}</span>
+      </button>
+      <hr />
+      <button
+        type="button"
+        role="menuitem"
         data-testid="inpage-menu-history"
         onClick={pick(() => {
           sheet.value = 'history';
@@ -128,6 +146,60 @@ function MoreMenu() {
         <span>{S.menu.keys}</span>
         <kbd>?</kbd>
       </button>
+    </div>
+  );
+}
+
+/** Discard story's confirmation, in Instagram's own alert style: Discard (red) or Keep editing (focused). */
+function DiscardConfirm() {
+  const ref = useRef<HTMLDivElement>(null);
+  const open = discardOpen.value;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: focus moves when it opens, nothing else
+  useEffect(() => {
+    if (open) requestAnimationFrame(() => ref.current?.querySelector<HTMLButtonElement>('.confirm-keep')?.focus());
+  }, [open]);
+  if (!open) return null;
+  const keep = () => {
+    discardOpen.value = false;
+    document.getElementById('more-btn')?.focus();
+  };
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: a pointer target only; Esc and Keep editing are the keyboard paths
+    // biome-ignore lint/a11y/useKeyWithClickEvents: as above
+    <div
+      class="confirm-veil"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) keep();
+      }}
+    >
+      <div
+        class="confirm"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="discard-title"
+        aria-describedby="discard-body"
+        ref={ref}
+      >
+        <h2 id="discard-title">{S.discard.title}</h2>
+        <p id="discard-body">
+          {S.discard.body}
+          {queued.value ? ` ${S.discard.queued}` : ''}
+        </p>
+        <button
+          type="button"
+          class="confirm-go"
+          data-testid="inpage-discard-go"
+          onClick={() => {
+            discardStory();
+            requestAnimationFrame(() => document.getElementById('choose')?.focus());
+          }}
+        >
+          {S.discard.go}
+        </button>
+        <button type="button" class="confirm-keep" data-testid="inpage-discard-keep" onClick={keep}>
+          {S.discard.keep}
+        </button>
+      </div>
     </div>
   );
 }
@@ -253,6 +325,7 @@ export function Modal() {
           {v !== 'import' && <Rail width={L.railW} />}
         </div>
         <Sheets />
+        <DiscardConfirm />
       </section>
       <button
         type="button"

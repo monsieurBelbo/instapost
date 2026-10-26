@@ -53,6 +53,7 @@ const ICONS = {
     </>
   ),
   download: P('M12 4v11M7 10l5 5 5-5M5 20h14'),
+  trash: P('M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5'),
   history: P('M3.5 12a8.5 8.5 0 1 0 2.6-6.1L3.5 8.5M3.5 3.5v5h5M12 8v4l3 2'),
   sliders: (
     <>

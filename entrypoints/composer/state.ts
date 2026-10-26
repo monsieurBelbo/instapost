@@ -37,11 +37,12 @@ import { local } from '../../src/platform/storage.ts';
 import { bytesToB64 } from '../../src/shared/b64.ts';
 import { GUARDED } from '../../src/shared/env.ts';
 import { clock, dateTime } from '../../src/ui/copy.ts';
-import { fontsReady, image, measurer, textLayer } from '../../src/ui/editor-state.ts';
+import { forgetDraft } from '../../src/ui/drafts.ts';
+import { doc, fontsReady, image, measurer, newStory, textLayer } from '../../src/ui/editor-state.ts';
 import { type CachedExport, exportCache, freshExport } from '../../src/ui/export-cache.ts';
 import { setLangSetting } from '../../src/ui/i18n.ts';
 import { readRepostDiag } from '../../src/ui/repost/diag.ts';
-import { currentRepostMeta, intake, receiveRepost, setRepostAccount } from '../../src/ui/repost-state.ts';
+import { cancelIntake, currentRepostMeta, intake, receiveRepost, setRepostAccount } from '../../src/ui/repost-state.ts';
 
 export const ls = localState(GUARDED);
 
@@ -129,6 +130,8 @@ export const seal = signal(false);
 export const savedCopy = signal<{ runId: string; file: string; id: number } | null>(null);
 /** Two Share-test confirmations: the Advanced row asks once more inline. */
 export const shareConfirm = signal(false);
+/** Discard story's confirmation is showing. */
+export const discardOpen = signal(false);
 export const resumeOpen = signal(false);
 export const dragging = signal(false);
 
@@ -600,6 +603,30 @@ function dropQueue(): void {
 
 export function cancelQueue(): void {
   dropQueue();
+}
+
+/** Discard story is offered: a story (or a repost loading) on the stage, and no run starting or running. */
+export const canDiscard = computed(
+  () => (image.value !== null || intake.value !== null) && !running.value && preparing.value === null,
+);
+
+/**
+ * Discard story (⋯ menu, after its confirmation): the story on the stage, a repost loading and a queued post go;
+ * the doc stops being the autosaved draft, and the import view comes back to start again.
+ */
+export function discardStory(): void {
+  discardOpen.value = false;
+  if (!canDiscard.value) return;
+  const id = doc.value.id;
+  dropQueue();
+  cancelIntake();
+  newStory();
+  void forgetDraft(id);
+  batch(() => {
+    forceImport.value = false;
+    tab.value = 'photo';
+    zoomPop.value = false;
+  });
 }
 
 /**

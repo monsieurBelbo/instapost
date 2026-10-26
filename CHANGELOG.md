@@ -9,7 +9,8 @@ Version 0.2.0 (not released).
 ### Added
 
 - Repost to story: Share → **Add to story** on a photo post (feed, modal, permalink), and **Add to your story** on a story that mentions you (the DM preview, the story viewer). The post is drawn as a card over a generated background with the author's @handle, and posted like any story. The composer loads the photo from Instagram's image server once you allow it (optional host permission). Videos come later. Settings → On Instagram turns it off (docs/repost.md, strategy AM54–AM59).
-- The repost is a photo: people can't tap through to the post, and the author is not notified. The composer says so, and how to notify them (Send to phone…, then a mention in the Instagram app).
+- The repost is a photo: people can't tap through to the post, and the author is not notified (Instagram on the web can't mention people in stories). The composer says so.
+- **Discard story** in the composer's ⋯ menu: after an Instagram-style "Discard this story?" it clears the story (and a queued post) so you can start again. The discarded story is no longer offered as Continue draft.
 
 ## [0.1.1] - 2026-10-15
 

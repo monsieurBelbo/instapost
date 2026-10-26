@@ -6,6 +6,7 @@
  * - RL-14: a start leaves the current result up until the new run is seen starting; a refused start (the
  *   spacing, say) leaves the result and its explanation in place.
  * - RL-13: It posted · It didn't post write the mark (ui/mark), update the guard and dismiss the result.
+ * - Discard story: the stage, a queued post and the autosaved draft go; another kept draft stays; never mid-run.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
@@ -193,5 +194,56 @@ describe('RL-13 It posted · It didn’t post', () => {
     expect(sent).toContainEqual({ v: 1, type: 'ui/mark', runId: 'inp_unk', mark: 'posted' });
     expect(S.records.value.find((r) => r.runId === 'inp_unk')?.mark).toBe('posted');
     expect(S.dismissed.value.has('inp_unk')).toBe(true);
+  });
+});
+
+describe('Discard story', () => {
+  const bitmap = () => ({ close: vi.fn() });
+  it('clears the stage, drops a queued post and forgets the doc as the autosaved draft', async () => {
+    const { local } = await import('../platform/storage.ts');
+    const { doc } = await import('../ui/editor-state.ts');
+    fromBackground({
+      v: 1,
+      type: 'run/status',
+      status: status(false, record({ runId: 'inp_old', endedAt: Date.now() })),
+    });
+    S.dismissResult();
+    const full = bitmap();
+    image.value = { assetId: 'd1', full, proxy: full } as never;
+    await local.set('lastDocId', doc.value.id);
+    fake.next = exportOf([4, 5, 6], 'c');
+    expect(await S.queueRun('post', Date.now() + 30_000)).toBe(true);
+    expect(S.canDiscard.value).toBe(true);
+    S.discardOpen.value = true;
+    const before = doc.value.id;
+    S.discardStory();
+    expect(S.discardOpen.value).toBe(false);
+    expect(image.value).toBeNull();
+    expect(full.close).toHaveBeenCalled();
+    expect(doc.value.id).not.toBe(before);
+    expect(S.queued.value).toBeNull();
+    expect(S.view.value).toBe('import');
+    await vi.waitFor(async () => expect(await local.get('lastDocId')).toBeUndefined());
+  });
+
+  it('keeps a different draft offered as Continue draft', async () => {
+    const { local } = await import('../platform/storage.ts');
+    const full = bitmap();
+    image.value = { assetId: 'd2', full, proxy: full } as never;
+    await local.set('lastDocId', 'other-draft');
+    S.discardStory();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(await local.get('lastDocId')).toBe('other-draft');
+  });
+
+  it('is not offered with nothing on the stage, or while a run is going', () => {
+    image.value = null;
+    expect(S.canDiscard.value).toBe(false);
+    const full = bitmap();
+    image.value = { assetId: 'd3', full, proxy: full } as never;
+    fromBackground({ v: 1, type: 'run/status', status: status(true, record({ runId: 'inp_live' })) });
+    expect(S.canDiscard.value).toBe(false);
+    S.discardStory();
+    expect(image.value).not.toBeNull();
   });
 });

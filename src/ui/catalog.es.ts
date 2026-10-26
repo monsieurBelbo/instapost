@@ -1007,6 +1007,12 @@ export const ES: Catalog = {
   'inpage.menu.history': 'Historial',
   'inpage.menu.settings': 'Ajustes',
   'inpage.menu.keys': 'Atajos de teclado',
+  'inpage.menu.discard': 'Descartar historia',
+  'inpage.discard.title': '¿Descartar esta historia?',
+  'inpage.discard.body': 'Si la descartas ahora, perderás tus cambios.',
+  'inpage.discard.queued': 'También se cancela su publicación en cola.',
+  'inpage.discard.go': 'Descartar',
+  'inpage.discard.keep': 'Seguir editando',
 
   'inpage.settings.title': 'Ajustes',
   'inpage.settings.close': 'Cerrar los ajustes',

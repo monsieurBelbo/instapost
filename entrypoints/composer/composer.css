@@ -2095,3 +2095,56 @@ details.adv summary {
     opacity: 1;
   }
 }
+
+/* ---- Discard story's confirmation (Instagram's alert style) ------------------------------------------- */
+
+.pop-menu button.danger {
+  color: var(--danger);
+}
+.confirm-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: inherit;
+  animation: ip-fade var(--d2) var(--ease);
+}
+.confirm {
+  width: min(320px, calc(100% - 48px));
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--pop-shadow);
+  text-align: center;
+  overflow: hidden;
+}
+.confirm h2 {
+  margin: 0;
+  padding: 24px 24px 4px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.confirm p {
+  margin: 0;
+  padding: 0 24px 20px;
+  font-size: 14px;
+  color: var(--text-2);
+}
+.confirm button {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  border-top: 1px solid var(--sep);
+  font-size: 14px;
+  transition: background-color var(--d1);
+}
+.confirm button:hover,
+.confirm button:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+.confirm-go {
+  color: var(--danger);
+  font-weight: 700;
+}

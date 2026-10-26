@@ -475,6 +475,14 @@ export const composerStrings = {
     history: 'inpage.menu.history',
     settings: 'inpage.menu.settings',
     keys: 'inpage.menu.keys',
+    discard: 'inpage.menu.discard',
+  }),
+  discard: texts({
+    title: 'inpage.discard.title',
+    body: 'inpage.discard.body',
+    queued: 'inpage.discard.queued',
+    go: 'inpage.discard.go',
+    keep: 'inpage.discard.keep',
   }),
   settings: texts(
     {

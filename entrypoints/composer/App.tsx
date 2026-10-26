@@ -44,6 +44,7 @@ import {
   cancelQueue,
   closing,
   connect,
+  discardOpen,
   fireQueue,
   followSettings,
   ghost,
@@ -210,6 +211,11 @@ function onKey(e: KeyboardEvent): void {
       document.querySelector<HTMLElement>('.dialog')?.focus({ preventScroll: true });
       return;
     }
+    if (discardOpen.value) {
+      discardOpen.value = false;
+      document.getElementById('more-btn')?.focus();
+      return;
+    }
     if (menu.value) {
       menu.value = false;
       document.getElementById('more-btn')?.focus();
@@ -232,6 +238,8 @@ function onKey(e: KeyboardEvent): void {
     trap(e);
     return;
   }
+  // Discard story's confirmation: only its own buttons answer (no shortcut posts or edits behind it).
+  if (discardOpen.value) return;
   if (mod && k === 'Enter') {
     e.preventDefault();
     if (e.altKey) {
