@@ -1112,8 +1112,7 @@ export const EN = {
   'inpage.repost.hint': 'Click the post to change its look',
   'inpage.repost.notePost': 'Posted as a photo: people can’t tap through to the post.',
   'inpage.repost.noteStory': 'Posted as a photo: people can’t tap through to the story.',
-  'inpage.repost.noMention':
-    '@{handle} isn’t notified. To notify them, use Send to phone… and add a mention in the Instagram app.',
+  'inpage.repost.noMention': '@{handle} isn’t notified: Instagram on the web can’t mention people in stories.',
   'inpage.repost.consent':
     'Instagram’s own repost respects @{handle}’s sharing settings. instapost can’t always see them, so only repost what you’re allowed to share.',
   'inpage.repost.consentOk': 'Got it',

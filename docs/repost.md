@@ -150,7 +150,7 @@
 | inpage.repost.hint | Click the post to change its look | Haz clic en la publicación para cambiar su aspecto |
 | inpage.repost.notePost | Posted as a photo: people can't tap through to the post. | Se publica como foto: no se puede tocar para ir a la publicación. |
 | inpage.repost.noteStory | Posted as a photo: people can't tap through to the story. | Se publica como foto: no se puede tocar para ir a la historia. |
-| inpage.repost.noMention | @{handle} isn't notified. To notify them, use Send to phone… and add a mention in the Instagram app. | @{handle} no recibe aviso. Para avisarle, usa Enviar al teléfono… y añade una mención en la app de Instagram. |
+| inpage.repost.noMention | @{handle} isn't notified: Instagram on the web can't mention people in stories. | @{handle} no recibe aviso: Instagram en la web no permite mencionar en historias. |
 | inpage.repost.consent | Instagram's own repost respects @{handle}'s sharing settings. instapost can't always see them, so only repost what you're allowed to share. | La función de Instagram respeta los ajustes de @{handle}. instapost no siempre puede verlos, así que comparte solo lo que tengas permiso para compartir. |
 | inpage.repost.consentOk | Got it | Entendido |
 | inpage.repost.lowRes | For a sharper copy, open the story: Add to your story is there too. | Para una copia más nítida, abre la historia: ahí también está Añadir a tu historia. |

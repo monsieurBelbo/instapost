@@ -1136,8 +1136,7 @@ export const ES: Catalog = {
   'inpage.repost.hint': 'Haz clic en la publicación para cambiar su aspecto',
   'inpage.repost.notePost': 'Se publica como foto: no se puede tocar para ir a la publicación.',
   'inpage.repost.noteStory': 'Se publica como foto: no se puede tocar para ir a la historia.',
-  'inpage.repost.noMention':
-    '@{handle} no recibe aviso. Para avisarle, usa Enviar al teléfono… y añade una mención en la app de Instagram.',
+  'inpage.repost.noMention': '@{handle} no recibe aviso: Instagram en la web no permite mencionar en historias.',
   'inpage.repost.consent':
     'La función de Instagram respeta los ajustes de @{handle}. instapost no siempre puede verlos, así que comparte solo lo que tengas permiso para compartir.',
   'inpage.repost.consentOk': 'Entendido',

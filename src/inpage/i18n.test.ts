@@ -359,12 +359,14 @@ describe('U39 the composer in two languages', () => {
 
   it('RP-29: a repost of anyone else’s content says its author is not notified; the owner’s own post does not', () => {
     expect(S.repost.note('post', false, 'a.b')).toBe(
-      'Posted as a photo: people can’t tap through to the post. @a.b isn’t notified. To notify them, use Send to phone… and add a mention in the Instagram app.',
+      'Posted as a photo: people can’t tap through to the post. @a.b isn’t notified: Instagram on the web can’t mention people in stories.',
     );
-    expect(S.repost.note('mention', false, 'a.b')).toMatch(/to the story\. @a\.b isn’t notified\./);
+    expect(S.repost.note('mention', false, 'a.b')).toMatch(/to the story\. @a\.b isn’t notified: /);
     expect(S.repost.note('post', true, 'owner')).toBe('Posted as a photo: people can’t tap through to the post.');
     setLangSetting('es');
-    expect(S.repost.note('post', false, 'a.b')).toMatch(/publicación\. @a\.b no recibe aviso\. .*Enviar al teléfono…/);
+    expect(S.repost.note('post', false, 'a.b')).toMatch(
+      /publicación\. @a\.b no recibe aviso: Instagram en la web no permite mencionar en historias\./,
+    );
     expect(S.repost.note('post', true, 'owner')).not.toMatch(/aviso/);
   });
 });
