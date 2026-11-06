@@ -10,6 +10,13 @@
  * - `posted-<lang>-<theme>`: the Posted result.
  * - `mark.svg`, `mark-tile.svg`: the mark as read from the composer's live `Mark`, the tile as in tools/icons/mark.ts.
  *
+ * The page's story frames are crops of these, made once by hand with a Playwright canvas, not by this spec:
+ * site/assets/stage-posted-{en,es}.webp from `posted-<lang>-light`, stage-repost.webp from `repost-en-light` (the Spanish
+ * stage differs only by encoder noise). Each is the stage alone: x 0 to 712, y 89 to one row short of the bottom, below
+ * the 87 px title bar and clear of the dark hairlines at y 88 and y 1353, with the dialog's transparent bottom-left
+ * corner filled from its neighbour. The right half stays out: it has an em dash on `posted` and an overlap on `repost`.
+ * A stage has no theme, so one picture serves light and dark.
+ *
  * A shot is written as PNG, or as WebP (from the browser's canvas) when the PNG is over MAX_BYTES. The dialog's
  * corners are transparent, so no scrim shows behind them on any page.
  *

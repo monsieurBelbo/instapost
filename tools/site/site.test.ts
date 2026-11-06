@@ -1,6 +1,6 @@
 /**
- * The page: what a release puts on it, what it must never carry, and the whole build as the Site job runs it. The looks
- * are checked by hand on a real build (widths, dark, no JS), not here.
+ * The pages: what a release puts on them, what they must never carry, how much they say, and the whole build as the Site
+ * job runs it. The looks are checked by hand on a real build (widths, dark, no JS), not here.
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -13,7 +13,7 @@ import { EN as UI_EN } from '../../src/ui/catalog.en.ts';
 import { ES as UI_ES } from '../../src/ui/catalog.es.ts';
 import { EN } from './copy.en.ts';
 import { ES } from './copy.es.ts';
-import { esc, formatDate, formatSize, type Release, renderNotFound, renderPage, type Site } from './page.ts';
+import { esc, formatSize, type Release, renderDetails, renderNotFound, renderPage, type Site } from './page.ts';
 import {
   baseUrlOf,
   checkSha256Line,
@@ -43,6 +43,14 @@ const RELEASE: Release = {
   summary: { en: 'Repost a photo post.', es: 'Añade una publicación.' },
 };
 const RC: Release = { ...RELEASE, label: '0.2.0-rc.1', prerelease: true };
+/** The first release's own summaries, the longest so far: the word limits have to hold with these on the page. */
+const REAL_SUMMARY: Release = {
+  ...RC,
+  summary: {
+    en: 'Repost a photo post, or a story that mentions you, as a picture in your story. Discard story clears the story so you can start again.',
+    es: 'Añade a tu historia, como imagen, una publicación con foto o una historia que te menciona. Descartar historia quita la historia para que empieces de nuevo.',
+  },
+};
 
 /** Every page, in every state a build can leave it. */
 const STATES: readonly [string, Release | null][] = [
@@ -55,6 +63,8 @@ const everyPage = (): [string, string][] => [
   ...STATES.flatMap(([state, r]): [string, string][] => [
     [`en, ${state}`, renderPage(EN, r, SITE)],
     [`es, ${state}`, renderPage(ES, r, SITE)],
+    [`en details, ${state}`, renderDetails(EN, r, SITE)],
+    [`es details, ${state}`, renderDetails(ES, r, SITE)],
   ]),
   ['404', renderNotFound(EN, ES, SITE)],
 ];
@@ -70,6 +80,26 @@ function loadedRefs(html: string): string[] {
 }
 
 const anchors = (html: string): string[] => [...html.matchAll(/<a\b[^>]*\bhref="([^"]*)"/g)].map((m) => m[1] ?? '');
+
+/** A page's body as read: tags gone, the dot that draws a full stop still a full stop. */
+const bodyText = (html: string): string =>
+  html
+    .slice(html.indexOf('<body'), html.indexOf('</body>'))
+    .replace(/<b class="stop">\.<\/b>/g, '.')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z]+;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * The words anyone can read: all of the body, so the footer, the wells, the Copy buttons and the touch-only note count,
+ * though no one screen shows all of them. A word has a letter or a digit, so ↻ and © aren't words. The big step numbers
+ * come from CSS and aren't in the HTML. So this is innerText on a touch phone, plus what a width hides: instagram.com.
+ */
+const visibleWords = (html: string): string[] =>
+  bodyText(html)
+    .split(' ')
+    .filter((w) => /[\p{L}\p{N}]/u.test(w));
 
 /** Calls `visit` on every string of a copy, with its path. */
 function strings(value: unknown, visit: (text: string, path: string) => void, path = ''): void {
@@ -88,99 +118,99 @@ function shape(value: unknown, path = ''): string[] {
   return [`${path}: ${typeof value}`];
 }
 
+const said = (s: { items: readonly string[] }): string => s.items.join(' ');
+
 describe('a release on the page', () => {
-  it('shows its version, size, date and SHA, and links the stable name under the versioned one', () => {
+  it('shows its version and size, and links the stable name under the versioned one', () => {
     const html = renderPage(EN, RELEASE, SITE);
-    expect(html).toContain('Download instapost 0.2.0');
+    expect(html).toContain('<span class="dl-what">Download 0.2.0</span>');
     expect(html).toContain('href="downloads/instapost-latest.zip" download="instapost-0.2.0.zip"');
-    expect(html).toContain('Zip, 0.9 MB. Released <time datetime="2026-11-05">5 Nov 2026</time>.');
-    expect(html).toContain(`<code class="sha">${SHA}</code>`);
+    expect(html).toContain('<span class="dl-meta">0.9 MB. Photos only.</span>');
     expect(html).toContain('<code>instapost-0.2.0.zip</code>');
-    expect(html).toContain(`<strong>New in 0.2.0.</strong> <span>Repost a photo post.</span>`);
+    expect(html).not.toContain(SHA);
+  });
+
+  it('the details page has what’s new, the SHA and the line that checks it', () => {
+    const html = renderDetails(EN, RELEASE, SITE);
+    expect(html).toContain(`<code class="sha">${SHA}</code>`);
+    expect(html).toContain('<code>shasum -a 256 instapost-0.2.0.zip</code>');
+    expect(html).toContain('<strong>New in 0.2.0.</strong> <span>Repost a photo post.</span>');
     expect(html).toContain(`href="${SITE.repo}/releases/tag/v0.2.0"`);
+    expect(html).not.toContain('download=');
   });
 
   it('in Spanish it reads the same from one folder down', () => {
     const html = renderPage(ES, RELEASE, SITE);
-    expect(html).toContain('Descargar instapost 0.2.0');
+    expect(html).toContain('<span class="dl-what">Descargar 0.2.0</span>');
     expect(html).toContain('href="../downloads/instapost-latest.zip" download="instapost-0.2.0.zip"');
-    expect(html).toContain('Zip, 0.9 MB. Publicada el <time datetime="2026-11-05">5 nov 2026</time>.');
-    expect(html).toContain('<span>Añade una publicación.</span>');
+    expect(html).toContain('<span class="dl-meta">0.9 MB. Solo fotos.</span>');
     expect(html).toContain('<html lang="es">');
     expect(html).toContain('<nav class="lang"><a href="../"');
     for (const ref of loadedRefs(html)) expect(ref).toMatch(/^\.\.\//);
+    expect(renderDetails(ES, RELEASE, SITE)).toContain('<span>Añade una publicación.</span>');
   });
 
   it.each([
     ['en', EN],
     ['es', ES],
   ] as const)('%s gives where it has run as a real list of its four tiers', (_, c) => {
-    const list = /<h3>[^<]*<\/h3><ul>(.*?)<\/ul>/.exec(renderPage(c, RELEASE, SITE))?.[1] ?? '';
+    const html = renderDetails(c, RELEASE, SITE);
+    const list = html.split(`<h2>${c.details.tried.title}</h2>`)[1]?.split('</ul>')[0] ?? '';
     expect(list.match(/<li><b>/g)).toHaveLength(4);
     expect(list).not.toContain('<br>');
   });
 
-  it('the Spanish page marks the English button name it quotes', () => {
-    expect(renderPage(ES, RELEASE, SITE)).toContain('<span lang="en">Load unpacked</span>');
-  });
-
-  it('English links are relative to the site’s folder', () => {
+  it('links stay inside the site’s folder, however deep the page', () => {
     const html = renderPage(EN, RELEASE, SITE);
     expect(html).toContain('<nav class="lang"><a href="es/"');
     for (const ref of loadedRefs(html)) expect(ref).toMatch(/^(?:assets\/|style\.css|copy\.js)/);
+    for (const ref of loadedRefs(renderDetails(EN, RELEASE, SITE))) expect(ref).toMatch(/^\.\.\/(?!\.\.)/);
+    for (const ref of loadedRefs(renderDetails(ES, RELEASE, SITE))) expect(ref).toMatch(/^\.\.\/\.\.\/(?!\.\.)/);
   });
 
   it('escapes everything a release carries', () => {
     const nasty = '<img src=x onerror=alert(1)>&"';
     const escaped = '&lt;img src=x onerror=alert(1)&gt;&amp;&quot;';
-    const r: Release = {
-      ...RELEASE,
-      label: nasty,
-      sha256: nasty,
-      date: `2026-11-05T12:00:00.000Z${nasty}`,
-      summary: { en: nasty, es: nasty },
-    };
+    const r: Release = { ...RELEASE, label: nasty, sha256: nasty, summary: { en: nasty, es: nasty } };
     for (const html of [renderPage(EN, r, SITE), renderPage(ES, r, SITE)]) {
       expect(html).not.toContain('<img src=x');
-      expect(html).toContain(escaped);
       expect(html).toContain(`download="instapost-${escaped}.zip"`);
+    }
+    for (const html of [renderDetails(EN, r, SITE), renderDetails(ES, r, SITE)]) {
+      expect(html).not.toContain('<img src=x');
       expect(html).toContain(`<code class="sha">${escaped}</code>`);
+      expect(html).toContain(`<code>shasum -a 256 instapost-${escaped}.zip</code>`);
     }
     const dollars = renderPage(EN, { ...RELEASE, label: "$&$'$`" }, SITE);
-    expect(dollars).toContain("Download instapost $&amp;$'$`<");
+    expect(dollars).toContain("Download $&amp;$'$`<");
   });
 
   it('a Spanish page with no Spanish summary shows the English one, marked as English', () => {
-    const html = renderPage(ES, { ...RELEASE, summary: { en: 'Repost a photo post.', es: null } }, SITE);
+    const html = renderDetails(ES, { ...RELEASE, summary: { en: 'Repost a photo post.', es: null } }, SITE);
     expect(html).toContain('<span lang="en">Repost a photo post.</span>');
   });
 
   it('a prerelease says so, and only a prerelease', () => {
-    expect(renderPage(EN, RC, SITE)).toContain(`<li>${EN.prerelease}</li>`);
-    expect(renderPage(ES, RC, SITE)).toContain(`<li>${ES.prerelease}</li>`);
-    expect(renderPage(EN, RC, SITE)).toContain('Download instapost 0.2.0-rc.1');
+    expect(renderPage(EN, RC, SITE)).toContain('0.9 MB. Photos only. Preview release.');
+    expect(renderPage(ES, RC, SITE)).toContain('0.9 MB. Solo fotos. Versión preliminar.');
+    expect(renderPage(EN, RC, SITE)).toContain('Download 0.2.0-rc.1');
     expect(renderPage(EN, RELEASE, SITE)).not.toContain(EN.prerelease);
     expect(renderPage(ES, RELEASE, SITE)).not.toContain(ES.prerelease);
   });
 
-  it('a release with no usable summary keeps its download and has no What’s new, link included', () => {
+  it('a release with no usable summary keeps its download and SHA and has no What’s new', () => {
     for (const c of [EN, ES]) {
-      const html = renderPage(c, { ...RELEASE, summary: null }, SITE);
-      expect(html).toContain('download="instapost-0.2.0.zip"');
-      expect(html).not.toContain('id="new"');
-      expect(html).not.toContain('href="#new"');
-      expect(html).not.toContain(c.whatsNewLink);
+      const r = { ...RELEASE, summary: null };
+      expect(renderPage(c, r, SITE)).toContain('download="instapost-0.2.0.zip"');
+      const html = renderDetails(c, r, SITE);
+      expect(html).toContain(`<code class="sha">${SHA}</code>`);
+      expect(html).toContain(`>${c.details.allChanges}</a>`);
+      expect(html).not.toContain(c.details.newIn.replace('{v}', '0.2.0'));
     }
-    expect(anchors(renderPage(EN, RELEASE, SITE))).toContain('#new');
-    expect(renderPage(EN, RELEASE, SITE)).toContain('id="new"');
+    expect(renderDetails(EN, RELEASE, SITE)).toContain('New in 0.2.0.');
   });
 
-  it('formats dates in UTC from a fixed table, and sizes in decimal MB', () => {
-    expect(formatDate('2026-01-01T00:30:00Z', EN.months)).toBe('1 Jan 2026');
-    expect(formatDate('2026-12-31T23:59:59Z', ES.months)).toBe('31 dic 2026');
-    expect(formatDate('2026-01-01T00:30:00+02:00', EN.months)).toBe('31 Dec 2025');
-    expect(EN.months).toHaveLength(12);
-    expect(ES.months).toHaveLength(12);
+  it('formats sizes in decimal MB', () => {
     expect(formatSize(865_121)).toBe('0.9 MB');
     expect(formatSize(12_340_000)).toBe('12.3 MB');
   });
@@ -194,19 +224,25 @@ describe('with no release', () => {
   it.each([
     ['en', EN],
     ['es', ES],
-  ] as const)('%s is the full page, with no download, version, What’s new or SHA', (_, c) => {
-    const html = renderPage(c, null, SITE);
-    expect(html).toContain(`<p class="dl is-off">${c.noRelease}</p>`);
-    for (const gone of ['<a class="dl"', 'downloads/', 'download=', 'id="new"', '#new', 'class="sha"', 'SHA-256']) {
-      expect(html).not.toContain(gone);
+  ] as const)('%s is both whole pages, with no download, version, What’s new or SHA', (_, c) => {
+    const main = renderPage(c, null, SITE);
+    const details = renderDetails(c, null, SITE);
+    expect(main).toContain(`<p class="dl is-off">${c.noRelease}</p>`);
+    for (const html of [main, details]) {
+      for (const gone of ['<a class="dl"', 'downloads/', 'download=', 'class="sha"', 'SHA-256', 'shasum']) {
+        expect(html).not.toContain(gone);
+      }
+      expect(html).not.toMatch(/\d+\.\d+\.\d+/);
+      expect(html).toContain('<footer class="foot');
     }
-    expect(html).not.toMatch(/\d+\.\d+\.\d+/);
-    expect(html).toContain(`<p>${c.checkWithoutRelease}</p>`);
-    for (const part of ['class="hero', 'class="install"', 'class="ledger"', 'class="riskpart"', 'class="datapart']) {
-      expect(html).toContain(part);
+    expect(details).not.toContain(c.details.versionHead);
+    expect(details).toContain(`<a href="${SITE.repo}">${c.source}</a>`);
+    for (const part of ['class="hero', 'class="reel"', 'class="install"', 'class="limits"']) {
+      expect(main).toContain(part);
     }
-    expect(html).toContain(`<h2>${c.installHead}</h2>`);
-    expect(html).toContain('<footer class="foot');
+    for (const section of [c.details.limits, c.details.risk, c.details.data, c.details.pictures]) {
+      expect(details).toContain(`<h2>${section.title}</h2>`);
+    }
   });
 });
 
@@ -236,6 +272,11 @@ describe('every page, in every state', () => {
     expect(banned(html)).toEqual([]);
   });
 
+  it.each(everyPage())('%s has one h1, and every picture has its alt', (_, html) => {
+    expect(html.match(/<h1\b/g)).toHaveLength(1);
+    for (const [img = ''] of html.matchAll(/<img\b[^>]*>/g)) expect(img).toMatch(/\salt="[^"]+"/);
+  });
+
   it('links out only to the repo; absolute URLs are for head metadata', () => {
     for (const [, html] of everyPage()) {
       const body = html.slice(html.indexOf('<body'));
@@ -245,40 +286,130 @@ describe('every page, in every state', () => {
   });
 });
 
+describe('how much it says', () => {
+  it.each([
+    ['en', 180, EN],
+    ['es', 200, ES],
+  ] as const)('the %s main page is at most %i words: a brand, not a document', (_, most, c) => {
+    for (const r of [RELEASE, RC, REAL_SUMMARY, null]) {
+      expect(visibleWords(renderPage(c, r, SITE)).length).toBeLessThanOrEqual(most);
+    }
+  });
+
+  it.each([
+    ['en', 500, EN],
+    ['es', 560, ES],
+  ] as const)('the %s details page is at most %i words, with the longest summary so far', (_, most, c) => {
+    for (const r of [RELEASE, RC, REAL_SUMMARY, null]) {
+      expect(visibleWords(renderDetails(c, r, SITE)).length).toBeLessThanOrEqual(most);
+    }
+  });
+
+  it('the count counts what a person reads', () => {
+    const html = '<body><p>Phone down<b class="stop">.</b></p><p><a href="x">Story</a> ↻ © 2026&nbsp;up</p></body>';
+    expect(visibleWords(html)).toEqual(['Phone', 'down.', 'Story', '2026', 'up']);
+    expect(visibleWords(renderPage(EN, RC, SITE))).toEqual(expect.arrayContaining(['manifest.json', 'Copy']));
+    expect(visibleWords(renderPage(EN, RC, SITE))).toContain(EN.phone.split(' ')[0]);
+  });
+
+  it.each([
+    ['en', EN, ['Phone down. Story up.', 'Post the photo. Skip the doomscroll.', 'Install it by hand.']],
+    ['es', ES, ['Deja el teléfono. Sube tu historia.', 'Publica la foto. Sin doomscroll.', 'Instálala a mano.']],
+  ] as const)('%s keeps its lines, and the owner’s word, whole when read', (_, c, wanted) => {
+    const text = bodyText(renderPage(c, RC, SITE)).replace(/ \./g, '.');
+    for (const line of wanted) expect(text).toContain(line);
+    for (const line of [c.sub, c.kind, c.phone, c.risk, c.caption, c.posting, c.repost, c.line, c.detailsLink]) {
+      expect(text).toContain(line);
+    }
+    expect(text).not.toContain('Drawn, except');
+  });
+});
+
 describe('what a screen reader meets', () => {
   it.each([
     ['en', EN],
     ['es', ES],
-  ] as const)(
-    '%s: every step has its heading and text before its well, so Copy never comes before the instruction',
-    (_, c) => {
-      const steps = renderPage(c, RELEASE, SITE).split('<li class="step">').slice(1);
-      expect(steps).toHaveLength(5);
-      for (const step of steps) {
-        expect(step.indexOf('<h3>')).toBeGreaterThanOrEqual(0);
-        expect(step.indexOf('<h3>')).toBeLessThan(step.indexOf('class="well'));
-      }
-    },
-  );
+  ] as const)('%s: every step has its text before its well, so Copy never comes before the instruction', (_, c) => {
+    const steps = renderPage(c, RELEASE, SITE).split('<li class="step">').slice(1);
+    expect(steps).toHaveLength(5);
+    for (const step of steps) {
+      expect(step.indexOf('<p>')).toBeGreaterThanOrEqual(0);
+      expect(step.indexOf('<p>')).toBeLessThan(step.indexOf('class="well'));
+    }
+  });
 
   it.each([
     ['en', EN],
     ['es', ES],
-  ] as const)(
-    '%s: the ledger’s heading is its lead, and each cell names its column, not two empty headings',
-    (_, c) => {
-      const html = renderPage(c, RELEASE, SITE);
-      expect(html).toContain(`<h2 class="ledger-lead">${c.ledgerLead}</h2>`);
-      expect(html).toContain(`<div class="cells" aria-hidden="true"><span class="colhead">${c.canHead}</span>`);
-      expect(html).not.toContain(`<h2>${c.canHead}</h2>`);
-      expect(html).not.toContain(`<h2>${c.cantHead}</h2>`);
-      expect(html).toContain(`<div class="can"><span class="tag">${c.canHead}</span>`);
-      expect(html).toContain(`<div class="cant"><span class="tag">${c.cantHead}</span>`);
-    },
-  );
+  ] as const)('%s: the folder to pick is read out with manifest.json; only the button’s label stays hidden', (_, c) => {
+    const step4 = renderPage(c, RELEASE, SITE).split('<li class="step">')[4];
+    expect(step4).toContain('<div class="well load"><span class="chip" aria-hidden="true">');
+    expect(step4).toContain('<code>manifest.json</code>');
+  });
 
-  it('the column tags stay in the tree at every width: hidden by clipping, never display:none', () => {
-    expect(readFileSync(join(REPO, 'site/style.css'), 'utf8')).not.toMatch(/\.tag\s*\{\s*display:\s*none/);
+  it('a big full stop drawn as a dot is still a real full stop', () => {
+    expect(renderPage(EN, RC, SITE)).toContain('<span class="l">up<b class="stop">.</b></span>');
+    expect(renderPage(ES, RC, SITE)).toContain('<span lang="en">doomscroll</span><b class="stop">.</b>');
+    expect(renderDetails(EN, RC, SITE)).toContain('<h1>Details<b class="stop">.</b></h1>');
+    expect(renderNotFound(EN, ES, SITE)).toContain('<h1>Page not found<b class="stop">.</b></h1>');
+  });
+});
+
+describe('the four pages', () => {
+  const PAGES = [
+    { render: renderPage, c: EN, path: '', other: 'es/', root: '' },
+    { render: renderPage, c: ES, path: 'es/', other: '../', root: '../' },
+    { render: renderDetails, c: EN, path: 'details/', other: '../es/details/', root: '../' },
+    { render: renderDetails, c: ES, path: 'es/details/', other: '../../details/', root: '../../' },
+  ] as const;
+
+  it.each(PAGES)('$path has its canonical, hreflang for its pair, and a language link to the same page', (p) => {
+    const html = p.render(p.c, RC, SITE);
+    const en = `${SITE.baseUrl}${p.path.replace('es/', '')}`;
+    const es = `${SITE.baseUrl}es/${p.path.replace('es/', '')}`;
+    expect(html).toContain(`<html lang="${p.c.lang}">`);
+    expect(html).toContain(`<link rel="canonical" href="${SITE.baseUrl}${p.path}">`);
+    expect(html).toContain(`<meta property="og:url" content="${SITE.baseUrl}${p.path}">`);
+    expect(html).toContain(`<link rel="alternate" hreflang="en" href="${en}">`);
+    expect(html).toContain(`<link rel="alternate" hreflang="es" href="${es}">`);
+    expect(html).toContain(`<link rel="alternate" hreflang="x-default" href="${en}">`);
+    expect(html).toContain(`<nav class="lang"><a href="${p.other}"`);
+    expect(new URL(p.other, SITE.baseUrl + p.path).href).toBe(p.c.lang === 'en' ? es : en);
+  });
+
+  it('the main pages link to their details, and the details back', () => {
+    for (const c of [EN, ES]) {
+      expect(renderPage(c, RC, SITE)).toContain(`<a class="more" href="details/">${c.detailsLink}</a>`);
+      expect(renderDetails(c, RC, SITE)).toContain('<a class="foot-brand" href="../">');
+    }
+  });
+
+  it('only the main pages load copy.js: the details page has nothing to copy', () => {
+    for (const c of [EN, ES]) {
+      expect(renderPage(c, RC, SITE)).toContain('copy.js');
+      expect(renderDetails(c, RC, SITE)).not.toContain('copy.js');
+      expect(renderDetails(c, RC, SITE)).not.toContain('<button');
+    }
+  });
+
+  it('the pictures are one stage for both themes, and the Golden hour one per language', () => {
+    expect(renderPage(EN, RC, SITE)).toContain('src="assets/stage-posted-en.webp"');
+    expect(renderPage(ES, RC, SITE)).toContain('src="../assets/stage-posted-es.webp"');
+    for (const c of [EN, ES]) expect(renderPage(c, RC, SITE)).toContain('assets/stage-repost.webp');
+    expect(renderPage(EN, RC, SITE)).not.toMatch(/stage-[a-z-]*dark/);
+  });
+
+  it('the details page’s footer has every link and notice; the main one says only who', () => {
+    for (const c of [EN, ES]) {
+      const html = renderDetails(c, RC, SITE);
+      for (const href of ['', '/blob/main/CHANGELOG.md', '/releases', '/issues', '/blob/main/LICENSE']) {
+        expect(html).toContain(`<a href="${SITE.repo}${href}">`);
+      }
+      const f = c.details.foot;
+      for (const words of [f.asIs, f.affiliation, f.hosting]) expect(html).toContain(words);
+      expect(html).toMatch(/<a href="(?:\.\.\/)+assets\/OFL\.txt">/);
+      expect(renderPage(c, RC, SITE)).toContain(`<p class="legal">${c.legal}</p>`);
+    }
   });
 });
 
@@ -288,18 +419,12 @@ describe('the head', () => {
   it('says who it is, in both languages, with absolute URLs', () => {
     const en = head(EN, RELEASE);
     expect(en).toContain(`<title>${EN.title}</title>`);
-    expect(en).toContain(`<link rel="canonical" href="${SITE.baseUrl}">`);
     expect(en).toContain('<meta property="og:locale" content="en_US">');
     expect(en).toContain(`<meta property="og:image" content="${SITE.baseUrl}assets/og-en.png">`);
     const es = head(ES, RELEASE);
-    expect(es).toContain(`<link rel="canonical" href="${SITE.baseUrl}es/">`);
     expect(es).toContain('<meta property="og:locale" content="es_LA">');
-    expect(es).toContain(`<meta property="og:url" content="${SITE.baseUrl}es/">`);
     expect(es).toContain(`<meta property="og:image" content="${SITE.baseUrl}assets/og-es.png">`);
     for (const h of [en, es]) {
-      expect(h).toContain(`<link rel="alternate" hreflang="en" href="${SITE.baseUrl}">`);
-      expect(h).toContain(`<link rel="alternate" hreflang="es" href="${SITE.baseUrl}es/">`);
-      expect(h).toContain(`<link rel="alternate" hreflang="x-default" href="${SITE.baseUrl}">`);
       expect(h).toContain('<meta name="twitter:card" content="summary_large_image">');
       expect(h).toContain('<meta name="color-scheme" content="light dark">');
       expect(h).toContain('media="(prefers-color-scheme: light)" content="#efefef"');
@@ -307,11 +432,14 @@ describe('the head', () => {
       expect(h).toContain('as="font" type="font/woff2" crossorigin');
       expect(h).toContain('<meta property="og:image:width" content="1200">');
     }
+    expect(renderDetails(EN, RELEASE, SITE)).toContain(`<title>${EN.details.title}</title>`);
+    expect(renderDetails(ES, RELEASE, SITE)).toContain(`<title>${ES.details.title}</title>`);
   });
 
   it('never carries a version, so a stale share card can’t lie', () => {
     expect(head(EN, RELEASE)).not.toContain('0.2.0');
     expect(head(ES, RC)).not.toContain('0.2.0');
+    expect(renderDetails(EN, RC, SITE).split('</head>')[0]).not.toContain('0.2.0');
   });
 });
 
@@ -337,7 +465,7 @@ describe('the 404', () => {
     expect(html).toContain('<meta name="robots" content="noindex">');
     expect(html).toContain(EN.notFound.head);
     expect(html).toContain(EN.notFound.body);
-    expect(html).toContain(`<p lang="es">${ES.notFound.body}`);
+    expect(html).toContain(`<p lang="es">${ES.notFound.head} ${ES.notFound.body}`);
   });
 });
 
@@ -356,23 +484,38 @@ describe('the copy', () => {
       expect(marks(es.get(path) ?? ''), path).toEqual(marks(text));
       compared += 1;
     });
-    expect(compared).toBeGreaterThan(100);
-  });
-
-  it.each([
-    ['en', EN, 'post or test'],
-    ['es', ES, 'publicación o prueba'],
-  ] as const)('%s says the forged headers and phone frame apply to a test as well as a post', (_, c, both) => {
-    expect(c.exactHead).toContain(both);
-    expect(c.riskBlocks[1]?.body).toContain(both);
-    expect(c.riskBlocks[2]?.title).toContain(both);
-    expect(c.perms.find(([k]) => k.startsWith('declarativeNetRequest'))?.[1]).toContain(both);
+    expect(compared).toBeGreaterThan(80);
   });
 
   it.each([
     ['en', EN],
     ['es', ES],
-  ] as const)('%s names every header the exact block promises', (_, c) => {
+  ] as const)('%s keeps the card’s risk sentence as the first thing under Risk', (_, c) => {
+    expect(c.details.risk.items[0]).toBe(c.risk);
+  });
+
+  it.each([
+    ['en', EN, 'button (every page)'],
+    ['es', ES, 'botón (cada página)'],
+  ] as const)('%s says Instagram’s code can see the button on every page, not only during a post', (_, c, seen) => {
+    expect(c.details.risk.items[1]).toContain(seen);
+  });
+
+  it.each([
+    ['en', EN, 'Only during a post or test'],
+    ['es', ES, 'Solo durante una publicación o prueba'],
+  ] as const)(
+    '%s says the forged requests and phone frame apply to a test as well as a post, then end',
+    (_, c, both) => {
+      expect(c.details.risk.items[2]).toContain(both);
+      expect(c.details.risk.items[2]).toMatch(/Android/);
+    },
+  );
+
+  it.each([
+    ['en', EN],
+    ['es', ES],
+  ] as const)('%s names every header it changes, on one line', (_, c) => {
     for (const header of [
       'X-Frame-Options',
       'Sec-Fetch-Dest',
@@ -380,72 +523,141 @@ describe('the copy', () => {
       'Sec-CH-UA-Mobile',
       'Sec-CH-UA-Platform',
     ]) {
-      expect(c.exactBody).toContain(`<code>${header}</code>`);
+      expect(c.details.risk.items[3]).toContain(`<code>${header}</code>`);
     }
+    expect(c.details.risk.items[3]).toContain('client hints');
   });
 
   it.each([
-    ['en', EN, 'secondary account'],
-    ['es', ES, 'cuenta secundaria'],
-  ] as const)(
-    '%s says secondary account wherever it gives the live record, and at the install step',
-    (_, c, account) => {
-      expect(c.tried).toContain(account);
-      expect(c.rows.at(-1)?.can[0]).toContain(account);
-      expect(c.steps[4].body).toContain(account);
-    },
-  );
+    ['en', EN, 'secondary'],
+    ['es', ES, 'secundaria'],
+  ] as const)('%s says secondary wherever it gives the live record, and on the card', (_, c, account) => {
+    expect(c.line).toContain(account);
+    expect(c.risk).toContain(account);
+    expect(c.details.tried.items[0]).toContain(account);
+  });
 
   it.each([
-    ['en', EN, 'in a normal window, not Incognito', 'in Instagram’s left sidebar'],
-    ['es', ES, 'en una ventana normal, no de incógnito', 'en la barra lateral izquierda de Instagram'],
-  ] as const)('%s says where step 5 happens: New story never appears in Incognito', (_, c, normal, sidebar) => {
-    expect(c.steps[4].body).toContain(normal);
-    expect(c.steps[4].body).toContain(sidebar);
+    ['en', EN, 'not Incognito', 'in the left sidebar'],
+    ['es', ES, 'no incógnito', 'en la barra lateral izquierda'],
+  ] as const)('%s says where New story appears, and that it never does in Incognito', (_, c, normal, sidebar) => {
+    expect(said(c.details.limits)).toContain(normal);
+    expect(c.steps[4]).toContain(sidebar);
   });
 
   it.each([
     ['en', EN, 'Downloads/instapost'],
     ['es', ES, 'Descargas/instapost'],
   ] as const)('%s says saved copies outlive Remove', (_, c, folder) => {
-    expect(c.removing.body).toContain(folder);
-    expect(c.dataBlocks[0]?.body).toContain(folder);
+    expect(said(c.details.updating)).toContain(folder);
+    expect(said(c.details.data)).toContain(folder);
   });
 
   it.each([
-    ['en', EN, 'unless it’s a repost'],
-    ['es', ES, 'salvo si viene de Añadir a tu historia'],
+    ['en', EN, 'except reposts'],
+    ['es', ES, 'salvo republicaciones'],
   ] as const)('%s doesn’t say a failed repost saves itself', (_, c, except) => {
-    expect(c.dataBlocks[0]?.body).toContain(except);
+    expect(said(c.details.data)).toContain(except);
+  });
+
+  it.each([
+    ['en', EN, 'No server, no analytics'],
+    ['es', ES, 'Sin servidor ni analíticas'],
+  ] as const)('%s says it has no server of its own', (_, c, words) => {
+    expect(said(c.details.data)).toContain(words);
+  });
+
+  it('Spanish marks the English button word it quotes', () => {
+    expect(ES.steps[3]).toContain('<span lang="en">Load</span>');
   });
 
   it.each([
     ['en', EN, UI_EN, 'While the page stays open'],
     ['es', ES, UI_ES, 'Mientras la página siga abierta'],
   ] as const)('%s says a copy is saved only while the page stays open, as Settings does', (_, c, ui, open) => {
-    expect(c.dataBlocks[0]?.body).toContain(open);
+    expect(said(c.details.data)).toContain(open);
     expect(ui['inpage.settings.keepCopiesHelp']).toContain(open);
   });
 
   it.each([
-    ['en', EN, '@handle', 'read it before you paste it'],
-    ['es', ES, '@usuario', 'léelo antes de pegarlo'],
-  ] as const)('%s says what Copy diagnostics holds, since the page links to public issues', (_, c, handle, read) => {
-    expect(c.dataBlocks[0]?.body).toContain(handle);
-    expect(c.dataBlocks[0]?.body).toContain(read);
+    ['en', EN, '@handles', 'Read before pasting', 'clipboard only'],
+    ['es', ES, '@usuarios', 'Léelo antes de pegarlo', 'solo portapapeles'],
+  ] as const)('%s says what Copy diagnostics holds, since the page links to public issues', (_, c, ...words) => {
+    for (const word of words) expect(said(c.details.data)).toContain(word);
   });
 
   it.each([
-    ['en', EN, 'Read and change your data', 'can read and change', 'your DMs', 'None of this goes to me'],
-    ['es', ES, 'Leer y modificar tus datos', 'puede leer y cambiar', 'mensajes directos', 'Nada de esto me llega'],
-  ] as const)('%s owns up to what the Instagram permission reads, DMs included', (_, c, label, can, dms, notMe) => {
-    expect(c.dataBlocks[2]?.body).toContain(label);
-    const host = c.perms.find(([k]) => k.startsWith('www.instagram.com'))?.[1];
-    for (const words of [can, dms, notMe]) expect(host).toContain(words);
+    [
+      'en',
+      EN,
+      'Read and change your data',
+      'Manage your downloads',
+      'Block content on any page',
+      'request watching',
+      'DM text',
+    ],
+    [
+      'es',
+      ES,
+      'Leer y modificar tus datos',
+      'Administrar tus descargas',
+      'Bloquear contenido en cualquier página',
+      'observar solicitudes',
+      'mensajes directos',
+    ],
+  ] as const)('%s owns up to what the browser calls it and what it reads, DMs included', (_, c, ...words) => {
+    for (const word of words) expect(said(c.details.permissions)).toContain(word);
   });
 
-  it('permissions and addresses are the browser’s words, untranslated', () => {
-    expect(ES.perms.map(([k]) => k)).toEqual(EN.perms.map(([k]) => k));
+  it.each([
+    ['en', EN, 'Add to story', 'Photo', 'English/Spanish', 'Extensions menu'],
+    ['es', ES, 'Añadir a tu historia', 'foto', 'inglés/español', 'Menú de extensiones'],
+  ] as const)(
+    '%s says where a repost starts, which mentions qualify, and where New story’s stand-in is',
+    (_, c, add, photo, langs, menu) => {
+      expect(said(c.details.reposts)).toContain(add);
+      for (const word of [photo, langs]) expect(c.details.reposts.items[1]).toContain(word);
+      expect(said(c.details.limits)).toContain(menu);
+    },
+  );
+
+  it('the line on where to get the folder links to the page that has it', () => {
+    for (const c of [EN, ES]) expect(c.details.risk.items[6]).toContain('<a href="../">');
+  });
+
+  it('Spanish doesn’t read as tried on Spanish Instagram: “other languages” there means other than Spanish', () => {
+    expect(ES.details.tried.items[2]).toContain('español, otros idiomas');
+  });
+
+  it('the image hosts are the browser’s words, untranslated', () => {
+    for (const c of [EN, ES]) expect(said(c.details.permissions)).toContain('*.cdninstagram.com, *.fna.fbcdn.net');
+  });
+
+  it.each([
+    ['en', EN, UI_EN, '7 days', 'on your phone'],
+    ['es', ES, UI_ES, '7 días', 'en tu teléfono'],
+  ] as const)('%s says what the pause asks of you, as the extension does', (_, c, ui, days, phone) => {
+    for (const words of [days, phone]) {
+      expect(said(c.details.risk)).toContain(words);
+      expect(ui['inpage.pause.body']).toContain(words);
+    }
+  });
+
+  it.each([
+    ['en', EN, UI_EN, '60 seconds', '6 an hour', '15 a day', 'failures count', 'No retries'],
+    ['es', ES, UI_ES, '60 segundos', '6 por hora', '15 al día', 'las fallidas cuentan', 'Sin reintentos'],
+  ] as const)('%s gives the pace and uses the product’s own labels', (_, c, ui, ...words) => {
+    const limits = said(c.details.limits);
+    for (const word of words) expect(limits).toContain(word);
+    expect(limits).toContain(ui['inpage.post.firstButton']);
+    expect(limits).toContain(ui['step.couldntConfirm']);
+  });
+
+  it.each([
+    ['en', EN, 'stand-in', 'made-up accounts', 'drawn'],
+    ['es', ES, 'réplica local', 'cuentas inventadas', 'dibujado'],
+  ] as const)('%s owns up to how the pictures were made', (_, c, ...words) => {
+    for (const word of words) expect(said(c.details.pictures)).toContain(word);
   });
 
   it.each([
@@ -482,6 +694,9 @@ describe('the copy', () => {
       'Quitar borra todo lo que instapost guardó',
       'Reloading it ends the post as Couldn’t confirm',
       'Si la cierras, termina en No se pudo confirmar',
+      'I made this',
+      'sends nothing to me',
+      'Nada de esto me llega',
     ]) {
       expect(banned(text), text).not.toEqual([]);
     }
@@ -509,6 +724,8 @@ function banned(text: string): string[] {
     ['removes everything', /deletes everything|borra todo lo/i],
     // After Share nothing cancels: the story can still go live with the tab closed.
     ['closing cancels', /ends the post|termina en no se pudo/i],
+    // The page speaks for the product, not as a person.
+    ['first person', /\bI\b|\b(?:me|my|mine)\b/],
   ];
   return rules.filter(([, re]) => re.test(text)).map(([name]) => name);
 }
@@ -733,11 +950,17 @@ describe('scripts/build-site.ts, as the Site job runs it', () => {
 
     const en = read(out, 'index.html');
     const es = read(out, 'es/index.html');
-    expect(en).toContain(`<code class="sha">${sha}</code>`);
-    expect(en).toContain('Repost &lt;now&gt; &amp; more.');
-    expect(es).toContain('Añade &lt;ya&gt; &amp; más.');
+    const enDetails = read(out, 'details/index.html');
+    const esDetails = read(out, 'es/details/index.html');
+    expect(enDetails).toContain(`<code class="sha">${sha}</code>`);
+    expect(esDetails).toContain(`<code class="sha">${sha}</code>`);
+    expect(enDetails).toContain('Repost &lt;now&gt; &amp; more.');
+    expect(esDetails).toContain('Añade &lt;ya&gt; &amp; más.');
     expect(en).toContain(EN.prerelease);
-    for (const html of [en, es]) {
+    expect(es).toContain(ES.prerelease);
+    expect(enDetails).toContain('<link rel="canonical" href="https://monsieurbelbo.github.io/instapost/details/">');
+    expect(esDetails).toContain('<link rel="canonical" href="https://monsieurbelbo.github.io/instapost/es/details/">');
+    for (const html of [en, es, enDetails, esDetails]) {
       expect(html).not.toContain('Videos come later');
       expect(html).not.toContain('AM50');
       expect(html).toContain('<link rel="canonical" href="https://monsieurbelbo.github.io/instapost/');
@@ -754,7 +977,7 @@ describe('scripts/build-site.ts, as the Site job runs it', () => {
       const path = ref.startsWith('/instapost/') ? join(out, ref.slice('/instapost/'.length)) : resolve(from, ref);
       return existsSync(path) && statSync(path).isDirectory() ? join(path, 'index.html') : path;
     };
-    for (const file of ['index.html', 'es/index.html', '404.html']) {
+    for (const file of ['index.html', 'es/index.html', 'details/index.html', 'es/details/index.html', '404.html']) {
       const html = read(out, file);
       const local = [...loadedRefs(html), ...anchors(html)].filter((r) => !/^(?:[a-z]+:|#)/i.test(r));
       expect(local.length).toBeGreaterThan(1);
@@ -789,6 +1012,8 @@ describe('scripts/build-site.ts, as the Site job runs it', () => {
     expect(en).toContain(EN.noRelease);
     expect(en).not.toContain('downloads/');
     expect(read(out, 'es/index.html')).toContain(ES.noRelease);
+    expect(read(out, 'details/index.html')).toContain(EN.details.limits.title);
+    expect(read(out, 'es/details/index.html')).toContain(ES.details.limits.title);
     expect(existsSync(join(out, 'assets/InstrumentSans-Variable.woff2'))).toBe(true);
   });
 

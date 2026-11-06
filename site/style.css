@@ -7,10 +7,9 @@
 }
 
 :root {
-  /* The page is laid out from one 1080 x 1920 card: the mark blown up to poster size, with its real bite and dot.
-     Its width is the left column of every section. Inside it, sizes are story pixels (--u = 1/1080 of its width),
-     so it scales as one picture. Dot r 19.4 %, ring r 25.8 %, centre (91.3 %, 18.4 %), corners 22 %.
-     It's the only big rounded object and the only loud thing: steps, ledger and risk are rules and type.
+  /* One 1080 x 1920 card: the mark blown up to poster size, with its real bite and dot. It's the one loud thing, the
+     only jade surface. Inside it, sizes are story pixels (--u = 1/1080 of its width), so it scales as one picture.
+     Dot r 19.4 %, ring r 25.8 %, centre (91.3 %, 18.4 %), corners 22 %. The dot comes back small on what you press.
      Ink #000 / #f5f5f5, page #efefef / #161616, surface #fff / #262626 (composer neutrals). Card #0b7a6c in both
      themes; on dark only the dot and small accents take #3dd6be. */
   color-scheme: light dark;
@@ -18,7 +17,6 @@
   --surface: #fff;
   --ink: #000;
   --ink-2: #636363;
-  --cap: #595959;
   --sep: #d4d4d4;
   --jade: #0b7a6c;
   --card: #0b7a6c;
@@ -27,6 +25,8 @@
   --dl-bg: #fff;
   --dl-fg: #00231e;
   --room: #d4d4d4;
+  --behind: #c6c6c6;
+  --says-line: transparent;
   --sk: #e6e6e6;
   --sk-2: #efefef;
   --win-line: #dbdbdb;
@@ -35,10 +35,15 @@
   --mark-bg: var(--page);
 
   --gutter: 32px;
-  --col: clamp(380px, 34vw, 540px);
+  /* One card, whole, on a laptop's first screen, with the frames peeking under it: at most a third of the page. */
+  --col: max(340px, min(34vw, 540px, calc((100svh - 2 * var(--gutter) - 72px) * 9 / 16)));
   --overhang: calc(var(--col) * 0.107);
-  --gap: clamp(40px, 4vw, 72px);
-  --section: clamp(64px, 6.5vw, 104px);
+  --gap: clamp(32px, 3.2vw, 56px);
+  --section: clamp(72px, 9vw, 144px);
+  --h1: 244;
+}
+:root:lang(es) {
+  --h1: 216;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -47,11 +52,12 @@
     --surface: #262626;
     --ink: #f5f5f5;
     --ink-2: #a8a8a8;
-    --cap: #a8a8a8;
     --sep: #363636;
     --jade: #3dd6be;
     --dot: #3dd6be;
     --room: #0c0c0c;
+    --behind: #1b1b1b;
+    --says-line: rgba(255, 255, 255, 0.1);
     --sk: #363636;
     --sk-2: #2f2f2f;
     --win-line: #363636;
@@ -68,35 +74,25 @@
 html {
   -webkit-text-size-adjust: 100%;
 }
-
 body {
   margin: 0;
   background: var(--page);
   color: var(--ink);
   font:
-    400 17px / 1.45 "Instrument Sans",
+    400 17px / 1.4 "Instrument Sans",
     system-ui,
     sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
 }
-
 h1,
 h2,
-h3,
 p,
 ul,
 ol,
-dl,
-dd,
 figure {
   margin: 0;
   padding: 0;
-}
-p,
-li,
-dd {
-  text-wrap: pretty;
 }
 ul,
 ol {
@@ -106,12 +102,8 @@ img {
   display: block;
 }
 strong,
-b,
-h3 {
+b {
   font-weight: 600;
-}
-h3 {
-  font-size: inherit;
 }
 code {
   font:
@@ -120,11 +112,6 @@ code {
     Menlo,
     Consolas,
     monospace;
-  white-space: nowrap;
-}
-code.sha {
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 a {
   color: inherit;
@@ -142,13 +129,11 @@ button {
 [hidden] {
   display: none !important;
 }
-
 :focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
 
-/* the shared grid */
 .grid {
   display: grid;
   grid-template-columns: var(--col) minmax(0, 1fr);
@@ -158,12 +143,16 @@ button {
   padding-inline: var(--gutter);
 }
 
-/* language: top right, out of the card's way */
 .lang {
   position: absolute;
-  top: 12px;
+  top: 8px;
   right: max(var(--gutter), calc(50% - 880px + var(--gutter)));
-  font-size: 15px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+/* on the brand's line */
+.doc .lang {
+  top: 34px;
 }
 
 /* the mark */
@@ -185,11 +174,29 @@ button {
   fill: var(--jade);
 }
 
+/* A big line's full stop is the mark's dot: round, not the font's square. The text stays a real "." to copy and read. */
+.stop {
+  display: inline-block;
+  width: 0.19em;
+  height: 0.19em;
+  margin-left: 0.055em;
+  border-radius: 50%;
+  background: var(--stop);
+  color: transparent;
+  line-height: 0;
+  overflow: hidden;
+  vertical-align: baseline;
+}
+
+/* a big type's line */
+.l {
+  display: block;
+}
+
 /* the card */
 .hero {
   padding-block: var(--gutter) 0;
 }
-
 .card {
   position: relative;
   container-type: inline-size;
@@ -198,7 +205,6 @@ button {
   min-height: calc(var(--col) * 16 / 9);
   color: var(--on-card);
 }
-
 .card::before {
   content: "";
   position: absolute;
@@ -208,7 +214,6 @@ button {
   -webkit-mask: radial-gradient(circle 25.8cqw at 91.3cqw 18.4cqw, transparent 99.6%, #000 100%);
   mask: radial-gradient(circle 25.8cqw at 91.3cqw 18.4cqw, transparent 99.6%, #000 100%);
 }
-
 .card-inner {
   --u: calc(100cqw / 1080);
   --mark-bg: var(--card);
@@ -217,9 +222,8 @@ button {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: calc(104 * var(--u)) calc(76 * var(--u)) calc(88 * var(--u));
+  padding: calc(104 * var(--u)) calc(76 * var(--u)) calc(84 * var(--u));
 }
-
 .brand {
   display: flex;
   align-items: center;
@@ -235,67 +239,80 @@ button {
 .brand .d {
   fill: #fff;
 }
-
-h1 {
-  margin: calc(56 * var(--u)) 0 0 -0.03em;
-  font-size: calc(172 * var(--u));
+.card h1 {
+  --stop: #fff;
+  margin: auto 0 0 -0.04em;
+  padding-top: calc(100 * var(--u));
+  font-size: calc(var(--h1) * var(--u));
   font-weight: 600;
-  font-stretch: 92%;
-  line-height: 0.98;
-  letter-spacing: -0.035em;
+  font-stretch: 88%;
+  line-height: 0.9;
+  letter-spacing: -0.04em;
 }
-h1 span {
-  display: block;
-}
-
 .sub {
-  margin-top: calc(32 * var(--u));
-  font-size: max(16px, calc(44 * var(--u)));
-  line-height: 1.2;
+  margin-top: calc(64 * var(--u));
+  font-size: max(18px, calc(62 * var(--u)));
+  line-height: 1.12;
   font-weight: 500;
-  letter-spacing: -0.008em;
+  letter-spacing: -0.014em;
+  text-wrap: balance;
 }
-
+.kind {
+  margin-top: calc(14 * var(--u));
+  font-size: max(14px, calc(36 * var(--u)));
+  line-height: 1.25;
+  text-wrap: balance;
+}
 .phone {
   display: none;
 }
-
 .dl {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: calc(36 * var(--u));
-  min-height: max(52px, calc(164 * var(--u)));
-  padding-block: 12px;
+  margin-top: calc(40 * var(--u));
+  min-height: max(56px, calc(166 * var(--u)));
+  padding-block: 10px;
   padding-inline: calc(52 * var(--u));
   border-radius: calc(46 * var(--u));
   background: var(--dl-bg);
   color: var(--dl-fg);
-  font-size: max(16px, calc(54 * var(--u)));
-  line-height: 1.15;
-  font-weight: 600;
-  letter-spacing: -0.012em;
   text-decoration: none;
 }
-.dl > span {
-  text-wrap: balance;
-}
 .dl.is-off {
-  padding-block: calc(36 * var(--u));
   background: none;
   color: inherit;
   outline: 1px solid currentColor;
   outline-offset: -1px;
-  font-size: max(15px, calc(40 * var(--u)));
+  font-size: max(17px, calc(54 * var(--u)));
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.012em;
+}
+.dl-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.dl-what {
+  font-size: max(17px, calc(54 * var(--u)));
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+.dl-meta {
+  font-size: max(13px, calc(31 * var(--u)));
+  line-height: 1.25;
+  text-wrap: balance;
 }
 a.dl:hover {
   filter: brightness(0.94);
 }
 .down {
   flex: none;
-  width: 1em;
-  height: 1em;
+  width: max(20px, calc(56 * var(--u)));
+  height: max(20px, calc(56 * var(--u)));
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -307,28 +324,16 @@ a.dl:hover .down,
 a.dl:focus-visible .down {
   transform: translateY(2px);
 }
-
 .card-inner :focus-visible {
   outline-color: var(--on-card);
 }
-
 .risk {
-  margin-top: calc(32 * var(--u));
-  font-size: max(14px, calc(38 * var(--u)));
-  line-height: 1.32;
+  margin-top: calc(28 * var(--u));
+  font-size: max(14px, calc(32 * var(--u)));
+  line-height: 1.3;
   font-weight: 500;
+  text-wrap: balance;
 }
-
-.meta {
-  margin-top: auto;
-  padding-top: calc(32 * var(--u));
-  font-size: max(13px, calc(31 * var(--u)));
-  line-height: 1.38;
-}
-.meta li + li {
-  margin-top: calc(6 * var(--u));
-}
-
 .dot {
   position: absolute;
   left: 71.9cqw;
@@ -350,41 +355,22 @@ a.dl:focus-visible .down {
   }
 }
 
-/* the other tall object: stands on the card's bottom line */
-.side {
+/* the other tall object: its caption stands on the card's bottom line */
+.scene {
   display: flex;
   flex-direction: column;
   min-width: 0;
-}
-
-.lead {
-  max-width: 30em;
-  padding-right: 80px;
-  font-size: clamp(21px, 1.8vw, 28px);
-  line-height: 1.2;
-  font-weight: 500;
-  letter-spacing: -0.012em;
-}
-.why {
-  margin-top: 8px;
-  font-size: 17px;
-}
-
-.scene {
-  flex: 1 1 0;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  margin-top: 20px;
 }
-/* --cap, not --ink-2: on light the first line sits on the window's shadow and still has to pass AA */
-.scene figcaption {
-  margin-top: 10px;
-  color: var(--cap);
-  font-size: 13px;
-  line-height: 1.35;
+.scene figcaption,
+.story figcaption {
+  margin-top: 14px;
+  font-size: clamp(16px, 1.35vw, 20px);
+  line-height: 1.22;
+  font-weight: 500;
+  letter-spacing: -0.008em;
+  text-wrap: pretty;
 }
-
 .window {
   flex: 1 1 0;
   min-height: 0;
@@ -409,7 +395,7 @@ a.dl:focus-visible .down {
   flex: 1 1 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: clamp(160px, 12vw, 176px) minmax(0, 1fr);
+  grid-template-columns: clamp(164px, 11.5vw, 176px) minmax(0, 1fr);
 }
 .nav {
   display: flex;
@@ -463,8 +449,11 @@ a.dl:focus-visible .down {
 .nav > i.round::before {
   border-radius: 50%;
 }
-
+.nav > i.last {
+  margin-top: auto;
+}
 .entry {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -485,71 +474,168 @@ a.dl:focus-visible .down {
 .nav .entry {
   margin-top: 6px;
 }
-.entry-note {
-  margin-top: 5px;
-  padding-inline: 10px;
-  color: var(--ink-2);
-  font-size: 12px;
-  line-height: 1.25;
-}
-
+/* The page behind the dialog: a tray of circles above it, a post below it. Drawn, dim, no words. Only when the room is
+   tall enough to show them whole, not a sliver peeking out from behind the dialog. */
 .room {
   position: relative;
+  container-type: size;
   min-height: 0;
+  overflow: hidden;
   background: var(--room);
 }
-.room img {
+@container (max-aspect-ratio: 86 / 100) {
+  .shot::before,
+  .shot::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+  }
+  .shot::before {
+    bottom: calc(100% + 8px);
+    left: 0;
+    /* past the dialog to the window edge, so the room clips the last circle, not the tray */
+    right: -20px;
+    height: 56px;
+    background: radial-gradient(circle 26px at 28px 28px, var(--behind) 97%, transparent 100%) 0 0 / 74px 56px repeat-x;
+  }
+  .shot::after {
+    top: calc(100% + 8px);
+    left: 15%;
+    right: 15%;
+    height: 120px;
+    border-radius: 12px;
+    background: var(--behind);
+  }
+}
+.shot {
   position: absolute;
   inset: 0;
+  z-index: 1;
   margin: auto;
-  width: auto;
+  width: min(100cqw - 40px, (100cqh - 40px) * 1392 / 1354);
+  aspect-ratio: 1392 / 1354;
+}
+.shot img {
+  width: 100%;
   height: auto;
-  max-width: calc(100% - 40px);
-  max-height: calc(100% - 40px);
   filter: drop-shadow(0 16px 28px rgba(0, 0, 0, 0.28));
+}
+
+/* The dot on what you press: its ring is cut from what's behind it, like the card's bite. On the picture, top right of
+   Post story, whose corner is at (1360, 1242) of 1392 x 1354. */
+.press,
+.chip::after,
+.row-well .entry::after {
+  content: "";
+  position: absolute;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--dot);
+  box-shadow: 0 0 0 3px var(--surface);
+}
+.press {
+  left: 97.7%;
+  top: 91.75%;
+  width: 3%;
+  transform: translate(-50%, -50%);
+}
+.chip::after,
+.row-well .entry::after {
+  right: -8px;
+  top: -8px;
+  width: 15px;
+}
+
+/* the reel: three frames, read like a story */
+.reel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(16px, 3vw, 56px);
+  align-items: start;
+  max-width: 1760px;
+  margin: var(--section) auto 0;
+  padding-inline: var(--gutter);
+}
+@media (min-width: 700px) {
+  .reel {
+    margin-top: clamp(48px, 4vw, 64px);
+  }
+}
+.frame {
+  position: relative;
+  container-type: inline-size;
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  border-radius: clamp(20px, 2.4vw, 40px);
+}
+.frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.says {
+  --stop: #fff;
+  --mark-bg: #000;
+  display: flex;
+  background: #000;
+  box-shadow: inset 0 0 0 1px var(--says-line);
+  color: #fff;
+}
+.says .mark {
+  position: absolute;
+  top: 8cqw;
+  left: 8.5cqw;
+  height: 13cqw;
+}
+.says .mark .d {
+  fill: #3dd6be;
+}
+.says-text {
+  align-self: flex-end;
+  padding: 8.5cqw;
+  margin-left: -0.04em;
+  font-size: 18cqw;
+  font-weight: 600;
+  font-stretch: 88%;
+  line-height: 0.94;
+  letter-spacing: -0.04em;
+}
+.says-text .l:last-child .stop {
+  background: #3dd6be;
 }
 
 /* install */
 .install {
-  margin-top: var(--section);
+  max-width: 1760px;
+  margin: var(--section) auto 0;
+  padding-inline: var(--gutter);
 }
-
-h2,
-.colhead {
-  font-size: clamp(44px, 4.4vw, 64px);
+.install h2 {
+  --stop: var(--jade);
+  font-size: clamp(44px, 6.2vw, 104px);
+  text-wrap: balance;
   font-weight: 600;
-  font-stretch: 92%;
-  line-height: 1;
-  letter-spacing: -0.03em;
+  font-stretch: 88%;
+  line-height: 0.92;
+  letter-spacing: -0.04em;
+  margin-left: -0.04em;
 }
-
-.install-head {
-  align-items: end;
-}
-.install-head p {
-  max-width: 34em;
-}
-
 .steps {
   counter-reset: s;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   column-gap: 24px;
-  max-width: 1760px;
-  margin: 28px auto 0;
-  padding-inline: var(--gutter);
+  margin-top: 40px;
 }
-
-/* The heading and text come first in the HTML, for screen readers. Here the well shows above them. */
+/* The text comes first in the HTML, so Copy never comes before the instruction. Here the well shows above it. */
 .step {
   counter-increment: s;
-  container-type: inline-size;
   display: flex;
   flex-direction: column;
   padding-top: 14px;
-  border-top: 2px solid var(--ink);
+  border-top: 3px solid var(--ink);
   font-size: 16px;
-  line-height: 1.38;
+  line-height: 1.3;
 }
 .step::before {
   content: counter(s);
@@ -562,16 +648,16 @@ h2,
   line-height: 0.96;
   letter-spacing: -0.03em;
 }
-.step h3 {
-  margin-top: 16px;
-  font-size: 19px;
-  line-height: 1.18;
-  letter-spacing: -0.008em;
+.step > p {
+  margin-top: 14px;
+  color: var(--ink-2);
+  text-wrap: pretty;
 }
-.step h3 + p {
-  margin-top: 5px;
+.step strong {
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.004em;
 }
-
 .well {
   order: -1;
   display: flex;
@@ -585,10 +671,8 @@ h2,
   --mark-bg: var(--surface);
 }
 .well code {
-  white-space: normal;
   overflow-wrap: anywhere;
 }
-
 .files {
   align-items: flex-start;
   gap: 6px;
@@ -618,7 +702,6 @@ h2,
   stroke-width: 2;
   stroke-linejoin: round;
 }
-
 .urls {
   gap: 8px;
   padding: 8px;
@@ -644,6 +727,7 @@ h2,
   font-size: 13px;
   letter-spacing: -0.02em;
   user-select: all;
+  white-space: nowrap;
 }
 .copy {
   grid-column: 2;
@@ -678,7 +762,6 @@ h2,
     min-height: 24px;
   }
 }
-
 .toggle {
   flex-direction: row;
   flex-wrap: wrap;
@@ -707,12 +790,12 @@ h2,
   border-radius: 50%;
   background: #fff;
 }
-
 .load {
   align-items: flex-start;
   gap: 12px;
 }
 .chip {
+  position: relative;
   padding: 7px 12px;
   border-radius: 10px;
   border: 2px solid var(--ink);
@@ -724,19 +807,12 @@ h2,
   font-size: 14.5px;
   line-height: 1.4;
 }
-.tree em {
-  color: var(--jade);
-  font-style: normal;
-  font-size: 13px;
-  font-weight: 500;
-}
 .tree code {
   display: inline-block;
   padding-left: 12px;
   color: var(--ink-2);
   font-size: 12.5px;
 }
-
 .row-well {
   align-items: flex-start;
   gap: 8px;
@@ -752,202 +828,145 @@ h2,
   padding-inline: 10px 14px;
 }
 
-.after {
-  margin-top: 40px;
-  font-size: 16px;
-  line-height: 1.42;
-}
-.notes {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 40px;
-}
-.block h3 {
-  display: block;
-}
-.new {
-  scroll-margin-top: 16px;
-}
-.new a {
-  white-space: nowrap;
-}
-
-/* can, can't: every row shares the page's columns, so the topics sit under the card */
-.ledger {
-  max-width: 1760px;
+/* the one line, and the way to the rest */
+.limits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 40px;
+  width: min(100% - 2 * var(--gutter), 1760px - 2 * var(--gutter));
   margin: var(--section) auto 0;
-  padding-inline: var(--gutter);
+  padding-top: 16px;
+  border-top: 3px solid var(--ink);
 }
-.row {
-  display: grid;
-  grid-template-columns: var(--col) minmax(0, 1fr);
-  column-gap: calc(var(--overhang) + var(--gap));
-  padding-block: 14px 16px;
-  border-top: 1px solid var(--sep);
-}
-.row.headrow {
-  padding-block: 0 20px;
-  border: 0;
-  align-items: end;
-}
-.row.headrow + .row {
-  border-top: 2px solid var(--ink);
-}
-.ledger-lead,
-.statement {
-  font-size: clamp(24px, 2.2vw, 32px);
-  font-stretch: 100%;
-  line-height: 1.18;
+.line {
+  font-size: clamp(20px, 1.95vw, 30px);
+  line-height: 1.2;
   font-weight: 500;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.012em;
   text-wrap: pretty;
 }
-.row > h3 {
-  font-size: clamp(21px, 1.8vw, 26px);
-  font-weight: 500;
-  line-height: 1.15;
-  letter-spacing: -0.012em;
-}
-.cells {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 40px;
-}
-.cells p {
+.more {
   color: var(--ink-2);
   font-size: 16px;
-  line-height: 1.38;
-}
-.cells p + p {
-  margin-top: 10px;
-}
-.cells strong {
-  color: var(--ink);
-}
-/* Above the phone layout the columns name themselves by eye; the tag still names them to a screen reader. */
-@media (min-width: 600px) {
-  .tag {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-}
-
-/* risk */
-.riskpart {
-  max-width: 1760px;
-  margin: var(--section) auto 0;
-}
-.riskpart > h2 {
-  margin-inline: var(--gutter);
-  padding-top: 18px;
-  border-top: 4px solid var(--jade);
-}
-.plain {
-  align-items: start;
-}
-.riskpart .plain {
-  margin-top: 28px;
-}
-.blocks {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px 40px;
-  font-size: 16px;
-  line-height: 1.42;
-}
-.wide,
-.riskpart .block:first-child {
-  grid-column: 1 / -1;
-}
-.riskpart .block:first-child ul {
-  max-width: 62em;
-}
-.block li + li {
-  margin-top: 6px;
-}
-details {
-  color: var(--ink-2);
-  font-size: 15px;
-  line-height: 1.42;
-}
-summary {
-  cursor: pointer;
-  color: var(--ink);
-  width: fit-content;
-}
-details p,
-details dl {
-  margin-top: 10px;
-  max-width: 54em;
-}
-
-.perms > div {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
-  column-gap: 24px;
-  padding-block: 8px;
-  border-top: 1px solid var(--sep);
-}
-.perms code {
-  color: var(--ink);
-  font-size: 13px;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-/* Two columns only where the longest name and host fit whole. */
-@media (max-width: 1365px) {
-  .perms > div {
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 4px;
-  }
-}
-
-/* data */
-.datapart {
-  margin-top: var(--section);
-}
-.datapart .statement {
-  margin-top: 20px;
 }
 
 /* footer */
 .foot {
-  margin-top: var(--section);
-  padding-block: 24px 40px;
-  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  max-width: 1760px;
+  margin: 40px auto 0;
+  padding: 16px var(--gutter) 28px;
   font-size: 14px;
-  line-height: 1.45;
+  line-height: 1.4;
   color: var(--ink-2);
 }
 .foot-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   color: var(--ink);
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 600;
   letter-spacing: -0.01em;
   line-height: 1;
+  text-decoration: none;
 }
 .foot-brand .mark {
-  height: 30px;
+  height: 24px;
+}
+.legal {
+  margin-left: auto;
+}
+
+/* the details page: rules and type, nothing loud */
+.doc-top {
+  max-width: 1760px;
+  margin-inline: auto;
+  padding: var(--gutter) var(--gutter) 0;
+}
+.doc-top .foot-brand {
+  width: fit-content;
+}
+.doc main {
+  max-width: 1760px;
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+.doc h1 {
+  --stop: var(--jade);
+  margin: clamp(32px, 5vw, 72px) 0 clamp(32px, 5vw, 72px) -0.04em;
+  font-size: clamp(44px, 6.2vw, 104px);
+  font-weight: 600;
+  font-stretch: 88%;
+  line-height: 0.92;
+  letter-spacing: -0.04em;
+}
+.topic {
+  display: grid;
+  grid-template-columns: minmax(0, var(--col)) minmax(0, 46em);
+  column-gap: calc(var(--overhang) + var(--gap));
+  padding-block: 14px 36px;
+  border-top: 1px solid var(--sep);
+}
+.topic:first-of-type {
+  border-top: 3px solid var(--ink);
+}
+.topic h2 {
+  font-size: clamp(22px, 2vw, 30px);
+  font-weight: 600;
+  font-stretch: 92%;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+.topic li {
+  position: relative;
+  padding-left: 16px;
+  text-wrap: pretty;
+}
+.topic li + li {
+  margin-top: 8px;
+}
+.topic li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.58em;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--jade);
+}
+.topic code {
+  overflow-wrap: anywhere;
+}
+.foot-full {
+  display: grid;
+  grid-template-columns: minmax(0, var(--col)) minmax(0, 46em);
+  column-gap: calc(var(--overhang) + var(--gap));
+  align-items: start;
+  width: calc(100% - 2 * var(--gutter));
+  max-width: calc(1760px - 2 * var(--gutter));
+  border-top: 1px solid var(--sep);
+  margin-top: 0;
+  padding-top: 20px;
+  padding-inline: 0;
 }
 .foot-text {
   display: grid;
-  gap: 6px;
-  max-width: 62em;
+  gap: 4px;
 }
 .foot-links {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 20px;
+  margin-bottom: 8px;
   color: var(--ink);
   font-size: 15px;
-  margin-bottom: 6px;
 }
 
 /* 404 */
@@ -956,96 +975,85 @@ details dl {
   padding: clamp(32px, 10vw, 96px) var(--gutter);
 }
 .lost h1 {
+  --stop: var(--jade);
   margin: 28px 0 12px;
   font-size: clamp(44px, 6vw, 64px);
+  font-weight: 600;
+  font-stretch: 88%;
   line-height: 1;
+  letter-spacing: -0.04em;
 }
 
 /* steps stop fitting side by side */
 @media (max-width: 1239px) {
-  :root {
-    --col: clamp(320px, 42vw, 440px);
-  }
-
-  .lang {
-    top: 8px;
-  }
-  .lead {
-    padding-right: 0;
-  }
-
   .steps {
     grid-template-columns: minmax(0, 1fr);
-    row-gap: 0;
+    margin-top: 28px;
   }
   .step {
     display: grid;
     grid-template-columns: 76px minmax(0, 1fr) 248px;
-    grid-template-rows: auto 1fr;
     column-gap: 16px;
-    padding-block: 12px 20px;
+    align-items: start;
+    padding-block: 12px 18px;
     border-top-width: 1px;
     border-color: var(--sep);
   }
   .step:first-child {
-    border-top: 2px solid var(--ink);
+    border-top: 3px solid var(--ink);
   }
   .step::before {
-    grid-row: 1 / span 2;
     font-size: 76px;
   }
-  .step h3 {
+  .step > p {
     grid-column: 2;
-    margin: 4px 0 0;
-  }
-  .step h3 + p {
-    grid-column: 2;
+    margin: 6px 0 0;
+    font-size: 17px;
   }
   .well {
     grid-column: 3;
-    grid-row: 1 / span 2;
-    align-self: start;
+    grid-row: 1;
     margin: 0;
+    min-height: 118px;
   }
+  /* No card to line up with here: the words get the width. */
+  .topic,
+  .foot-full {
+    grid-template-columns: minmax(0, 200px) minmax(0, 46em);
+  }
+}
 
-  .notes,
-  .blocks {
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 20px;
+/* The window and its sidebar stop fitting beside the card: the picture alone, still standing on the card's bottom line,
+   no taller than the card leaves it (90 px: the New story row and the caption). */
+@media (max-width: 1099px) {
+  :root {
+    --col: clamp(320px, min(42vw, calc((100svh - 2 * var(--gutter) - 72px) * 9 / 16)), 440px);
   }
-
-  .row {
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 8px;
+  /* It stays 16:9 when the window column is the taller one. */
+  .card {
+    align-self: start;
   }
-  .row.headrow {
-    row-gap: 20px;
-  }
-  /* the drawn page drops away: the row and the dialog stay */
-  .scene {
-    display: block;
-    flex: none;
-    margin-top: 24px;
+  .bar {
+    display: none;
   }
   .window {
     display: block;
+    flex: none;
     background: none;
     box-shadow: none;
     border-radius: 0;
     overflow: visible;
   }
-  .bar {
-    display: none;
+  .scene {
+    display: block;
+    align-self: end;
   }
   .inner {
     display: block;
   }
   .nav {
     flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px;
-    padding: 0 0 12px;
+    padding: 0 0 14px;
     border: 0;
   }
   .nav > i {
@@ -1055,24 +1063,19 @@ details dl {
     --mark-bg: var(--page);
     margin: 0;
   }
-  .entry-note {
-    margin: 0;
-    padding: 0;
-    font-size: 14px;
-  }
   .room {
+    container-type: normal;
+    overflow: visible;
     background: none;
   }
-  .room img {
-    position: static;
-    width: 100%;
-    max-width: none;
-    max-height: none;
+  .shot {
+    position: relative;
+    inset: auto;
     margin: 0;
-    filter: none;
+    width: min(100%, calc((var(--col) * 16 / 9 - 90px) * 1392 / 1354));
   }
-  .scene figcaption {
-    margin-top: 8px;
+  .shot img {
+    filter: none;
   }
 }
 
@@ -1083,33 +1086,45 @@ details dl {
     --col: min(calc((100vw - 2 * var(--gutter)) / 1.107), 460px);
   }
   body {
-    padding-top: 34px;
-  }
-  .card {
-    width: min(calc(100% / 1.107), 460px);
+    padding-top: 30px;
   }
   .grid {
     grid-template-columns: minmax(0, 1fr);
     row-gap: 28px;
   }
-  .lead {
-    font-size: 21px;
+  /* The statement takes the whole width, the two pictures share a row under it. */
+  .reel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px 16px;
   }
-  h2 {
-    font-size: 44px;
+  .says {
+    grid-column: 1 / -1;
   }
-  .install-head {
+  .frame {
+    border-radius: 20px;
+  }
+  .topic {
+    grid-template-columns: minmax(0, 1fr);
     row-gap: 12px;
   }
-  .steps {
-    margin-top: 20px;
-  }
   .foot {
-    row-gap: 16px;
+    display: block;
   }
-
-  .card-inner {
-    padding-bottom: 72px;
+  .foot-source {
+    display: inline-block;
+    margin-top: 12px;
+  }
+  .legal {
+    margin: 4px 0 0;
+  }
+  .foot-text {
+    margin-top: 12px;
+  }
+  .doc-top {
+    padding-top: 0;
+  }
+  .doc .lang {
+    top: 32px;
   }
 }
 
@@ -1117,7 +1132,7 @@ details dl {
 @media (hover: none) and (pointer: coarse) {
   .phone {
     display: block;
-    margin-top: calc(44 * var(--u));
+    margin-top: calc(40 * var(--u));
     font-size: 15px;
     line-height: 1.3;
     font-weight: 600;
@@ -1127,7 +1142,6 @@ details dl {
   }
 }
 
-/* steps stack; can and can't name themselves */
 @media (max-width: 599px) {
   .step {
     grid-template-columns: 52px minmax(0, 1fr);
@@ -1137,47 +1151,22 @@ details dl {
     grid-row: 1 / span 2;
     font-size: 60px;
   }
-  .step h3 {
+  .step > p {
     grid-column: 2;
     grid-row: 1;
-    margin-top: 6px;
-  }
-  .step h3 + p {
-    grid-column: 2;
-    grid-row: 2;
+    font-size: 16px;
   }
   .well {
     grid-column: 2;
-    grid-row: 3;
-    height: auto;
+    grid-row: 2;
     min-height: 96px;
-    margin-top: 12px;
+    margin-top: 10px;
   }
-  .row.headrow .cells {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-  }
-  .row.headrow + .row {
-    border-top: 2px solid var(--ink);
-  }
-  .row.headrow {
-    padding-bottom: 16px;
-  }
-  .cells {
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 12px;
-  }
-  .tag {
-    display: block;
-    margin-bottom: 3px;
-    color: var(--ink);
-    font-size: 13px;
-    line-height: 1.3;
-    font-weight: 600;
-    font-stretch: 92%;
+}
+
+@media (max-width: 359px) {
+  .addr code {
+    font-size: 12px;
   }
 }
 
@@ -1185,11 +1174,5 @@ details dl {
   * {
     transition: none !important;
     animation: none !important;
-  }
-}
-
-@media (max-width: 359px) {
-  .addr code {
-    font-size: 12px;
   }
 }

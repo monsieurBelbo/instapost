@@ -173,7 +173,7 @@ Arc (Chromium 155) is the owner's browser; the first live run happened there on 
 
 A pushed tag is what publishes. `.github/workflows/release.yml` runs the gate on the tagged commit (typecheck, lint, unit and browser tests), builds the zip with `node scripts/package.ts --release <tag>`, attests it, creates the GitHub Release and, through `site.yml`, puts it on the page. Nothing is released if the gate, build, attestation or release step fails. If only the page deploy fails, the release is out: re-run `site.yml`. The E2E suite is not in that gate, so `pnpm run verify` stays your step before a tag.
 
-**Changelog contract.** A section opens with one plain summary paragraph, then an optional Spanish line in a comment. The page shows those two and never the bullets:
+**Changelog contract.** A section opens with one plain summary paragraph, then an optional Spanish line in a comment. `details/` shows the summary and `es/details/` the Spanish line (the summary if there is none), never the bullets:
 
 ```md
 ## [0.2.0] - 2026-11-06
@@ -211,6 +211,8 @@ gh api -X POST repos/$R/environments/github-pages/deployment-branch-policies -f 
 ## Page
 
 https://monsieurbelbo.github.io/instapost/ is generated: the styles, script and images are in `site/`, the copy and HTML in `tools/site/`, and `scripts/build-site.ts` joins them with the newest release's files. `.github/workflows/site.yml` deploys it when those change and on every release. `pnpm run site` builds it into `_site/` with no release, for a preview.
+
+The main page stays short (`site.test.ts` counts its words); limits, risk, data, permissions and updating live on `details/` and `es/details/`.
 
 ## Posting from Instagram (the in-page lane)
 

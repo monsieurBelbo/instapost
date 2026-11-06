@@ -1,9 +1,11 @@
 /**
- * The page's Spanish words: neutral Spanish (tú, no vos, no region-only words), the product's own terms from
- * src/ui/catalog.es.ts and catalog.page.es.ts (Nueva historia, Publicar historia, Hacer la prueba inicial, Compartir,
- * Añadir a tu historia, Ajustes, borrador, Fotos recientes, No se pudo confirmar, equipo, stickers, video).
- * Chrome's own labels were read from Chromium's translations: es "Cargar descomprimida", es-419 "Cargar extensión sin
- * empaquetar", "Modo de desarrollador", "Quitar", "Volver a cargar", "Leer y modificar tus datos".
+ * The site's Spanish words: neutral Latin American Spanish (tú, no vos, no region-only words), the product's own terms
+ * from src/ui/catalog.es.ts and catalog.page.es.ts (Nueva historia, Publicar historia, Hacer la prueba inicial,
+ * Compartir, No se pudo confirmar, Copiar diagnóstico, Ajustes, borrador, Fotos recientes, stickers, video).
+ * Chrome's own labels were read from Chromium's translations: es-419 "Cargar extensión sin empaquetar", es "Cargar
+ * descomprimida", "Modo de desarrollador" / "Modo Desarrollador", "Quitar", "Volver a cargar", "Leer y modificar tus
+ * datos", "Administrar tus descargas" (es-419; es says "Gestionar"). "Doomscroll" stays: it's the owner's word. A repost
+ * is "republicar" here: the product's "volver a publicar" means posting your own again.
  */
 import type { Copy } from './copy.en.ts';
 
@@ -11,224 +13,139 @@ export const ES: Copy = {
   lang: 'es',
   locale: 'es_LA',
   otherLang: { label: 'English', hreflang: 'en' },
-  title: 'instapost: publica historias de Instagram desde el escritorio',
+  title: 'instapost: publica historias de Instagram desde tu computadora',
   description:
-    'Una extensión de navegador gratis para Chrome y Arc. Añade un botón Nueva historia a Instagram en la web. Solo fotos, se instala a mano y se usa bajo tu propio riesgo. Sin afiliación con Instagram.',
-  ogAlt: 'instapost: publica historias de Instagram desde el escritorio.',
-  months: ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'],
-  h1: ['Publica', 'historias', 'de Instagram', 'desde el', 'escritorio.'],
-  sub: 'Una extensión de navegador gratis para Chrome y Arc.',
-  download: 'Descargar instapost {v}',
-  noRelease: 'Todavía no hay descarga. La primera versión está en camino.',
-  phone: 'Funciona en un navegador de escritorio. Abre esta página ahí.',
-  risk: 'Queda fuera de los términos de uso de Instagram, así que usas tu cuenta bajo tu propio riesgo. Prueba primero con una cuenta secundaria.',
-  metaRelease: 'Zip, {size}. Publicada el {date}.',
-  prerelease: 'Esta es una vista previa de la próxima versión.',
-  whatsNewLink: 'Novedades',
-  needs: 'Necesita Chrome 155 o posterior, o Arc con Chromium 155 o posterior, en versión de escritorio.',
-  tried:
-    'Solo se probó en Instagram real con Arc en macOS y con una cuenta secundaria. Windows y Linux están sin probar.',
-  sourceLink: 'Código en GitHub',
-  lead: 'instapost añade un botón Nueva historia a Instagram en la web. Elige una foto, añade texto si quieres y pulsa Publicar historia. Solo fotos: sin video, música ni menciones.',
-  why: 'La hice para compartir una foto sin abrir la app y sin perderme en el feed.',
+    'Una extensión de navegador gratis que añade Nueva historia a Instagram en la web. Solo fotos, se instala a mano y se usa bajo tu propio riesgo. Sin afiliación con Instagram.',
+  ogAlt: 'Deja el teléfono. Sube tu historia. instapost: publica historias con foto en Instagram desde tu computadora.',
+  h1: ['Deja el', 'teléfono.', 'Sube tu', 'historia.'],
+  sub: 'Publica historias con foto en Instagram desde tu computadora.',
+  kind: 'Una extensión gratis para Arc y Chrome.',
+  phone: 'Entra desde una computadora.',
+  download: 'Descargar {v}',
+  downloadMeta: '{size}. Solo fotos.',
+  prerelease: 'Versión preliminar.',
+  noRelease: 'Aún no hay descarga.',
+  risk: 'Funciona fuera de los términos de Instagram: tu cuenta, tu riesgo. Prueba antes con una secundaria.',
   entry: 'Nueva historia',
-  entryNote: 'instapost añade esto',
-  caption:
-    'Una ilustración. La ventana de instapost es real, capturada en una réplica local de Instagram con una cuenta inventada. Todo lo que la rodea está dibujado.',
   shotAlt:
     'La ventana de instapost. A la izquierda, la foto de un lago de montaña con las palabras Primera luz, encuadrada como una historia. A la derecha, controles de estilo, color y tamaño del texto y un botón Publicar historia.',
-  installHead: 'Instálala',
-  installIntro: 'instapost no está en Chrome Web Store, así que la cargas a mano.',
+  caption: 'Suelta una foto. Recórtala. Añade texto.',
+  statement: ['Publica', 'la foto.', 'Sin', '<span lang="en">doomscroll</span>.'],
+  posting: 'Normalmente de 15 a 25 segundos. Sin tocar nada, con la pestaña al frente.',
+  postingAlt:
+    'Una historia con un atardecer morado sobre unas colinas, las palabras Hora dorada y una marca de verificación redonda encima.',
+  repost: 'Republica una publicación con foto, como imagen.',
+  repostAlt:
+    'Una historia que muestra una publicación con la foto de un lago de montaña como una tarjeta, con el usuario a.friend.example arriba.',
+  installHead: 'Instálala a mano.',
+  steps: [
+    '<strong>Descomprime.</strong> Mueve la carpeta fuera de Descargas y déjala ahí.',
+    '<strong>Copia la dirección para tu navegador.</strong> Pégala en otra pestaña.',
+    '<strong>Activa el Modo de desarrollador,</strong> arriba a la derecha.',
+    '<strong>Haz clic en Cargar o <span lang="en">Load</span>.</strong> Elige la carpeta instapost.',
+    '<strong>Abre o recarga Instagram.</strong> Nueva historia está en la barra lateral izquierda.',
+  ],
   wellFolder: 'instapost',
-  wellChoose: 'elige esta',
   wellDev: 'Modo de desarrollador',
-  wellLoad: 'Cargar descomprimida',
+  wellLoad: 'Cargar extensión sin empaquetar',
   copy: 'Copiar',
   copied: 'Copiado',
   copyFail: 'Selecciona y copia',
   browserChrome: 'Chrome',
   browserArc: 'Arc',
-  steps: [
-    {
-      title: 'Descomprime el zip.',
-      body: 'Haz doble clic en el zip que descargaste. Deja la carpeta instapost en un lugar fijo, fuera de Descargas. El navegador la lee ahí cada vez, así que no la muevas ni la borres. Si la mueves, repite el paso 4.',
-    },
-    {
-      title: 'Abre la página de extensiones.',
-      body: 'Copia la dirección de tu navegador y pégala en una pestaña nueva.',
-    },
-    {
-      title: 'Activa el Modo de desarrollador.',
-      body: 'El interruptor está arriba a la derecha de esa página. Es lo que permite añadir una extensión a mano. Déjalo activado.',
-    },
-    {
-      title: 'Haz clic en Cargar descomprimida.',
-      body: 'Según el idioma del navegador, puede decir Cargar extensión sin empaquetar o <span lang="en">Load unpacked</span>. Elige la carpeta instapost, la que contiene directamente <code>manifest.json</code>.',
-    },
-    {
-      title: 'Haz clic en Nueva historia.',
-      body: 'Abre o recarga instagram.com en una ventana normal, no de incógnito, con la sesión iniciada en una cuenta secundaria, si tienes una. Nueva historia está en la barra lateral izquierda de Instagram. ¿No está? En Instagram, haz clic en el icono de instapost en el menú de extensiones. Añade una foto, pulsa Hacer la prueba inicial y quédate en esa pestaña. Tarda unos 20 segundos y no publica nada. Después, al pulsar Publicar historia se publica de verdad.',
-    },
-  ],
-  newIn: 'Novedades de {v}.',
-  allChanges: 'Todos los cambios',
-  updating: {
-    title: 'Actualizar.',
-    body: 'Nada se actualiza solo, así que vuelve aquí a buscar versiones nuevas. Reemplaza el contenido de la carpeta por la versión nueva. En la página de extensiones, haz clic en Volver a cargar (↻) en instapost y recarga Instagram. Tus ajustes se conservan. Si Arc se queda con la versión anterior, usa Quitar y vuelve a cargarla, pero eso borra lo que instapost guardó en tu navegador.',
-  },
-  removing: {
-    title: 'Quitar.',
-    body: 'En la página de extensiones, haz clic en Quitar. Eso borra tus ajustes, borradores, fotos recientes e historial. Luego borra la carpeta, y también Descargas/instapost si la tienes.',
-  },
-  ledgerLead: 'Una foto a la vez, con tu clic.',
-  canHead: 'Puede',
-  cantHead: 'No puede',
-  rows: [
-    {
-      topic: 'Fotos',
-      can: [
-        '<strong>Abrir tu foto.</strong> Suelta, pega o elige un JPEG, PNG, WebP, AVIF o HEIC. Aún falta probar una foto HEIC real de iPhone.',
-      ],
-      cant: ['<strong>Sin video ni Reels.</strong> Una foto por historia. GIF y TIFF no se abren.'],
-    },
-    {
-      topic: 'Edición',
-      can: [
-        '<strong>Encuadrarla y añadir texto.</strong> Arrastra, haz zoom, gira y añade un cuadro de texto. Tu borrador se guarda solo. La imagen final es de 1080 × 1920, sin los datos de ubicación ni de cámara de la foto.',
-      ],
-      cant: [
-        '<strong>Sin música, menciones, enlaces ni encuestas.</strong> Tampoco ubicación, stickers de hashtag ni Mejores amigos. Por lo que encontré, Instagram en la web no los ofrece.',
-        '<strong>Sin dibujos ni stickers de Instagram.</strong>',
+  line: 'Probada en Instagram real solo en Arc en una Mac, con una cuenta secundaria.',
+  detailsLink: 'Límites, riesgo, datos, actualizaciones',
+  source: 'Código',
+  legal: 'No está afiliada a Instagram ni a Meta. © 2026 monsieurBelbo.',
+  details: {
+    title: 'instapost: límites, riesgo, datos, actualizaciones',
+    description: 'Lo que instapost no hace, lo que arriesga, lo que guarda y envía, y cómo actualizarla o quitarla.',
+    head: 'Detalles.',
+    limits: {
+      title: 'Límites',
+      items: [
+        'Una foto por historia: JPEG, PNG, WebP, AVIF, HEIC (de iPhone sin probar). Sin GIF, TIFF, video, Reels.',
+        'Un cuadro de texto. Sin música, menciones, enlaces, encuestas, stickers, Mejores amigos, dibujo, historias programadas.',
+        'Primer clic: Hacer la prueba inicial, unos 20 segundos, no publica.',
+        'Sin tocar nada, pestaña al frente hasta Compartir; luego, página abierta.',
+        'Publicada: Instagram respondió; si no, No se pudo confirmar: revisa tu historia. Sin reintentos.',
+        '60 segundos entre historias, 6 por hora, 15 al día; las fallidas cuentan.',
+        'Chrome o Arc en computadora, Chromium 155+, sesión iniciada, mismo perfil, no incógnito.',
+        '¿Sin Nueva historia? En Instagram: Menú de extensiones, icono de instapost.',
       ],
     },
-    {
-      topic: 'Publicar',
-      can: [
-        '<strong>Publicar por ti.</strong> El sitio móvil de Instagram se abre en un marco del tamaño de un teléfono en tu pestaña e instapost toca +, Historia y Compartir. Suele tardar entre 15 y 25 segundos.',
-        '<strong>Decirte qué pasó.</strong> Dice Publicada solo cuando Instagram responde que la historia se publicó. Si no puede saberlo, dice No se pudo confirmar, y tú revisas tu historia.',
-      ],
-      cant: [
-        '<strong>Sin programar publicaciones.</strong>',
-        '<strong>Sin publicar en segundo plano.</strong> Mantén la pestaña delante y no toques Instagram hasta Compartir. Hasta entonces puedes detener la publicación. Después de Compartir puedes seguir navegando, pero deja la página abierta. Si la recargas o la cierras, instapost no puede saber si la historia se publicó y dice No se pudo confirmar.',
+    reposts: {
+      title: 'Republicar',
+      items: [
+        'Publicaciones con foto: Compartir → Añadir a tu historia. Imagen con @usuario ajeno, sin sticker, enlace ni aviso al autor.',
+        'Historias con foto que te mencionan: mensajes directos, hasta 24 horas, Instagram en inglés/español.',
+        'Republica solo con permiso.',
       ],
     },
-    {
-      topic: 'Añadir a tu historia',
-      can: [
-        '<strong>Añadir una publicación con foto, como imagen.</strong> Pulsa el botón Compartir de Instagram y luego Añadir a tu historia. La publicación de otra persona siempre muestra su @usuario. Se ha probado muy poco en Instagram real.',
-        '<strong>Añadir una historia que te menciona.</strong> Desde su vista previa en tus mensajes directos. Fotos de menos de 24 horas, con Instagram en inglés o español. Aún sin probar en Instagram real.',
-      ],
-      cant: [
-        '<strong>Sin republicación real.</strong> Es una imagen sin sticker. No se puede tocar para ir al original y el autor no recibe aviso.',
-        '<strong>Sin videos ni Reels.</strong> Tampoco publicaciones que se sabe que no permiten compartir.',
-      ],
-    },
-    {
-      topic: 'Ritmo',
-      can: [
-        '<strong>Dejar una historia en cola.</strong> Si pulsas Publicar historia durante el minuto de espera entre historias, esa foto empieza sola cuando acaba la espera. Puedes cancelar.',
-      ],
-      cant: [
-        '<strong>Sin acelerar.</strong> Un minuto entre historias, 6 por hora, 15 al día. Cuenta cada historia iniciada, incluso si falla.',
-        '<strong>Sin reintentos.</strong> instapost pulsa Compartir una sola vez por historia. Volver a intentar depende de ti.',
+    risk: {
+      title: 'Riesgo',
+      items: [
+        'Funciona fuera de los términos de Instagram: tu cuenta, tu riesgo. Prueba antes con una secundaria.',
+        'Instagram puede notarlo: su código ve botón (cada página), marco; servidores, publicaciones inusuales.',
+        'Solo durante una publicación o prueba, en esa pestaña: Instagram móvil en marco de teléfono, solicitudes Android, script que dice vertical, toques simulados.',
+        '<code>User-Agent</code>, <code>Sec-CH-UA-Mobile</code>, <code>Sec-CH-UA-Platform</code> dicen Android; <code>X-Frame-Options</code>, client hints detalladas, fuera; <code>Sec-Fetch-Dest</code>: <code>document</code>.',
+        'Si Instagram cambia y la rompe antes de Compartir, se detiene.',
+        'Una verificación de seguridad puede ocupar la pestaña y pausar publicaciones 7 días; instapost te pide completarla en tu teléfono.',
+        'Quien pueda cambiar la carpeta puede ejecutar código en tu sesión de Instagram. <a href="../">Descárgala aquí.</a>',
       ],
     },
-    {
-      topic: 'Dónde',
-      can: [
-        '<strong>Funcionar en Chrome 155 o posterior, o Arc con Chromium 155 o posterior,</strong> con tu sesión de instagram.com iniciada en el mismo perfil del navegador. Solo Arc, con una cuenta secundaria, se probó en Instagram real.',
+    tried: {
+      title: 'Dónde se usó',
+      items: [
+        '<b>Instagram real:</b> solo Arc en Mac, cuenta secundaria; republicar, muy poco.',
+        '<b>Solo pruebas:</b> Chromium 155, 156.',
+        '<b>No en Instagram real:</b> Google Chrome, cuentas principales, de creador o empresa, español, otros idiomas, republicar menciones.',
+        '<b>Nunca:</b> Edge, Brave, Windows, Linux.',
       ],
-      cant: ['<strong>Sin teléfonos, Firefox ni Safari.</strong>', '<strong>Sin actualizaciones automáticas.</strong>'],
     },
-  ],
-  riskHead: 'Usas tu cuenta bajo tu propio riesgo.',
-  riskLead:
-    'Usar instapost queda fuera de los términos de uso de Instagram. Pruébala primero con una cuenta secundaria.',
-  riskBlocks: [
-    {
-      title: 'Dónde se ha usado.',
-      body: '<b>En Instagram real:</b> solo Arc (Chromium 155) en macOS, con una cuenta personal secundaria. Añadir a tu historia una publicación con foto se ha probado muy poco.<br><b>Solo pruebas automáticas,</b> contra una réplica local de Instagram: Chromium 155 y 156.<br><b>Aún sin probar en Instagram real:</b> Google Chrome, cuentas principales, cuentas de creador y de empresa, fotos HEIC reales de iPhone, Instagram en español o en cualquier otro idioma que no sea inglés, añadir historias que te mencionan.<br><b>Sin probar en absoluto:</b> Edge, Brave, Windows, Linux.',
+    data: {
+      title: 'Tus datos',
+      items: [
+        'Sin servidor ni analíticas, aquí o en la extensión. Se queda en tu computadora.',
+        'Mientras la página siga abierta, lo fallido o sin confirmar va a Descargas/instapost, salvo republicaciones.',
+        'Copiar diagnóstico: solo portapapeles; usuario, últimas ejecuciones, páginas, @usuarios republicados. Léelo antes de pegarlo.',
+        'Tu historia va a Instagram; al republicar se piden imagen y avatar a su servidor de imágenes, tras preguntarte tu navegador, sin cookies.',
+      ],
     },
-    {
-      title: 'Instagram puede notarlo.',
-      body: 'El código de su página puede ver el botón de instapost en cada página y el marco de teléfono durante una publicación o prueba. Una publicación hecha así también se ve inusual para sus servidores.',
+    permissions: {
+      title: 'Permisos',
+      items: [
+        'Almacenamiento, descargas, scripting, reglas de red, observar solicitudes, en Instagram; opcionales: *.cdninstagram.com, *.fna.fbcdn.net.',
+        'Navegador: «Leer y modificar tus datos», «Administrar tus descargas», «Bloquear contenido en cualquier página».',
+        'No: pestañas, cookies, depurador, todos los sitios.',
+        'Lee tu usuario, publicación compartida, texto de mensajes directos junto a enlaces a historias.',
+      ],
     },
-    {
-      title: 'Durante una publicación o prueba.',
-      body: 'Solo en la pestaña donde ocurre, las solicitudes de Instagram dicen venir de un teléfono Android, incluidas las que tu página de escritorio hace en segundo plano. Cambian algunos encabezados para que el sitio móvil cargue en el marco, un pequeño script le dice que la pantalla es vertical y los toques son simulados. Todo termina con la publicación o la prueba.',
+    updating: {
+      title: 'Actualizar. Quitar.',
+      items: [
+        'Sin actualizaciones automáticas. Reemplaza el contenido de la carpeta, pulsa ↻ en instapost, recarga Instagram. Ajustes intactos.',
+        '¿Arc sigue con la anterior? Quítala y cárgala de nuevo.',
+        'Quitar borra ajustes, borradores, fotos recientes, historial; la carpeta y Descargas/instapost, bórralas tú.',
+      ],
     },
-    {
-      title: 'Puede romperse.',
-      body: 'En cualquier momento, si Instagram cambia su página. Si hay una publicación en curso, instapost se detiene, te dice por qué y no pulsa Compartir. Si Instagram pide una verificación de seguridad, puede ocupar tu pestaña, y entonces instapost pausa la publicación desde el escritorio durante 7 días.',
+    versionHead: 'Esta versión',
+    newIn: 'Novedades de {v}.',
+    allChanges: 'Todos los cambios',
+    pictures: {
+      title: 'Las imágenes',
+      items: ['Las de instapost son reales, en una réplica local de Instagram, cuentas inventadas; resto dibujado.'],
     },
-    {
-      title: 'Tu carpeta.',
-      body: 'Quien pueda cambiar los archivos de la carpeta instapost puede ejecutar código dentro de tu Instagram con la sesión iniciada. Descárgala de esta página y guárdala donde solo tú puedas modificarla.',
+    foot: {
+      changelog: 'Cambios',
+      older: 'Versiones anteriores',
+      problem: 'Informar de un problema',
+      licence: 'Licencia MIT',
+      font: 'Licencia de la tipografía',
+      asIs: 'Se ofrece tal cual. Avisos de terceros en el zip.',
+      affiliation: 'No está afiliada a Instagram ni a Meta. «Instagram» es marca de Instagram, LLC.',
+      hosting: 'GitHub Pages registra visitas. © 2026 monsieurBelbo.',
     },
-    {
-      title: 'Lo que añades es trabajo de otra gente.',
-      body: 'Añade solo lo que tengas permiso para compartir. instapost no siempre puede ver los ajustes del autor.',
-    },
-  ],
-  exactHead: 'Los cambios exactos durante una publicación o prueba',
-  exactBody:
-    'Se quita <code>X-Frame-Options</code> del marco. <code>Sec-Fetch-Dest</code> pasa a <code>document</code>. Un pequeño script en el propio entorno de JavaScript de Instagram hace que la pantalla se lea como vertical. <code>User-Agent</code> pasa a ser el de un teléfono Android, <code>Sec-CH-UA-Mobile</code> y <code>Sec-CH-UA-Platform</code> dicen lo mismo y se quitan las client hints más detalladas. Durante una prueba también se bloquean las solicitudes de subida y publicación.',
-  dataHead: 'Tus datos',
-  dataLead: 'instapost no tiene servidor y no me envía nada. No hay analíticas ni en la extensión ni en esta página.',
-  dataBlocks: [
-    {
-      title: 'Qué se queda.',
-      body: 'Ajustes, borradores, fotos e historial viven en tu equipo. Mientras la página siga abierta, una historia que falla o no se puede confirmar también se guarda en Descargas/instapost, salvo si viene de Añadir a tu historia. Copiar diagnóstico solo lo pone en tu portapapeles. Lista tus últimas publicaciones y pruebas con su hora y su página, tu nombre de usuario y el @usuario de quien añadiste a tu historia, así que léelo antes de pegarlo en algún sitio.',
-    },
-    {
-      title: 'Qué sale de tu equipo.',
-      body: 'Tu historia va a Instagram cuando publicas. Para añadir a tu historia, instapost también pide la imagen al servidor de imágenes de Instagram, que opera Meta, después de que tu navegador te pregunte una vez. En una publicación con foto, también le pide el avatar del autor. Estas solicitudes no envían cookies. Ese servidor las ve y podría saber que vienen de instapost.',
-    },
-    {
-      title: 'Qué pide.',
-      body: 'Almacenamiento, descargas, scripting y reglas de red, en www.instagram.com e i.instagram.com. Tu navegador puede describirlos con algo como «Leer y modificar tus datos» y «Bloquear contenido en cualquier página». No pide pestañas, cookies, depurador ni acceso a todos los sitios.',
-    },
-  ],
-  checkTitle: 'Qué puedes comprobar.',
-  checkWithRelease:
-    'El código es público. El SHA-256 de este zip es <code class="sha">{sha}</code>. En macOS, <code>shasum -a 256</code> seguido del archivo debe mostrar lo mismo.',
-  checkWithoutRelease: 'El código es público.',
-  permsHead: 'Cada permiso, en palabras simples',
-  perms: [
-    ['storage, unlimitedStorage', 'Ajustes, borradores, fotos e historial en tu equipo.'],
-    [
-      'scripting',
-      'Pone el código auxiliar de instapost y el script de pantalla vertical en el marco de teléfono, y añade Nueva historia a las pestañas de Instagram ya abiertas.',
-    ],
-    [
-      'downloads',
-      'Guardar copia, y copias de las historias que no se publicaron. Tu navegador puede describirlo con algo como «Administrar tus descargas».',
-    ],
-    [
-      'declarativeNetRequest, declarativeNetRequestWithHostAccess',
-      'Cambia encabezados durante una publicación o prueba, y bloquea la publicación durante las pruebas.',
-    ],
-    ['webRequest', 'Observa la carga del marco. Solo observa.'],
-    [
-      'www.instagram.com, i.instagram.com',
-      'Donde funciona. En cada página de Instagram puede leer y cambiar lo que hay. Lee tu nombre de usuario, la publicación en la que pulsas Compartir y, en tus mensajes directos, el texto junto a un enlace a una historia, para detectar una mención. Nada de esto me llega. Las fotos se suben a i.instagram.com.',
-    ],
-    [
-      '*.cdninstagram.com, *.fna.fbcdn.net',
-      'Los servidores de imágenes de Instagram. Opcional. Tu navegador te pregunta la primera vez que usas Añadir a tu historia. Solo se usan para eso.',
-    ],
-  ],
-  foot: {
-    source: 'Código',
-    changelog: 'Cambios',
-    older: 'Versiones anteriores',
-    problem: 'Informar de un problema',
-    licence: 'Licencia MIT',
-    font: 'Licencia de la fuente',
-    asIs: '© 2026 monsieurBelbo. Se ofrece tal cual, sin garantía. Los avisos de terceros están en el zip, en su carpeta <code>licenses</code>.',
-    affiliation:
-      'Sin afiliación, respaldo ni patrocinio de Instagram o Meta. «Instagram» es una marca registrada de Instagram, LLC, usada aquí solo para decir con qué funciona la extensión.',
-    hosting: 'Esta página está en GitHub Pages, que guarda sus propios registros de visitas.',
   },
   notFound: { head: 'Página no encontrada.', body: 'Esa dirección no existe aquí.', link: 'Ir a instapost' },
 };

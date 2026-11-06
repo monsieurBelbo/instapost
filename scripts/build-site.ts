@@ -23,7 +23,15 @@ import { basename, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { EN } from '../tools/site/copy.en.ts';
 import { ES } from '../tools/site/copy.es.ts';
-import { LATEST_ZIP, type Release, renderNotFound, renderPage, type Site, zipName } from '../tools/site/page.ts';
+import {
+  LATEST_ZIP,
+  type Release,
+  renderDetails,
+  renderNotFound,
+  renderPage,
+  type Site,
+  zipName,
+} from '../tools/site/page.ts';
 import {
   baseUrlOf,
   checkSha256Line,
@@ -68,9 +76,13 @@ rmSync(out, { recursive: true, force: true });
 cpSync(join(REPO, 'site'), out, { recursive: true, filter: (src) => basename(src) !== '.DS_Store' });
 for (const f of FONT_FILES) copyFileSync(join(REPO, 'public/fonts', f), join(out, 'assets', f));
 
-mkdirSync(join(out, 'es'));
-writeFileSync(join(out, 'index.html'), renderPage(EN, found?.release ?? null, site));
-writeFileSync(join(out, 'es/index.html'), renderPage(ES, found?.release ?? null, site));
+mkdirSync(join(out, 'details'));
+mkdirSync(join(out, 'es/details'), { recursive: true });
+const release = found?.release ?? null;
+writeFileSync(join(out, 'index.html'), renderPage(EN, release, site));
+writeFileSync(join(out, 'es/index.html'), renderPage(ES, release, site));
+writeFileSync(join(out, 'details/index.html'), renderDetails(EN, release, site));
+writeFileSync(join(out, 'es/details/index.html'), renderDetails(ES, release, site));
 writeFileSync(join(out, '404.html'), renderNotFound(EN, ES, site));
 
 if (found) {
