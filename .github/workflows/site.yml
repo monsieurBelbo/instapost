@@ -1,0 +1,100 @@
+# The page: site/ and tools/site/ plus the files of the newest stable release (else the newest prerelease, else no
+# download yet).
+# No install step: the build is node and its built-ins, so no dependency runs next to the deploy token.
+name: Site
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'tools/site/**'
+      - 'scripts/build-site.ts'
+      - '.github/workflows/site.yml'
+
+permissions: {}
+
+jobs:
+  pages:
+    name: Build and deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read # gh attestation verify
+      pages: write # deploy-pages
+      id-token: write # deploy-pages proves it is this run
+    # One job, one group: the release is resolved inside the group, so a later run always sees at least as new a
+    # release and a replaced pending run loses nothing. Job level, so it cannot collide with a caller's group.
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Newest release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=$(gh release list --exclude-drafts --limit 100 \
+            --json tagName,isPrerelease,isLatest,publishedAt \
+            --jq '(map(select(.isLatest)) | first)
+                  // (map(select(.isPrerelease | not)) | sort_by(.publishedAt) | last)
+                  // (sort_by(.publishedAt) | last)
+                  | .tagName // ""')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${tag:-no release}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Fetch and verify its files
+        if: steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release"
+          gh release download "$TAG" --pattern 'instapost-*'
+          sha256sum -c -- instapost-*.sha256
+          gh attestation verify instapost-*.zip --repo "$GH_REPO" \
+            --signer-workflow "$GH_REPO/.github/workflows/release.yml"
+          gh release view "$TAG" --json tagName,isPrerelease,publishedAt,body > release.json
+      - id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Build
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: node scripts/build-site.ts --out _site --release-dir "$RUNNER_TEMP/release"
+      # Named per attempt: deploy-pages refuses a run holding two artifacts of one name, and a re-run uploads again.
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          name: github-pages-${{ github.run_attempt }}
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+      # Pages reports success but keeps the old files when a tag run lands on a commit already deployed from main
+      # (actions/deploy-pages#383). 11 minutes: the CDN ignores query strings and caches for 10.
+      - name: The page serves this build
+        env:
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          for _ in $(seq 66); do
+            if curl -fsS -m 20 "$PAGE_URL" | cmp -s - _site/index.html; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::$PAGE_URL still serves other files; gh workflow run site.yml from main, or a new commit"
+          exit 1

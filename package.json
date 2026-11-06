@@ -27,6 +27,8 @@
     "contract:check": "node tools/contract/check-ua.ts",
     "unpacked": "node scripts/unpacked.ts",
     "package": "node scripts/package.ts",
+    "release": "node scripts/release.ts",
+    "site": "node scripts/build-site.ts --out _site",
     "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:browser && pnpm run build:all && pnpm run check:bundle && playwright test"
   },
   "dependencies": {

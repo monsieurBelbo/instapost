@@ -1,0 +1,156 @@
+# A pushed tag v<version> or v<version>-rc.N becomes a GitHub Release and, through site.yml, the page's download.
+# Nothing is published unless the whole gate passes on the tagged commit.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  build:
+    name: Gate and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      label: ${{ steps.info.outputs.label }}
+      prerelease: ${{ steps.info.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pnpm's version comes from package.json's packageManager.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Tag, package.json and changelog agree
+        id: info
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/release-info.ts "$TAG" >> "$GITHUB_OUTPUT"
+      - name: A stable tag must be on main
+        if: steps.info.outputs.prerelease == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          status=$(gh api "repos/$GH_REPO/compare/main...$GITHUB_SHA" --jq .status)
+          case "$status" in
+            identical|behind) ;;
+            *) echo "::error::$GITHUB_REF_NAME is not on main ($status)"; exit 1 ;;
+          esac
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm run test
+      - name: Browser tests (sealed; the certificate is throwaway and stays on this runner)
+        run: |
+          node tools/fake-ig/cert.ts
+          pnpm exec playwright install --with-deps --only-shell chromium
+          pnpm run test:browser
+      # --release runs build:all and check-bundle, and refuses unless HEAD is exactly at the tag and clean.
+      - name: Build, check-bundle and package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/package.ts --release "$TAG"
+      - name: Checksum
+        working-directory: dist
+        env:
+          LABEL: ${{ steps.info.outputs.label }}
+        run: sha256sum "instapost-$LABEL.zip" > "instapost-$LABEL.zip.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/instapost-*.zip
+            dist/instapost-*.zip.sha256
+            dist/notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Attest and release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # gh release create
+      id-token: write # the attestation's signing certificate
+      attestations: write
+    outputs:
+      site: ${{ steps.release.outputs.site }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/instapost-*.zip
+      - name: Release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          LABEL: ${{ needs.build.outputs.label }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          state=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$state" = false ]; then
+            # A re-run keeps the files already out. A first run means the tag moved: never overwrite a release.
+            if [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then
+              echo "::error::$TAG is already released; delete that release first (gh release delete $TAG)"
+              exit 1
+            fi
+            # Same commit: keep the files already out. Another commit means the tag moved, attempt or no attempt.
+            gh release download "$TAG" --pattern "instapost-$LABEL.zip" --dir "$RUNNER_TEMP/out"
+            if ! unzip -p "$RUNNER_TEMP/out/instapost-$LABEL.zip" instapost/BUILD.txt | grep -qF "commit $GITHUB_SHA "; then
+              echo "::error::$TAG is already released from another commit; delete that release first (gh release delete $TAG)"
+              exit 1
+            fi
+            echo "::notice::$TAG is already released; keeping its files"
+          else
+            # A tag moved during this run no longer names this build; the new commit's own run publishes it.
+            at=$(gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha)
+            if [ "$at" != "$GITHUB_SHA" ]; then
+              echo "::error::$TAG moved to $at after this run started"
+              exit 1
+            fi
+            # On a re-run, a draft is what an interrupted gh release create leaves (draft, upload, publish).
+            # On a first run it may be a published release whose tag was deleted: never overwrite a release.
+            if [ "$state" = true ]; then
+              if [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then
+                echo "::error::$TAG has a draft release; check it, then gh release delete $TAG"
+                exit 1
+              fi
+              gh release delete "$TAG" --yes
+            fi
+            flags=(--latest)
+            if [ "$PRERELEASE" = true ]; then flags=(--prerelease --latest=false); fi
+            gh release create "$TAG" "dist/instapost-$LABEL.zip" "dist/instapost-$LABEL.zip.sha256" \
+              --verify-tag --title "instapost $LABEL" --notes-file dist/notes.md "${flags[@]}"
+          fi
+          # A candidate does not touch the page while a stable release is up.
+          site=true
+          stable=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[].tagName')
+          if [ "$PRERELEASE" = true ] && [ -n "$stable" ]; then site=false; fi
+          echo "site=$site" >> "$GITHUB_OUTPUT"
+
+  # In this same run: a release made with GITHUB_TOKEN triggers no other workflow, and a local reusable workflow
+  # comes from the same commit as its caller, so it works before site.yml is on main.
+  site:
+    name: Page
+    needs: publish
+    if: needs.publish.outputs.site == 'true'
+    permissions: # what site.yml's job needs; a called workflow can't have more than this
+      contents: read
+      attestations: read # gh attestation verify
+      pages: write # deploy-pages
+      id-token: write # deploy-pages proves it is this run
+    uses: ./.github/workflows/site.yml

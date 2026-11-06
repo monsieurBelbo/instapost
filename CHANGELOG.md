@@ -4,13 +4,21 @@ All notable changes to instapost are listed here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
-Version 0.2.0 (not released).
+Repost a photo post, or a story that mentions you, as a picture in your story. Discard story clears the story so you can start again.
+
+<!-- es: Añade a tu historia, como imagen, una publicación con foto o una historia que te menciona. Descartar historia quita la historia para que empieces de nuevo. -->
 
 ### Added
 
-- Repost to story: Share → **Add to story** on a photo post (feed, modal, permalink), and **Add to your story** on a story that mentions you (the DM preview, the story viewer). The post is drawn as a card over a generated background with the author's @handle, and posted like any story. The composer loads the photo from Instagram's image server once you allow it (optional host permission). Videos come later. Settings → On Instagram turns it off (docs/repost.md, strategy AM54–AM59).
+- Repost to story: Share → **Add to story** on a photo post (feed, modal, permalink), and **Add to your story** on a story that mentions you (the DM preview, the story viewer). The post is drawn as a card over a generated background with the author's `@handle`, and posted like any story. The composer loads the photo from Instagram's image server once you allow it (optional host permission). Settings → On Instagram turns it off.
 - The repost is a photo: people can't tap through to the post, and the author is not notified (Instagram on the web can't mention people in stories). The composer says so.
 - **Discard story** in the composer's ⋯ menu: after an Instagram-style "Discard this story?" it clears the story (and a queued post) so you can start again. The discarded story is no longer offered as Continue draft.
+
+### Fixed
+
+- The **New story** row no longer cuts its label short ("Nueva histo…") to keep room for the shortcut, which takes up space only on hover or focus.
+- The repost note no longer overlaps **Reset**.
+- The zip carries instapost's own licence, and its third-party notice now covers all the bundled JavaScript: Preact, `@preact/signals`, idb and WXT's browser helpers.
 
 ## [0.1.1] - 2026-10-15
 
@@ -21,7 +29,7 @@ Post stories from inside Instagram's own desktop page, without leaving the tab.
 - **New story** in Instagram's left sidebar on desktop instagram.com (a tile when the sidebar is collapsed, a corner button when the page has no sidebar). The toolbar icon and ⌥⇧S open it too. Settings → On Instagram can hide it.
 - **Composer dialog** over the Instagram page, shaped like Instagram's Create dialog: drop, paste (⌘V) or choose (⌘O) a photo; drag, zoom, rotate, Fill or Fit; text; guides; recent photos and drafts. **Hide** (Esc) tucks it into a sidebar chip that shows progress and the result.
 - **One-click posting in the same tab.** Post story (⌘↵) runs Instagram's mobile site in a phone-sized frame inside the page (shown small, large or hidden). instapost taps +, Story and Share there, and says "Posted" only when Instagram's own publish request succeeds.
-- **HEIC/HEIF photos** from an iPhone, converted locally on your Mac.
+- **HEIC/HEIF photos**, converted locally on your computer.
 - **Packaged builds for sharing**: a zip with install steps (INSTALL.txt) and build details (BUILD.txt), and an optional sync into a shared folder.
 
 ### Changed

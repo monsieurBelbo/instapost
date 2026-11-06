@@ -85,7 +85,7 @@ describe('RL-20 / RS-10 INSTALL.txt', () => {
   const text = installText('instapost', '0.1.1 (20261016-1200)', '155');
 
   it('RL-20: names the browser version the manifest requires and where to update', () => {
-    expect(text).toContain('Needs Chrome or Arc 155 or later');
+    expect(text).toContain('Needs Chrome 155 or later, or Arc on Chromium 155 or later');
     expect(text).toContain('chrome://settings/help');
     expect(text).toContain('Check for Updates');
     // The number comes from the manifest (wxt.config.ts minimum_chrome_version), so the two cannot drift.

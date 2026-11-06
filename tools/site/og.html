@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>instapost sharing image</title><style>
+@font-face{font-family:"Instrument Sans";src:url("../../public/fonts/InstrumentSans-Variable.woff2") format("woff2");font-weight:400 700;font-stretch:75% 100%}
+*{box-sizing:border-box;margin:0}
+html,body{width:1200px;height:630px;overflow:hidden;background:#efefef}
+.c{position:absolute;left:28px;top:28px;right:92px;bottom:28px;border-radius:96px;background:#0b7a6c;-webkit-mask:radial-gradient(circle 150px at 1000px 92px,transparent 99.6%,#000 100%);mask:radial-gradient(circle 150px at 1000px 92px,transparent 99.6%,#000 100%)}
+.d{position:absolute;left:915px;top:7px;width:226px;height:226px;border-radius:50%;background:#0b7a6c}
+.t{position:absolute;inset:0;padding:68px 92px 64px;color:#fff;font-family:"Instrument Sans",sans-serif;display:flex;flex-direction:column}
+.b{display:flex;align-items:center;gap:12px;font-size:32px;font-weight:600;letter-spacing:-.01em;line-height:1}
+.b svg{height:46px;width:auto;fill:none;overflow:visible}.m{stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.r{fill:#0b7a6c}.dd{fill:#fff}
+h1{margin:auto 0 0 -.03em;font-size:104px;font-weight:600;font-stretch:92%;line-height:.98;letter-spacing:-.035em}
+h1 span{display:block}
+p{margin-top:22px;font-size:30px;font-weight:500;letter-spacing:-.01em}
+</style></head><body><div class="c"></div><div class="d"></div><div class="t">
+<div class="b"><svg viewBox="4 0.6 16.6 21.9"><title>instapost</title><g class="m"><rect x="5.25" y="2.75" width="13.5" height="18.5" rx="3.75"/><path d="M12 16V9.2M9.2 11.8 12 9l2.8 2.8"/></g><circle cx="18.4" cy="4.6" r="4" class="r"/><circle cx="18.4" cy="4.6" r="3" class="dd"/></svg>instapost</div>
+<h1 id="h">instapost</h1><p id="s"></p></div>
+<script>
+const es=location.hash==='#es';
+document.getElementById('h').innerHTML=(es?['Publica historias de','Instagram desde','el escritorio.']:['Post Instagram','stories from','your computer.']).map(l=>`<span>${l}</span>`).join('');
+document.getElementById('s').textContent=es?'Una extensión de navegador gratis para Chrome y Arc.':'A free browser extension for Chrome and Arc.';
+</script></body></html>
