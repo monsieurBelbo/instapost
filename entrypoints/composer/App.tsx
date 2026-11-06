@@ -130,7 +130,7 @@ function setupResults(): void {
       // FD9: zero interaction after Post: it closes itself after 4 s (only if it is open to see it).
       if (mode.value === 'open' && !closing.value) autoClose.value = Date.now();
     }
-    // "Stories that are not posted are always saved there", and posted ones with Keep copies; never a repost
+    // Stories that are not posted, and posted ones with Keep copies; never a repost. Only here, while this page is open.
     // (AM59: Save copy stays the owner's choice).
     if (autoCopy(rec, kind, keepCopiesOn())) void saveCopy(rec.runId, true);
     announce(currentResult()?.rv.title ?? '');

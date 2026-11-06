@@ -29,6 +29,35 @@ function mount(state: 'loading' | 'permission'): HTMLElement {
 
 const rect = (root: Element, sel: string): DOMRect => (root.querySelector(sel) as Element).getBoundingClientRect();
 
+describe('the repost rail’s note sits under Reset (PostTab.tsx)', () => {
+  function rail(markup: string): HTMLElement {
+    const panel = document.createElement('div');
+    panel.style.width = '280px';
+    panel.innerHTML = markup;
+    document.body.append(panel);
+    return panel;
+  }
+  const RESET = '<button type="button" class="tlink">Reset</button>';
+  const NOTE = '<p class="hint-line" id="note">Posted as a photo: people can’t tap through to the post.</p>';
+
+  it('the note does not overlap the link above it', () => {
+    const panel = rail(`${RESET}${NOTE}`);
+    expect(rect(panel, '#note').top).toBeGreaterThanOrEqual(rect(panel, '.tlink').bottom);
+    expect(getComputedStyle(panel.querySelector('#note') as Element).marginTop).toBe('12px');
+  });
+
+  it('with the low-resolution line, both follow in order, apart', () => {
+    const panel = rail(`${RESET}<p class="hint-line" id="low">Low resolution.</p>${NOTE}`);
+    expect(rect(panel, '#low').top).toBeGreaterThanOrEqual(rect(panel, '.tlink').bottom);
+    expect(rect(panel, '#note').top).toBeGreaterThanOrEqual(rect(panel, '#low').bottom);
+  });
+
+  it('a hint under a control keeps its tight margin', () => {
+    const panel = rail('<div class="field">Size</div><p class="hint-line" id="note">Hint.</p>');
+    expect(getComputedStyle(panel.querySelector('#note') as Element).marginTop).toBe('-8px');
+  });
+});
+
 describe('RV-3 the intake is laid out', () => {
   for (const theme of ['light', 'dark'] as const) {
     it(`${theme}: centred card, ✕ in the corner, the avatar circle, a visible spinner`, () => {

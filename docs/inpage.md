@@ -1349,7 +1349,7 @@ The in-page lane worked live in Arc on the secondary account (2026-10-14/15), an
 - **RL-5** The live toolbar icon is the FE9 mark (card, arrow, jade dot) on a dark tile (scripts/gen-icons.ts, tools/icons/); dev and mock keep their stripes. FR12 done.
 - **RL-6** FX7: Instagram's login wall (a password field, no account link, no nav) gets no entry, and the page reports itself logged out (the Post card says to log in).
 - **RL-7** The Spanish chip lines are shortened to fit (a browser test measures every chip text in both languages at 220 and 240 px).
-- **RL-8** ACCOUNT_UNCONFIRMED's text follows the decision: another account, an unreadable one (turn off "Only post as" to post anyway), or none known yet (run the setup test).
+- **RL-8** ACCOUNT_UNCONFIRMED's text follows the decision: another account, an unreadable one (turn off "Only post as" to post anyway), or none known yet (Settings, Check again).
 - **RL-9** Right-to-left Instagram: the nav at the right edge is found; the corner, the fallback chip, the tooltip and the coach mirror.
 - **RL-10** The shortcut shown (entry, tooltip, coach, keyboard sheet) is the one the browser assigned (`chrome.commands`), none when unset; the composer's own keys read `Ctrl+…` off macOS. INSTALL.txt says where to set it.
 - **RL-11** README's test paragraph matches the ported spec.

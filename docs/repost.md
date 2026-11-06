@@ -15,7 +15,7 @@
   - Injecting them is Tier 3 (research.md §5.9). So it is banned. (OD21 chose it as App-style repost, strategy AM60; the build declined it: not implemented.)
   - A repost is therefore an ordinary 1080×1920 photo story. instapost renders it locally: the post's picture as a card over a generated background, with the author's credit drawn into the image.
   - It is posted through the existing in-page lane, unchanged.
-  - The story is **not tappable**, the author is **not notified**, and there is no mention sticker. The composer says so, and how to notify them: Send to phone…, then a mention in the Instagram app (RP-29).
+  - The story is **not tappable**, the author is **not notified**, and there is no mention sticker. The composer says so (RP-29).
 - **RP-2. The look follows the app.**
   - The post appears as a rounded card with a shadow, over a two-colour gradient taken from the photo.
   - Clicking the card cycles its style.

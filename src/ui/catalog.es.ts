@@ -914,11 +914,11 @@ export const ES: Catalog = {
     'Instagram respondió que la subida falló, así que tu historia no se publicó. instapost nunca reintenta por su cuenta.',
   'inpage.fail.ACCOUNT_UNCONFIRMED.title': 'Publicación cancelada',
   'inpage.fail.ACCOUNT_UNCONFIRMED.body':
-    'Instagram tiene la sesión iniciada con una cuenta distinta de la que usa instapost para publicar, así que se detuvo antes de tocar nada.',
+    'Instagram tiene la sesión iniciada con una cuenta distinta de la que usa instapost para publicar, así que se detuvo antes de tocar nada. Para publicar con esta cuenta, abre Ajustes, haz clic en Olvidar esta cuenta y luego en Volver a comprobar.',
   'inpage.fail.ACCOUNT_UNCONFIRMED.unreadable':
     'instapost no pudo leer qué cuenta tiene la sesión iniciada en Instagram, así que se detuvo antes de tocar nada. Para publicar de todos modos, desactiva “Publicar solo como” en Ajustes.',
   'inpage.fail.ACCOUNT_UNCONFIRMED.first':
-    'instapost todavía no sabe en qué cuenta publica, así que se detuvo antes de tocar nada. Haz primero la prueba inicial.',
+    'instapost todavía no sabe en qué cuenta publica, así que se detuvo antes de tocar nada. Abre Ajustes y haz clic en Volver a comprobar.',
   'inpage.fail.FRAME_REFUSED.title': 'Instagram no se abrió dentro de la página',
   'inpage.fail.FRAME_REFUSED.body': 'El sitio móvil de Instagram se negó a cargarse aquí.',
   'inpage.fail.PAGE_LEFT.title': 'Detenido: saliste de la página de Instagram',
@@ -966,10 +966,10 @@ export const ES: Catalog = {
     'Esta versión de prueba solo funciona con el Instagram falso, y esta página es otra cosa.',
   'inpage.fail.SW_INTERCEPTS.title': 'Instagram cambió cómo funciona su página',
   'inpage.fail.SW_INTERCEPTS.body':
-    'El proceso en segundo plano de Instagram empezó a gestionar las solicitudes de la propia página, así que instapost se detuvo antes de tocar nada. Es un cambio de Instagram y volver a intentarlo no servirá: usa Enviar al teléfono… para esta historia y envía los Detalles de abajo a quien te dio instapost.',
+    'El proceso en segundo plano de Instagram empezó a gestionar las solicitudes de la propia página, así que instapost se detuvo antes de tocar nada. Es un cambio de Instagram y volver a intentarlo no servirá: usa Enviar al teléfono… para esta historia e infórmalo en github.com/monsieurBelbo/instapost/issues.',
   'inpage.fail.ACCEPT_DRIFT.title': 'Instagram cambió la subida de historias',
   'inpage.fail.ACCEPT_DRIFT.body':
-    'Ya no acepta los tipos de imagen que instapost espera, así que instapost se detuvo en lugar de adivinar. Es un cambio de Instagram y volver a intentarlo no servirá: usa Enviar al teléfono… para esta historia y envía los Detalles de abajo a quien te dio instapost.',
+    'Ya no acepta los tipos de imagen que instapost espera, así que instapost se detuvo en lugar de adivinar. Es un cambio de Instagram y volver a intentarlo no servirá: usa Enviar al teléfono… para esta historia e infórmalo en github.com/monsieurBelbo/instapost/issues.',
   'inpage.fail.generic.title': 'Algo salió mal',
   'inpage.fail.generic.body': 'instapost se detuvo. Los detalles de abajo dicen dónde.',
 
@@ -1038,7 +1038,8 @@ export const ES: Catalog = {
   'inpage.settings.forget': 'Olvidar esta cuenta',
   'inpage.settings.copies': 'Copias',
   'inpage.settings.keepCopies': 'Guardar también cada historia publicada en Descargas/instapost',
-  'inpage.settings.keepCopiesHelp': 'Las historias que no se publican siempre se guardan ahí.',
+  'inpage.settings.keepCopiesHelp':
+    'Mientras la página siga abierta, las historias que no se publican se guardan ahí, salvo las de Añadir a tu historia.',
   'inpage.settings.pace': 'Ritmo y seguridad',
   'inpage.settings.paceBody':
     'Como mucho 1 publicación por minuto, 6 por hora y 15 al día. Las pruebas y comprobaciones cuentan para el espaciado. Hoy: {today} publicaciones · esta hora: {hour}.',

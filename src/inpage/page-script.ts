@@ -126,9 +126,10 @@ svg{display:block;flex:none}
 .entry .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .entry .lbl small{font-size:14px;color:var(--ig-text-2);font-variant-numeric:tabular-nums;margin-left:6px}
 kbd{font:500 11px/16px var(--font);padding:0 5px;border-radius:4px;background:color-mix(in srgb,currentColor 12%,transparent);letter-spacing:.02em;white-space:nowrap}
-.entry .key{opacity:0;transition:opacity var(--d1)}
-.entry:is(:hover,:focus-visible) .key{opacity:1}
-.entry:not([data-state=idle]) .key{display:none}
+.entry[data-state=idle] .lbl{flex:1 0 auto}
+.entry .key{min-width:0;overflow:hidden;text-overflow:ellipsis;transition:opacity var(--d1)}
+@starting-style{.entry .key{opacity:0}}
+.entry:not(:hover,:focus-visible) .key,.entry:not([data-state=idle]) .key{display:none}
 .entry.tile{width:48px!important;justify-content:center}
 .entry.tile .lbl,.entry.tile .key,.entry.corner .lbl,.entry.corner .key{display:none}
 .entry[aria-expanded=true] .lbl{font-weight:700}

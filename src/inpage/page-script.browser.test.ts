@@ -4,6 +4,7 @@
  * shaped like Instagram's wide desktop navigation, with a fake runtime (no extension, no network).
  * RL-10: the shortcut is the one the background read from the browser (none shown when there is none).
  * RL-6 (FX7): Instagram's login wall gets no entry, and the page reports itself logged out.
+ * The idle entry's shortcut takes no room until hover or focus, and then gives way, so it never cuts the label.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { page } from 'vitest/browser';
@@ -14,14 +15,14 @@ const SVG = '<svg viewBox="0 0 24 24" width="24" height="24"><path d="M2 2h20v20
 const AVATAR = '<img alt="" width="24" height="24" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">';
 
 /** Instagram's wide left navigation (structure only, as anchor.browser.test.ts builds it). */
-function wideNav(): void {
+function wideNav(width = 244): void {
   const el = document.createElement('nav');
   Object.assign(el.style, {
     position: 'fixed',
     left: '0',
     top: '0',
     bottom: '0',
-    width: '244px',
+    width: `${width}px`,
     display: 'flex',
     flexDirection: 'column',
   });
@@ -178,6 +179,45 @@ describe('RL-10 the shortcut is the browser’s, or none', () => {
     expect(entry.querySelector('.key')?.textContent).toBe('Ctrl+Shift+Y');
     expect(root().querySelector('.coach-b')?.textContent).toContain('Shortcut Ctrl+Shift+Y');
   });
+});
+
+describe('the shortcut never cuts the idle entry’s label', () => {
+  for (const [lang, label, width, shortcut] of [
+    // 200 px: past the tile (under 180), tight enough that the key would cut "Nueva historia". 220 px: Instagram's row.
+    ['en', 'New story', 200, '⌥⇧S'],
+    ['es', 'Nueva historia', 200, '⌥⇧S'],
+    ['es', 'Nueva historia', 220, '⌥⇧S'],
+    ['es', 'Nueva historia', 244, '⌥⇧S'],
+    ['en', 'New story', 220, 'Ctrl+Shift+S'],
+    ['es', 'Nueva historia', 244, 'Ctrl+Shift+S'],
+  ] as const) {
+    it(`${lang}, ${width} px, ${shortcut}: the key takes no room until focus, and then gives way`, async () => {
+      wideNav(width);
+      const { root } = start(stateIn(lang, shortcut));
+      await vi.waitFor(
+        () => {
+          const placed = root().querySelector('.entry');
+          expect(placed?.classList.contains('off')).toBe(false);
+          expect(placed?.querySelector('.lbl')?.textContent).toBe(label);
+          expect(Math.round(placed?.getBoundingClientRect().width ?? 0)).toBe(width);
+        },
+        { timeout: 4000, interval: 50 },
+      );
+      const entry = root().querySelector('.entry') as HTMLElement;
+      const key = entry.querySelector('.key') as HTMLElement;
+      const lbl = entry.querySelector('.lbl') as HTMLElement;
+      expect(entry.dataset.state).toBe('idle');
+      expect(key.textContent).toBe(shortcut);
+      expect(getComputedStyle(key).display).toBe('none');
+      expect(lbl.scrollWidth).toBeLessThanOrEqual(lbl.clientWidth);
+
+      entry.focus();
+      expect(entry.matches(':focus-visible')).toBe(true);
+      expect(getComputedStyle(key).display).not.toBe('none');
+      expect(lbl.scrollWidth).toBeLessThanOrEqual(lbl.clientWidth);
+      expect(key.getBoundingClientRect().right).toBeLessThanOrEqual(entry.getBoundingClientRect().right);
+    });
+  }
 });
 
 describe('RL-6 Instagram’s login wall (FX7)', () => {

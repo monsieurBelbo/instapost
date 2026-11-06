@@ -188,10 +188,11 @@ describe('RS-2 / RL-1 / RS-3 / RL-8 results that must not invite a second post',
         opts,
       )?.body ?? '';
     expect(body('prompt-mismatch')).toContain('logged in as a different account');
+    expect(body('prompt-mismatch')).toContain('click Forget this account, then click Check again');
     expect(body('prompt-unreadable')).toContain('couldn’t read which account is logged in');
     expect(body('prompt-unreadable')).toContain('turn off “Only post as” in Settings');
     expect(body('prompt-unreadable')).not.toContain('different account');
-    expect(body('prompt-first')).toContain('Run the setup test first');
+    expect(body('prompt-first')).toContain('click Check again');
   });
 });
 
@@ -223,6 +224,9 @@ describe('RL-19 Instagram changed its page: specific copy, Send to phone, no Try
         const generic = resultView(rec({ outcome: 'stopped', code: 'SOMETHING_NEW' }), opts);
         expect(v?.title).not.toBe(generic?.title);
         expect(v?.body).toContain(l === 'en' ? 'Instagram’s side' : 'cambio de Instagram');
+        // A public download has no one who gave it to you.
+        expect(v?.body).toContain('github.com/monsieurBelbo/instapost/issues');
+        expect(v?.body).not.toMatch(/whoever gave you|quien te dio/);
         expect(v?.body).toMatch(l === 'en' ? /Nothing was posted\.$/ : /No se publicó nada\.$/);
       }
     });

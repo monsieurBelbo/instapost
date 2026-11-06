@@ -63,6 +63,8 @@ if (webExtArgs) assertSealed(webExtArgs);
 
 export default defineConfig({
   manifestVersion: 3,
+  // No auto-imports: a bare `storage` would bundle code that no licence check sees (tools/bundle/licenses.ts).
+  imports: false,
   // WXT sets NODE_ENV to the mode name, so Vite would compile JSX with the dev runtime (and
   // absolute source paths) into mock and live artifacts. Builds use the production JSX runtime.
   vite: (env) => ({ oxc: { jsx: { development: env.command === 'serve' } } }),
@@ -142,7 +144,8 @@ export default defineConfig({
         if (dest.startsWith('icons/') && !dest.startsWith(`icons/${icon}/`)) files.splice(i, 1);
       }
       if (guarded) files.push({ relativeDest: STATIC_RULESET_PATH, contents: JSON.stringify(blockRuleset(), null, 2) });
-      // RL-3: the HEIC worker's libheif (LGPL-3.0) ships with its licence texts and a notice (not web-accessible).
+      // RL-3: the HEIC worker's libheif (LGPL-3.0) ships with its licence texts and a notice, which also carries the
+      // licences of the JavaScript instapost bundles (not web-accessible).
       files.push(
         { relativeDest: LICENSE_FILES.libheif, contents: readFileSync(LIBHEIF_LICENSE_SOURCE, 'utf8') },
         { relativeDest: LICENSE_FILES.notice, contents: thirdPartyNotice() },

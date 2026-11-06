@@ -22,6 +22,7 @@ export default defineConfig({
         test: {
           name: 'unit',
           environment: 'node',
+          testTimeout: 30_000, // A hosted runner is about 2x slower than a dev Mac, and a gate has no retry.
           setupFiles: ['tests/setup/unit.ts'],
           include: ['src/**/*.test.ts', 'tools/**/*.test.ts'],
           exclude: ['**/*.browser.test.ts'],

@@ -53,7 +53,8 @@
  *   background's rules that may carry XMLHttpRequest/fetch (libheif's Emscripten glue; the worker fetches only
  *   its packaged wasm); Meta hosts stay banned there.
  * - T1 (RL-3): a build that ships libheif's wasm ships `licenses/libheif-LICENSE.txt` (LGPL-3.0 and GPL-3.0)
- *   and `licenses/THIRD-PARTY.txt` (libheif, libde265, their source); tools/bundle/licenses.ts.
+ *   and `licenses/THIRD-PARTY.txt` (libheif, libde265, their source, the licence of every bundled package);
+ *   tools/bundle/licenses.ts.
  * - T3: the in-page driver's marker exactly once in background.js and nowhere else; the Developer toggles'
  *   storage key (`__e2eInpageToggles`) is an `__e2e…` name, so the live scan for E2E hooks proves it is gone.
  *
@@ -368,7 +369,8 @@ function t1(m: Mode): void {
   if (workers.length !== 1 || wasm.length !== 1) {
     problems.push(`expected one HEIC worker and one libheif wasm, found [${workers}] [${wasm}]`);
   }
-  // RL-3: libheif (LGPL-3.0) ships with its licence texts and a notice naming it and its source.
+  // RL-3: libheif (LGPL-3.0) ships with its licence texts and a notice naming it and its source, plus the bundled
+  // packages' licences.
   for (const p of licenseProblems(files, (f) => readFileSync(join(dir, f), 'utf8'))) problems.push(p);
   const foreignIcons = files.filter((f) => f.startsWith('icons/') && !f.startsWith(`icons/${MODE_INFO[m].icon}/`));
   if (foreignIcons.length) problems.push(`other modes' icons shipped: ${foreignIcons.join(', ')}`);

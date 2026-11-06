@@ -893,11 +893,11 @@ export const EN = {
     'Instagram answered that the upload failed, so your story wasn’t posted. instapost never retries on its own.',
   'inpage.fail.ACCOUNT_UNCONFIRMED.title': 'Posting cancelled',
   'inpage.fail.ACCOUNT_UNCONFIRMED.body':
-    'Instagram is logged in as a different account than the one instapost posts to, so it stopped before tapping anything.',
+    'Instagram is logged in as a different account than the one instapost posts to, so it stopped before tapping anything. To post as this account, open Settings, click Forget this account, then click Check again.',
   'inpage.fail.ACCOUNT_UNCONFIRMED.unreadable':
     'instapost couldn’t read which account is logged in to Instagram, so it stopped before tapping anything. To post anyway, turn off “Only post as” in Settings.',
   'inpage.fail.ACCOUNT_UNCONFIRMED.first':
-    'instapost doesn’t know which account it posts to yet, so it stopped before tapping anything. Run the setup test first.',
+    'instapost doesn’t know which account it posts to yet, so it stopped before tapping anything. Open Settings and click Check again.',
   'inpage.fail.FRAME_REFUSED.title': 'Instagram didn’t open inside the page',
   'inpage.fail.FRAME_REFUSED.body': 'Instagram’s mobile site refused to load here.',
   'inpage.fail.PAGE_LEFT.title': 'Stopped — you left the Instagram page',
@@ -944,10 +944,10 @@ export const EN = {
     'This test build only works with the fake Instagram, and this page is something else.',
   'inpage.fail.SW_INTERCEPTS.title': 'Instagram changed how its page works',
   'inpage.fail.SW_INTERCEPTS.body':
-    'Instagram’s background worker started handling the page’s own requests, so instapost stopped before tapping anything. This is a change on Instagram’s side, so trying again won’t help: use Send to phone… for this story, and send the Details below to whoever gave you instapost.',
+    'Instagram’s background worker started handling the page’s own requests, so instapost stopped before tapping anything. This is a change on Instagram’s side, so trying again won’t help: use Send to phone… for this story, and report it at github.com/monsieurBelbo/instapost/issues.',
   'inpage.fail.ACCEPT_DRIFT.title': 'Instagram changed its story upload',
   'inpage.fail.ACCEPT_DRIFT.body':
-    'It no longer takes the image types instapost expects, so instapost stopped instead of guessing. This is a change on Instagram’s side, so trying again won’t help: use Send to phone… for this story, and send the Details below to whoever gave you instapost.',
+    'It no longer takes the image types instapost expects, so instapost stopped instead of guessing. This is a change on Instagram’s side, so trying again won’t help: use Send to phone… for this story, and report it at github.com/monsieurBelbo/instapost/issues.',
   'inpage.fail.generic.title': 'Something went wrong',
   'inpage.fail.generic.body': 'instapost stopped. The details below say where.',
 
@@ -1016,7 +1016,8 @@ export const EN = {
   'inpage.settings.forget': 'Forget this account',
   'inpage.settings.copies': 'Copies',
   'inpage.settings.keepCopies': 'Also keep every posted story in Downloads/instapost',
-  'inpage.settings.keepCopiesHelp': 'Stories that are not posted are always saved there.',
+  'inpage.settings.keepCopiesHelp':
+    'While the page stays open, stories that aren’t posted are saved there, except reposts.',
   'inpage.settings.pace': 'Pace and safety',
   'inpage.settings.paceBody':
     'At most 1 post a minute, 6 an hour and 15 a day. Tests and checks count toward the spacing. Today: {today} posts · this hour: {hour}.',
